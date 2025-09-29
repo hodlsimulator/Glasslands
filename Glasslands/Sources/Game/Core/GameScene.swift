@@ -7,15 +7,15 @@
 
 import SpriteKit
 import GameplayKit
+import UIKit
 
 // MARK: - Physics Categories
 fileprivate struct PC {
-    static let player: UInt32   = 0x1 << 0
-    static let beacon: UInt32   = 0x1 << 1
+    static let player: UInt32 = 0x1 << 0
+    static let beacon: UInt32 = 0x1 << 1
 }
 
 final class GameScene: SKScene, SKPhysicsContactDelegate {
-
     // MARK: - Public
     let recipe: BiomeRecipe
     var onScore: ((Int) -> Void)?
@@ -24,9 +24,7 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
     // MARK: - World config
     let tileSize: CGFloat = 40
     let chunkTiles = IVec2(16,16)
-    private lazy var world = WorldContext(recipe: recipe,
-                                          tileSize: tileSize,
-                                          chunkTiles: chunkTiles)
+    private lazy var world = WorldContext(recipe: recipe, tileSize: tileSize, chunkTiles: chunkTiles)
 
     // MARK: - Nodes
     private let worldNode = SKNode()
@@ -34,10 +32,10 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
     private let cameraRig = CameraRig()
 
     // Systems
-    private lazy var streamer = ChunkStreamer(context: world, parent: worldNode)
+    private lazy var streamer   = ChunkStreamer(context: world, parent: worldNode)
     private lazy var classifier = TileClassifier(context: world)
-    private lazy var scoring = ScoringSystem()
-    private lazy var beacons = BeaconStructures(context: world)
+    private lazy var scoring    = ScoringSystem()
+    private lazy var beacons    = BeaconStructures(context: world)
 
     // HUD label (for quick debug; main HUD is SwiftUI)
     private let fpsLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
@@ -52,7 +50,6 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         self.onScore = onScore
         super.init(size: size)
     }
-
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     // MARK: - Lifecycle
@@ -96,7 +93,9 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
 
     // MARK: - Updates
     override func update(_ currentTime: TimeInterval) {
-        let dt = CGFloat(self.view?.preferredFramesPerSecond == 0 ? 1.0/60.0 : 1.0/CGFloat(self.view!.preferredFramesPerSecond))
+        let fps = self.view?.preferredFramesPerSecond ?? 60
+        let dt = CGFloat(1.0 / Double(max(1, fps)))
+
         // Input → velocity
         let v = touchInput.desiredVelocity(maxSpeed: 160)
         let next = player.position + v * dt
@@ -108,8 +107,11 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
             // slide a bit on X or Y
             let nx = CGPoint(x: next.x, y: player.position.y)
             let ny = CGPoint(x: player.position.x, y: next.y)
-            if CollisionSystem.canOccupy(point: nx, classifier: classifier) { player.position = nx }
-            else if CollisionSystem.canOccupy(point: ny, classifier: classifier) { player.position = ny }
+            if CollisionSystem.canOccupy(point: nx, classifier: classifier) {
+                player.position = nx
+            } else if CollisionSystem.canOccupy(point: ny, classifier: classifier) {
+                player.position = ny
+            }
         }
 
         // Stream chunks
@@ -122,9 +124,12 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
 
         // Debug
         if let view = view {
-            fpsLabel.text = String(format: "FPS %.0f  Chunks %d  Score %d",
-                                   view.preferredFramesPerSecond == 0 ? 60 : Double(view.preferredFramesPerSecond),
-                                   streamer.loadedChunkCount, score)
+            fpsLabel.text = String(
+                format: "FPS %.0f Chunks %d Score %d",
+                view.preferredFramesPerSecond == 0 ? 60 : Double(view.preferredFramesPerSecond),
+                streamer.loadedChunkCount,
+                score
+            )
         }
     }
 
@@ -144,21 +149,17 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
     }
 
     // MARK: - Input
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchInput.touchesBegan(touches, in: self)
-    }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchInput.touchesMoved(touches, in: self)
-    }
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchInput.touchesEnded(touches, in: self)
-    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesBegan(touches, in: self) }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesMoved(touches, in: self) }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesEnded(touches, in: self) }
 
     // MARK: - Snapshot
     func captureSnapshot() -> UIImage? {
-        guard let view = self.view else { return nil }
-        let tex = view.texture(from: worldNode)
-        return tex?.cgImage().flatMap { UIImage(cgImage: $0) }
+        guard let view = self.view,
+              let tex  = view.texture(from: worldNode),
+              let cg   = tex.cgImage()
+        else { return nil }
+        return UIImage(cgImage: cg)
     }
 }
 
@@ -176,25 +177,13 @@ struct WorldContext {
         self.noise = NoiseFields(recipe: recipe)
     }
 
-    func worldToTile(_ p: CGPoint) -> IVec2 {
-        IVec2(Int(floor(p.x / tileSize)), Int(floor(p.y / tileSize)))
-    }
-
-    func tileToWorld(_ t: IVec2) -> CGPoint {
-        CGPoint(x: CGFloat(t.x) * tileSize + tileSize/2,
-                y: CGFloat(t.y) * tileSize + tileSize/2)
-    }
-
-    func tileRect(_ t: IVec2) -> CGRect {
-        CGRect(x: CGFloat(t.x) * tileSize,
-               y: CGFloat(t.y) * tileSize,
-               width: tileSize, height: tileSize)
-    }
+    func worldToTile(_ p: CGPoint) -> IVec2 { IVec2(Int(floor(p.x / tileSize)), Int(floor(p.y / tileSize))) }
+    func tileToWorld(_ t: IVec2) -> CGPoint { CGPoint(x: CGFloat(t.x) * tileSize + tileSize/2, y: CGFloat(t.y) * tileSize + tileSize/2) }
+    func tileRect(_ t: IVec2) -> CGRect { CGRect(x: CGFloat(t.x) * tileSize, y: CGFloat(t.y) * tileSize, width: tileSize, height: tileSize) }
 }
 
 struct IVec2: Hashable, Equatable {
-    let x: Int
-    let y: Int
+    let x: Int; let y: Int
     init(_ x: Int, _ y: Int) { self.x = x; self.y = y }
     static func + (l: IVec2, r: IVec2) -> IVec2 { IVec2(l.x + r.x, l.y + r.y) }
     static func - (l: IVec2, r: IVec2) -> IVec2 { IVec2(l.x - r.x, l.y - r.y) }

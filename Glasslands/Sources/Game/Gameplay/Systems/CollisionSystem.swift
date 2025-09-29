@@ -9,12 +9,8 @@ import CoreGraphics
 
 enum CollisionSystem {
     static func canOccupy(point p: CGPoint, classifier: TileClassifier) -> Bool {
-        // Sample the center tile & 3x3 neighborhood for blocked tiles
-        let ctx = classifier.value(forKey: "ctx") as? WorldContext ?? {
-            // Reflective access fallback: the classifier keeps context in a private property;
-            // we add a tiny helper to expose it safely.
-            return classifierContext(classifier)
-        }()
+        // Sample the centre tile & 3×3 neighbourhood for blocked tiles
+        let ctx = classifier.context
         let tile = ctx.worldToTile(p)
         for dy in -1...1 {
             for dx in -1...1 {
@@ -24,14 +20,4 @@ enum CollisionSystem {
         }
         return true
     }
-}
-
-// Small helper to access context (since TileClassifier keeps it private)
-fileprivate func classifierContext(_ classifier: TileClassifier) -> WorldContext {
-    // Unsafe but fine: reconstruct via mirror
-    let m = Mirror(reflecting: classifier)
-    for c in m.children {
-        if let ctx = c.value as? WorldContext { return ctx }
-    }
-    fatalError("WorldContext not found on TileClassifier")
 }

@@ -16,6 +16,7 @@ struct GlasslandsApp: App {
         WindowGroup {
             ContentView()
                 .task {
+                    // Authenticate Game Center on launch.
                     await gcHelper.authenticate()
                 }
         }

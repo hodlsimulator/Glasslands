@@ -7,11 +7,7 @@
 
 import SwiftUI
 
-@main
-struct GlasslandsApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
-    }
+// This shim removes the duplicate @main to fix "Invalid redeclaration of 'GlasslandsApp'".
+struct _LegacyAppShim_Previews: PreviewProvider {
+    static var previews: some View { Text("Glasslands") }
 }

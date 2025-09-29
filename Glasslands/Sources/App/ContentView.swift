@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SpriteKit
+import Combine
 
 final class GameViewModel: ObservableObject {
     @Published var seedCharm: String = SaveStore.shared.lastSeedCharm ?? "RAIN_FOX_PEAKS"
@@ -20,11 +21,9 @@ final class GameViewModel: ObservableObject {
         let recipe = biomeService.recipe(for: seedCharm)
         SaveStore.shared.lastSeedCharm = seedCharm
 
-        let scene = GameScene(size: size,
-                              recipe: recipe,
-                              onScore: { [weak self] newScore in
-                                  DispatchQueue.main.async { self?.score = newScore }
-                              })
+        let scene = GameScene(size: size, recipe: recipe, onScore: { [weak self] newScore in
+            DispatchQueue.main.async { self?.score = newScore }
+        })
         scene.scaleMode = .resizeFill
         scene.isPaused = isPaused
         return scene
@@ -49,30 +48,32 @@ struct ContentView: View {
                     Color.black.ignoresSafeArea()
                 }
 
-                HUDOverlay(seedCharm: $vm.seedCharm,
-                           score: vm.score,
-                           isPaused: $vm.isPaused,
-                           onApplySeed: {
-                               rebuildScene(for: geo.size)
-                           },
-                           onSavePostcard: {
-                               guard let gs = scene as? GameScene,
-                                     let image = gs.captureSnapshot() else { return }
-                               Task {
-                                   do {
-                                       let postcard = try await vm.imageService.generatePostcard(from: image,
-                                                                                                  title: vm.seedCharm,
-                                                                                                  palette: gs.paletteUIColors)
-                                       try await PhotoSaver.saveImageToPhotos(postcard)
-                                   } catch {
-                                       print("Postcard save failed:", error)
-                                   }
-                               }
-                           },
-                           onShowLeaderboards: {
-                               GameCenterHelper.shared.presentLeaderboards()
-                           })
-                    .padding(.top, 8)
+                HUDOverlay(
+                    seedCharm: $vm.seedCharm,
+                    score: vm.score,
+                    isPaused: $vm.isPaused,
+                    onApplySeed: { rebuildScene(for: geo.size) },
+                    onSavePostcard: {
+                        guard let gs = scene as? GameScene,
+                              let image = gs.captureSnapshot() else { return }
+                        Task {
+                            do {
+                                let postcard = try await vm.imageService.generatePostcard(
+                                    from: image,
+                                    title: vm.seedCharm,
+                                    palette: gs.paletteUIColors
+                                )
+                                try await PhotoSaver.saveImageToPhotos(postcard)
+                            } catch {
+                                print("Postcard save failed:", error)
+                            }
+                        }
+                    },
+                    onShowLeaderboards: {
+                        GameCenterHelper.shared.presentLeaderboards()
+                    }
+                )
+                .padding(.top, 8)
             }
             .onAppear { rebuildScene(for: geo.size) }
             .onChange(of: vm.isPaused) { _, newValue in
