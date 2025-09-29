@@ -1,0 +1,123 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build output
+build/
+Build/
+DerivedData/
+
+# Xcode user data
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Keep essential project files
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+!*.xcworkspace/xcshareddata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# CocoaPods (not used, but safe to ignore if added later)
+Pods/
+
+# Carthage (if ever used)
+Carthage/Build/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# Code coverage
+*.xccovreport
+*.xccovarchive
+
+# Archives & symbols
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Logs & temp
+*.log
+*.orig
+*.tmp
+*.swp
+EOFcat > .gitignore << 'EOF'
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build output
+build/
+Build/
+DerivedData/
+
+# Xcode user data
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Keep essential project files
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+!*.xcworkspace/xcshareddata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# CocoaPods (not used, but safe to ignore if added later)
+Pods/
+
+# Carthage (if ever used)
+Carthage/Build/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# Code coverage
+*.xccovreport
+*.xccovarchive
+
+# Archives & symbols
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Logs & temp
+*.log
+*.orig
+*.tmp
+*.swp

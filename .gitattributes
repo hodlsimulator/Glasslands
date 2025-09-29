@@ -1,0 +1,37 @@
+* text=auto eol=lf
+
+# Xcode project files — reduce merge conflicts
+*.pbxproj merge=union
+*.xcscheme merge=union
+*.xcworkspacedata merge=union
+*.xcsettings merge=union
+
+# Treat common binaries as binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.tiff binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.mp3 binary
+*.wav binary
+*.m4a binary
+*.caf binary
+*.mp4 binary
+*.mov binary
+
+# Ensure source files stay as text with LF endings
+*.swift text eol=lf
+*.metal text eol=lf
+*.m text eol=lf
+*.mm text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.plist text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.strings text eol=lf
