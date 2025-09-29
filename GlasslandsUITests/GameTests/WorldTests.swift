@@ -8,6 +8,7 @@
 import XCTest
 @testable import Glasslands
 
+@MainActor
 final class WorldTests: XCTestCase {
     func testDeterministicTilesForSameSeed() {
         let seed = "RAIN_FOX_PEAKS"

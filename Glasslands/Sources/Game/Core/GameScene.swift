@@ -9,42 +9,34 @@ import SpriteKit
 import GameplayKit
 import UIKit
 
-// MARK: - Physics Categories
 fileprivate struct PC {
     static let player: UInt32 = 0x1 << 0
     static let beacon: UInt32 = 0x1 << 1
 }
 
 final class GameScene: SKScene, SKPhysicsContactDelegate {
-    // MARK: - Public
     let recipe: BiomeRecipe
     var onScore: ((Int) -> Void)?
     var paletteUIColors: [UIColor] { AppColours.uiColors(from: recipe.paletteHex) }
 
-    // MARK: - World config
     let tileSize: CGFloat = 40
     let chunkTiles = IVec2(16,16)
     private lazy var world = WorldContext(recipe: recipe, tileSize: tileSize, chunkTiles: chunkTiles)
 
-    // MARK: - Nodes
     private let worldNode = SKNode()
     private let player = PlayerNode(radius: 14)
     private let cameraRig = CameraRig()
 
-    // Systems
     private lazy var streamer   = ChunkStreamer(context: world, parent: worldNode)
     private lazy var classifier = TileClassifier(context: world)
     private lazy var scoring    = ScoringSystem()
     private lazy var beacons    = BeaconStructures(context: world)
 
-    // HUD label (for quick debug; main HUD is SwiftUI)
     private let fpsLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
 
-    // State
     private var touchInput = TouchInput()
     private(set) var score = 0 { didSet { onScore?(score) } }
 
-    // MARK: - Init
     init(size: CGSize, recipe: BiomeRecipe, onScore: ((Int)->Void)? = nil) {
         self.recipe = recipe
         self.onScore = onScore
@@ -52,7 +44,6 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    // MARK: - Lifecycle
     override func didMove(to view: SKView) {
         backgroundColor = .black
         physicsWorld.gravity = .zero
@@ -61,24 +52,20 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         addChild(worldNode)
         addChild(cameraRig)
 
-        // Player setup
         player.position = .zero
         player.physicsBody?.categoryBitMask = PC.player
         player.physicsBody?.contactTestBitMask = PC.beacon
         worldNode.addChild(player)
 
-        // Camera
         let cam = SKCameraNode()
         self.camera = cam
         addChild(cam)
         cameraRig.attach(camera: cam, to: player, smoothing: 0.12)
 
-        // Initial stream
         streamer.buildAround(player.position, preloadRadius: 2) { [weak self] chunk in
             self?.populateSetpieces(in: chunk)
         }
 
-        // Debug label
         fpsLabel.fontSize = 14
         fpsLabel.fontColor = .white
         fpsLabel.horizontalAlignmentMode = .right
@@ -91,20 +78,16 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         fpsLabel.position = CGPoint(x: size.width/2 - 8, y: size.height/2 - 8)
     }
 
-    // MARK: - Updates
     override func update(_ currentTime: TimeInterval) {
         let fps = self.view?.preferredFramesPerSecond ?? 60
         let dt = CGFloat(1.0 / Double(max(1, fps)))
 
-        // Input → velocity
         let v = touchInput.desiredVelocity(maxSpeed: 160)
         let next = player.position + v * dt
 
-        // Collision against blocked tiles
         if CollisionSystem.canOccupy(point: next, classifier: classifier) {
             player.position = next
         } else {
-            // slide a bit on X or Y
             let nx = CGPoint(x: next.x, y: player.position.y)
             let ny = CGPoint(x: player.position.x, y: next.y)
             if CollisionSystem.canOccupy(point: nx, classifier: classifier) {
@@ -114,15 +97,12 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
             }
         }
 
-        // Stream chunks
         streamer.updateVisible(center: player.position, marginChunks: 1) { [weak self] chunk in
             self?.populateSetpieces(in: chunk)
         }
 
-        // Camera follow
         cameraRig.update()
 
-        // Debug
         if let view = view {
             fpsLabel.text = String(
                 format: "FPS %.0f Chunks %d Score %d",
@@ -133,12 +113,10 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         }
     }
 
-    // MARK: - Setpieces
     private func populateSetpieces(in chunk: ChunkRef) {
         beacons.placeBeacons(in: chunk, into: worldNode, categoryMask: PC.beacon)
     }
 
-    // MARK: - Contacts
     func didBegin(_ contact: SKPhysicsContact) {
         let mask = contact.bodyA.categoryBitMask | contact.bodyB.categoryBitMask
         if mask == (PC.player | PC.beacon) {
@@ -148,17 +126,16 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         }
     }
 
-    // MARK: - Input
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesBegan(touches, in: self) }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesMoved(touches, in: self) }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesEnded(touches, in: self) }
 
-    // MARK: - Snapshot
+    // Snapshot: remove optional binding of CGImage (it's non-optional on iOS 26).
     func captureSnapshot() -> UIImage? {
         guard let view = self.view,
-              let tex  = view.texture(from: worldNode),
-              let cg   = tex.cgImage()
+              let tex  = view.texture(from: worldNode)
         else { return nil }
+        let cg: CGImage = tex.cgImage()
         return UIImage(cgImage: cg)
     }
 }
