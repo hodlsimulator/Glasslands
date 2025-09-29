@@ -9,27 +9,27 @@ import SpriteKit
 import GameplayKit
 import UIKit
 
-fileprivate struct PC {
+private struct PhysicsCategory {
     static let player: UInt32 = 0x1 << 0
     static let beacon: UInt32 = 0x1 << 1
 }
 
 final class GameScene: SKScene, SKPhysicsContactDelegate {
 
-    // MARK: - Public surface
+    // MARK: Public surface
 
     let recipe: BiomeRecipe
     var onScore: ((Int) -> Void)?
 
-    /// Expose UI colours for postcard generation
+    /// Palette forwarded to postcard generation
     var paletteUIColors: [UIColor] { AppColours.uiColors(from: recipe.paletteHex) }
 
-    // MARK: - World config
+    // MARK: World config
 
     let tileSize: CGFloat = 40
     let chunkTiles = IVec2(16, 16)
 
-    // MARK: - World state
+    // MARK: World state
 
     private lazy var world = WorldContext(recipe: recipe, tileSize: tileSize, chunkTiles: chunkTiles)
     private let worldNode = SKNode()
@@ -47,7 +47,7 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
     private(set) var score = 0 { didSet { onScore?(score) } }
     private var lastUpdateTime: TimeInterval = 0
 
-    // MARK: - Init
+    // MARK: Init
 
     init(size: CGSize, recipe: BiomeRecipe, onScore: ((Int) -> Void)? = nil) {
         self.recipe = recipe
@@ -55,11 +55,9 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         super.init(size: size)
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    // MARK: - Scene lifecycle
+    // MARK: Scene lifecycle
 
     override func didMove(to view: SKView) {
         backgroundColor = .black
@@ -70,19 +68,21 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         addChild(worldNode)
         addChild(cameraRig)
 
-        // Player
-        player.position = .zero
-        player.physicsBody?.categoryBitMask = PC.player
-        player.physicsBody?.contactTestBitMask = PC.beacon
+        // Player — spawn on the nearest walkable tile to the origin
+        player.position = findSpawnPosition(near: .zero)
+        if let body = player.physicsBody {
+            body.categoryBitMask = PhysicsCategory.player
+            body.contactTestBitMask = PhysicsCategory.beacon
+        }
         worldNode.addChild(player)
 
         // Camera
         let cam = SKCameraNode()
-        self.camera = cam
+        camera = cam
         addChild(cam)
         cameraRig.attach(camera: cam, to: player, smoothing: 0.12)
 
-        // Stream initial area
+        // Stream initial area and populate structures
         streamer.buildAround(player.position, preloadRadius: 2) { [weak self] chunk in
             self?.populateSetpieces(in: chunk)
         }
@@ -100,22 +100,19 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
         fpsLabel.position = CGPoint(x: size.width / 2 - 8, y: size.height / 2 - 8)
     }
 
-    // MARK: - Frame loop
+    // MARK: Frame loop
 
     override func update(_ currentTime: TimeInterval) {
-        // Delta-time with a sensible clamp to avoid huge jumps.
+        // Delta-time (clamped)
         let dt: CGFloat
-        if lastUpdateTime == 0 {
-            dt = 1.0 / 60.0
-        } else {
-            dt = CGFloat(min(1.0 / 30.0, max(0.0, currentTime - lastUpdateTime)))
-        }
+        if lastUpdateTime == 0 { dt = 1.0 / 60.0 }
+        else { dt = CGFloat(min(1.0 / 30.0, max(0.0, currentTime - lastUpdateTime))) }
         lastUpdateTime = currentTime
 
-        // Input → desired velocity
-        let v = touchInput.desiredVelocity(maxSpeed: 160)
+        // Input → desired velocity (thumbstick)
+        let v = touchInput.desiredVelocity(maxSpeed: 170)
 
-        // Basic AABB collision against blocked tiles via classifier sampling
+        // Collision sampling (slide on blocked axes)
         let next = player.position + v * dt
         if CollisionSystem.canOccupy(point: next, classifier: classifier) {
             player.position = next
@@ -129,7 +126,7 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
             }
         }
 
-        // Stream chunks around the player and populate setpieces for new ones
+        // Stream & populate
         streamer.updateVisible(center: player.position, marginChunks: 1) { [weak self] chunk in
             self?.populateSetpieces(in: chunk)
         }
@@ -139,56 +136,65 @@ final class GameScene: SKScene, SKPhysicsContactDelegate {
 
         // Debug stats
         if let view = view {
-            let fpsSetting = view.preferredFramesPerSecond == 0 ? 60 : Double(view.preferredFramesPerSecond)
-            fpsLabel.text = String(
-                format: "FPS %.0f   Chunks %d   Score %d",
-                fpsSetting,
-                streamer.loadedChunkCount,
-                score
-            )
+            let fps = view.preferredFramesPerSecond == 0 ? 60 : view.preferredFramesPerSecond
+            fpsLabel.text = "FPS \(fps)   Chunks \(streamer.loadedChunkCount)   Score \(score)"
         }
     }
 
-    // MARK: - World population
+    // MARK: World population
 
     private func populateSetpieces(in chunk: ChunkRef) {
-        // For the slice we only place beacons; later this can branch on setpiece defs.
-        beacons.placeBeacons(in: chunk, into: worldNode, categoryMask: PC.beacon)
+        beacons.placeBeacons(in: chunk, into: worldNode, categoryMask: PhysicsCategory.beacon)
     }
 
-    // MARK: - Contacts
+    // MARK: Contacts
 
     func didBegin(_ contact: SKPhysicsContact) {
         let mask = contact.bodyA.categoryBitMask | contact.bodyB.categoryBitMask
-        if mask == (PC.player | PC.beacon) {
-            let beaconNode = (contact.bodyA.categoryBitMask == PC.beacon ? contact.bodyA.node : contact.bodyB.node)
+        if mask == (PhysicsCategory.player | PhysicsCategory.beacon) {
+            let beaconNode = (contact.bodyA.categoryBitMask == PhysicsCategory.beacon ? contact.bodyA.node : contact.bodyB.node)
             beaconNode?.removeFromParent()
             score += scoring.onBeaconCollected()
         }
     }
 
-    // MARK: - Touch
+    // MARK: Touch (pass to thumbstick)
 
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchInput.touchesBegan(touches, in: self)
-    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesBegan(touches, in: self) }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesMoved(touches, in: self) }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesEnded(touches, in: self) }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { touchInput.touchesEnded(touches, in: self) }
 
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchInput.touchesMoved(touches, in: self)
-    }
+    // MARK: Snapshot (for postcards)
 
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchInput.touchesEnded(touches, in: self)
-    }
-
-    // MARK: - Snapshot (for postcards)
-
-    /// Snapshot of the game layer (world only, not HUD).
-    /// Uses non-optional `cgImage()` on iOS 26.
     func captureSnapshot() -> UIImage? {
         guard let view = self.view, let tex = view.texture(from: worldNode) else { return nil }
         let cg: CGImage = tex.cgImage()
         return UIImage(cgImage: cg)
+    }
+
+    // MARK: Spawn helper
+
+    /// Find the nearest walkable tile to `p` (in world coords) via outward spiral.
+    private func findSpawnPosition(near p: CGPoint) -> CGPoint {
+        let start = world.worldToTile(p)
+        if !TileClassifier(context: world).tile(at: start).isBlocked {
+            return world.tileToWorld(start)
+        }
+        let maxR = 24
+        for r in 1...maxR {
+            for y in -r...r {
+                for x in -r...r {
+                    if abs(x) != r && abs(y) != r { continue } // perimeter only
+                    let t = IVec2(start.x + x, start.y + y)
+                    if !TileClassifier(context: world).tile(at: t).isBlocked {
+                        return world.tileToWorld(t)
+                    }
+                }
+            }
+        }
+        // Fallback: origin
+        return .zero
     }
 }
 
@@ -222,7 +228,8 @@ struct WorldContext {
 }
 
 struct IVec2: Hashable, Equatable {
-    let x: Int; let y: Int
+    let x: Int
+    let y: Int
     init(_ x: Int, _ y: Int) { self.x = x; self.y = y }
 
     static func + (l: IVec2, r: IVec2) -> IVec2 { IVec2(l.x + r.x, l.y + r.y) }

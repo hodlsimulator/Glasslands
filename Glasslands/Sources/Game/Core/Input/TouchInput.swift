@@ -7,28 +7,47 @@
 
 import SpriteKit
 
+/// Simple virtual thumbstick:
+/// - Anchor at first touch location in camera space
+/// - Vector = current - anchor
+/// - Dead-zone near centre
+/// - Max radius clamps speed proportionally
 final class TouchInput {
-    private var currentVector = CGPoint.zero
+    private var isActive = false
+    private var anchor = CGPoint.zero   // in camera space
+    private var current = CGPoint.zero  // in camera space
+
+    private let maxRadius: CGFloat = 80
+    private let deadZone: CGFloat = 6
 
     func desiredVelocity(maxSpeed: CGFloat) -> CGPoint {
-        let len = max(0.0001, hypot(currentVector.x, currentVector.y))
-        let dir = CGPoint(x: currentVector.x / len, y: currentVector.y / len)
-        return CGPoint(x: dir.x * maxSpeed, y: dir.y * maxSpeed)
+        guard isActive else { return .zero }
+        let dx = current.x - anchor.x
+        let dy = current.y - anchor.y
+        let len = CGFloat(hypot(dx, dy))
+        if len < deadZone { return .zero }
+
+        let scale = min(1.0, len / maxRadius)
+        let invLen = 1.0 / max(len, 0.0001)
+        return CGPoint(x: dx * invLen * maxSpeed * scale,
+                       y: dy * invLen * maxSpeed * scale)
     }
 
     func touchesBegan(_ touches: Set<UITouch>, in scene: SKScene) {
-        updateVector(with: touches, in: scene)
-    }
-    func touchesMoved(_ touches: Set<UITouch>, in scene: SKScene) {
-        updateVector(with: touches, in: scene)
-    }
-    func touchesEnded(_ touches: Set<UITouch>, in scene: SKScene) {
-        currentVector = .zero
+        guard let t = touches.first, let cam = scene.camera else { return }
+        anchor = t.location(in: cam)
+        current = anchor
+        isActive = true
     }
 
-    private func updateVector(with touches: Set<UITouch>, in scene: SKScene) {
-        guard let t = touches.first, let camera = scene.camera else { return }
-        let loc = t.location(in: camera)
-        currentVector = loc // move towards finger relative to screen-centre
+    func touchesMoved(_ touches: Set<UITouch>, in scene: SKScene) {
+        guard isActive, let t = touches.first, let cam = scene.camera else { return }
+        current = t.location(in: cam)
+    }
+
+    func touchesEnded(_ touches: Set<UITouch>, in scene: SKScene) {
+        isActive = false
+        anchor = .zero
+        current = .zero
     }
 }
