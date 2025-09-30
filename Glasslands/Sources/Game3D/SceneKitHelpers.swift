@@ -42,23 +42,37 @@ func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
     )
 }
 
-// Simple vertical gradient image for sky
-func gradientImage(top: UIColor, bottom: UIColor, height: Int) -> UIImage {
-    let size = CGSize(width: 2, height: max(2, height))
+// A 2:1 equirectangular sky gradient (top→horizon)
+// Horizontally uniform → set wrapS = .repeat on the dome (no seam).
+func skyGradientEquirect(width: Int, height: Int) -> UIImage {
+    let W = max(64, width)
+    let H = max(32, height)
+    let size = CGSize(width: W, height: H)
+
+    // Colours (soft blue → lighter near horizon)
+    let top = UIColor(red: 0.50, green: 0.74, blue: 0.92, alpha: 1)
+    let mid = UIColor(red: 0.66, green: 0.84, blue: 0.95, alpha: 1)
+    let bot = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1)
+
     UIGraphicsBeginImageContextWithOptions(size, true, 1)
     guard let ctx = UIGraphicsGetCurrentContext() else {
         let img = UIImage(); UIGraphicsEndImageContext(); return img
     }
-    let colors = [top.cgColor, bottom.cgColor] as CFArray
+
+    let colors = [top.cgColor, mid.cgColor, bot.cgColor] as CFArray
     let space = CGColorSpaceCreateDeviceRGB()
-    let grad = CGGradient(colorsSpace: space, colors: colors, locations: [0,1])!
-    ctx.drawLinearGradient(grad,
-                           start: CGPoint(x: 1, y: 0),
-                           end: CGPoint(x: 1, y: size.height),
-                           options: [])
+    let grad = CGGradient(colorsSpace: space, colors: colors, locations: [0, 0.55, 1])!
+
+    ctx.drawLinearGradient(
+        grad,
+        start: CGPoint(x: size.width * 0.5, y: 0),
+        end: CGPoint(x: size.width * 0.5, y: size.height),
+        options: []
+    )
+
     let img = UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
     UIGraphicsEndImageContext()
-    return img.resizableImage(withCapInsets: .zero, resizingMode: .stretch)
+    return img
 }
 
 // Soft sun disc with a gentle glow (premultiplied RGBA)
@@ -73,7 +87,7 @@ func sunImage(diameter: Int) -> UIImage {
     // Outer glow
     let space = CGColorSpaceCreateDeviceRGB()
     let glowColors = [
-        UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.85).cgColor,
+        UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.95).cgColor,
         UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.0).cgColor
     ] as CFArray
     let glowGrad = CGGradient(colorsSpace: space, colors: glowColors, locations: [0, 1])!
@@ -81,7 +95,7 @@ func sunImage(diameter: Int) -> UIImage {
                            startCenter: CGPoint(x: r, y: r), startRadius: 0,
                            endCenter: CGPoint(x: r, y: r),   endRadius: r,
                            options: [])
-    // Core disc (slightly smaller than full)
+    // Core disc
     let coreRect = CGRect(x: size.width*0.5 - r*0.58,
                           y: size.height*0.5 - r*0.58,
                           width: r*1.16, height: r*1.16)
@@ -93,12 +107,11 @@ func sunImage(diameter: Int) -> UIImage {
 }
 
 /// Equirectangular, seamless cloud **alpha** map (premultiplied RGBA), 2:1 aspect.
-/// We generate a single big texture and **do not tile** on the dome (no seams).
 func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
     let W = max(256, width)
     let H = max(128, height)
 
-    // Slightly higher frequency to get lots of puffy detail across the 360° map.
+    // Puffy fractal Perlin
     let src = GKPerlinNoiseSource(frequency: 1.6,
                                   octaveCount: 5,
                                   persistence: 0.55,
@@ -109,9 +122,8 @@ func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
                          size: vector_double2(1, 1),
                          origin: vector_double2(0, 0),
                          sampleCount: vector_int2(Int32(W), Int32(H)),
-                         seamless: true) // horizontally seamless for equirect
+                         seamless: true) // horizontally seamless
 
-    // Pixels (premultiplied RGBA)
     var bytes = [UInt8](repeating: 0, count: W * H * 4)
 
     @inline(__always)
@@ -122,24 +134,18 @@ func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
         return t * t * (3 - 2 * t)
     }
 
-    // Threshold and softness tuned for soft puffs
-    let threshold = 0.56
-    let softness  = 0.16
-    let gain: Double = 0.95 // overall alpha gain
+    let threshold = 0.54
+    let softness  = 0.18
+    let gain: Double = 0.95
 
     var off = 0
     for y in 0..<H {
         for x in 0..<W {
-            // Normalise GK value from [-1,1] → [0,1]
             let n = Double(map.value(at: vector_int2(Int32(x), Int32(y))))
             let v01 = (n * 0.5) + 0.5
-
-            // Alpha via smooth threshold
             let a = gain * smoothstep(threshold - softness,
                                       threshold + softness,
                                       v01)
-
-            // Premultiplied white: rgb = a, a = a
             let aa = UInt8(max(0, min(255, Int(a * 255))))
             bytes[off+0] = aa
             bytes[off+1] = aa
@@ -149,11 +155,12 @@ func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
         }
     }
 
-    // Make CGImage
     let cs = CGColorSpaceCreateDeviceRGB()
     let bitsPerComp = 8
     let bytesPerRow = W * 4
-    guard let ctx = CGContext(data: &bytes,
+    var mutable = bytes // CGContext needs a mutable pointer
+
+    guard let ctx = CGContext(data: &mutable,
                               width: W, height: H,
                               bitsPerComponent: bitsPerComp,
                               bytesPerRow: bytesPerRow,

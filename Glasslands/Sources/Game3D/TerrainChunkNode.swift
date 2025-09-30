@@ -5,8 +5,7 @@
 //  Created by . . on 9/30/25.
 //
 //  Builds one SceneKit mesh chunk from the noise fields.
-//  Uses TerrainMath for *identical* sampling as the ground-clamp,
-//  so there are no cracks or mismatches. Adds static physics.
+//  Uses TerrainMath for identical sampling as the ground‑clamp.
 //
 
 import SceneKit
@@ -44,10 +43,6 @@ struct TerrainChunkNode {
 
         let grad = HeightClassifier(recipe: recipe)
 
-        // Pre‑pass to compute min/max for normalised colouring
-        var minY: Float = .greatestFiniteMagnitude
-        var maxY: Float = -.greatestFiniteMagnitude
-
         for z in 0..<vertsZ {
             for x in 0..<vertsX {
                 let tx = originTileX + x
@@ -56,11 +51,9 @@ struct TerrainChunkNode {
                 let wz = Float(tz) * tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
                 positions[idx(x, z)] = SCNVector3(wx, wy, wz)
-                minY = min(minY, wy); maxY = max(maxY, wy)
             }
         }
 
-        // Normals + vertex colours
         for z in 0..<vertsZ {
             for x in 0..<vertsX {
                 let tx = Double(originTileX + x)
@@ -68,7 +61,7 @@ struct TerrainChunkNode {
                 let n = TerrainMath.normal(tx: tx, tz: tz, cfg: cfg, noise: noise)
                 normals[idx(x, z)] = SCNVector3(n)
 
-                // Classify for colour
+                // Vertex colour from classifier
                 let hN = Float(TerrainMath.heightN(tx: tx, tz: tz, noise: noise))
                 let slope = Float(noise.slope(tx, tz))
                 let river = Float(noise.riverMask(tx, tz))
@@ -117,10 +110,10 @@ struct TerrainChunkNode {
 
         let mat = SCNMaterial()
         mat.lightingModel = .physicallyBased
-        mat.diffuse.contents = UIColor.white    // vertex colours carry the look
+        mat.diffuse.contents = UIColor.white        // vertex colours provide look
         mat.roughness.contents = 0.95
         mat.metalness.contents = 0.0
-        mat.isDoubleSided = false
+        mat.isDoubleSided = true                     // ← prevents “open ground” artefacts
         mat.writesToDepthBuffer = true
         mat.readsFromDepthBuffer = true
         geom.materials = [mat]
@@ -128,7 +121,7 @@ struct TerrainChunkNode {
         let meshNode = SCNNode(geometry: geom)
         meshNode.castsShadow = false
 
-        // Static physics (helps anything with physics not pass through)
+        // Static physics for future dynamic objects
         meshNode.physicsBody = SCNPhysicsBody.static()
         meshNode.physicsBody?.restitution = 0.0
         meshNode.physicsBody?.friction = 1.0
@@ -141,14 +134,13 @@ struct TerrainChunkNode {
 
     private struct HeightClassifier {
         // Colours (RGBA 0…1)
-        // deep water, shallows, grass base, sand, rock/snow
         let deep = SIMD4<Float>(0.18, 0.42, 0.58, 1.0)
         let shore = SIMD4<Float>(0.55, 0.80, 0.88, 1.0)
         let grass = SIMD4<Float>(0.32, 0.62, 0.34, 1.0)
         let sand = SIMD4<Float>(0.92, 0.87, 0.68, 1.0)
         let rock = SIMD4<Float>(0.90, 0.92, 0.95, 1.0)
 
-        // Thresholds (normalised height 0…1). Wide green band.
+        // Thresholds (normalised height 0…1)
         let deepCut: Float = 0.22
         let shoreCut: Float = 0.30
         let sandCut: Float  = 0.33
@@ -161,17 +153,10 @@ struct TerrainChunkNode {
                    riverMask r: Float,
                    moisture01 m: Float) -> SIMD4<Float>
         {
-            // Water first
             if y < deepCut { return deep }
             if y < shoreCut || r > 0.60 { return shore }
-
-            // Very steep or very high → rock/snow
             if s > 0.55 || y > snowCut { return rock }
-
-            // A tiny beach/sand fringe just above shore
             if y < sandCut { return sand }
-
-            // Everything else → lush grass, modulated by moisture and rivers
             let t = max(0, min(1, m * 0.65 + r * 0.20))
             let g = mix(grass, SIMD4<Float>(0.40, 0.75, 0.38, 1.0), t)
             return g
