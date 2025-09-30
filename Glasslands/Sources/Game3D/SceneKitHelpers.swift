@@ -91,23 +91,23 @@ func sunImage(diameter: Int) -> UIImage {
     return img
 }
 
-// Seamless Perlin-noise clouds alpha mask (premultiplied RGBA)
-// We keep the texture itself fairly "broad" and tile it on the dome
-// so you see many smaller clouds instead of one giant blotch.
-func cloudsImage(size: Int, seed: Int32 = 1337) -> UIImage {
-    let N = max(64, size)
+/// Equirectangular, seamless cloud alpha map (premultiplied RGBA), 2:1 aspect.
+/// We generate a single big texture and **do not tile** on the dome (no seams).
+func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
+    let W = max(256, width)
+    let H = max(128, height)
 
-    // Tileable noise map (a bit higher frequency)
-    let src  = GKPerlinNoiseSource(frequency: 1.8, octaveCount: 5, persistence: 0.55, lacunarity: 2.0, seed: seed)
+    // Slightly higher frequency to get lots of puffy detail across the 360° map.
+    let src  = GKPerlinNoiseSource(frequency: 1.6, octaveCount: 5, persistence: 0.55, lacunarity: 2.0, seed: seed)
     let noise = GKNoise(src)
     let map = GKNoiseMap(noise,
                          size: vector_double2(1, 1),
                          origin: vector_double2(0, 0),
-                         sampleCount: vector_int2(Int32(N), Int32(N)),
-                         seamless: true)
+                         sampleCount: vector_int2(Int32(W), Int32(H)),
+                         seamless: true) // horizontally seamless for equirect
 
     // Pixels (premultiplied RGBA)
-    var bytes = [UInt8](repeating: 0, count: N * N * 4)
+    var bytes = [UInt8](repeating: 0, count: W * H * 4)
     var off = 0
 
     @inline(__always) func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
@@ -117,13 +117,13 @@ func cloudsImage(size: Int, seed: Int32 = 1337) -> UIImage {
         return t * t * (3 - 2 * t)
     }
 
-    // Threshold and softness
-    let threshold = 0.58
-    let softness  = 0.18
+    // Threshold and softness tuned for soft puffs
+    let threshold = 0.56
+    let softness  = 0.16
     let gain: Double = 0.95 // overall alpha gain
 
-    for y in 0..<N {
-        for x in 0..<N {
+    for y in 0..<H {
+        for x in 0..<W {
             let v = Double(map.value(at: vector_int2(Int32(x), Int32(y)))) // ~[-1,1]
             let u = max(0.0, min(1.0, (v + 1.0) * 0.5))                    // [0,1]
             let a = smoothstep(threshold - softness, threshold + softness, u) * gain
@@ -141,8 +141,8 @@ func cloudsImage(size: Int, seed: Int32 = 1337) -> UIImage {
     let provider = CGDataProvider(data: NSData(bytes: &bytes, length: bytes.count))!
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-    let cg = CGImage(width: N, height: N, bitsPerComponent: 8, bitsPerPixel: 32,
-                     bytesPerRow: N * 4, space: colorSpace, bitmapInfo: bitmapInfo,
+    let cg = CGImage(width: W, height: H, bitsPerComponent: 8, bitsPerPixel: 32,
+                     bytesPerRow: W * 4, space: colorSpace, bitmapInfo: bitmapInfo,
                      provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)!
     return UIImage(cgImage: cg)
 }

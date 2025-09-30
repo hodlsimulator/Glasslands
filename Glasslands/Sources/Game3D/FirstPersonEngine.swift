@@ -5,8 +5,8 @@
 //  Created by . . on 9/30/25.
 //
 //  Camera + movement + world hookup.
-//  Adds a clearly visible sun disc, tiled/parallax clouds,
-//  and a ground clamp so the player cannot fall through.
+//  Fixes ground clamp (no falling), removes cloud seams (single high-res sky dome),
+//  and makes the sun obvious (additive glow, high render order).
 //
 
 import Foundation
@@ -27,7 +27,7 @@ final class FirstPersonEngine: NSObject {
         let moveSpeed: Float = 6.0
         let eyeHeight: Float = 1.62
 
-        // Descent smoothing so we don't "drop" down cliffs too hard.
+        // Descend gently so we don't "drop" down cliffs.
         let maxDescentRate: Float = 8.0  // metres per second
 
         var tilesX: Int { chunkTiles.x }
@@ -48,10 +48,9 @@ final class FirstPersonEngine: NSObject {
     private let pitchNode = SCNNode()
     private let camNode = SCNNode()
 
-    // Sky bits
+    // Sky
     private let skyAnchor = SCNNode()
-    private var cloudDomeNear: SCNNode?
-    private var cloudDomeFar: SCNNode?
+    private var cloudDome: SCNNode?
     private var sunDiscNode: SCNNode?
     private var sunLightNode: SCNNode?
 
@@ -78,8 +77,7 @@ final class FirstPersonEngine: NSObject {
         scnView = view
         view.scene = scene
 
-        // No gravity-driven physics for this free-fly camera.
-        scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
+        scene.physicsWorld.gravity = SCNVector3(0, 0, 0) // no global gravity
 
         buildLighting()
         buildSky()
@@ -105,7 +103,7 @@ final class FirstPersonEngine: NSObject {
     func apply(recipe: BiomeRecipe, force: Bool = false) {
         if !force, let r = self.recipe, r == recipe { return }
         self.recipe = recipe
-        noise = NoiseFields(recipe: recipe) // flatter noise (see NoiseFields.swift)
+        noise = NoiseFields(recipe: recipe)
         resetWorld()
     }
 
@@ -126,16 +124,14 @@ final class FirstPersonEngine: NSObject {
         var pos = yawNode.simdPosition
         pos += delta
 
-        // Hard ground clamp with gentle downhill smoothing
+        // Hard ground clamp, using the SAME sampler as the mesh (no more cracks).
         let groundY = groundHeightFootprint(worldX: pos.x, z: pos.z)
         let targetY = groundY + cfg.eyeHeight
         if !targetY.isFinite {
-            // Fail-safe: respawn on any NaN/Inf
             pos = spawn().simd
         } else if pos.y <= targetY {
             pos.y = targetY
         } else {
-            // Allow descending slopes, but not instant drops
             let maxDrop = cfg.maxDescentRate * dt
             pos.y = max(targetY, pos.y - maxDrop)
         }
@@ -215,8 +211,7 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         sunDiscNode = nil
-        cloudDomeNear = nil
-        cloudDomeFar = nil
+        cloudDome = nil
 
         // Subtle blue gradient background (fallback behind geometry)
         let top = UIColor(red: 0.50, green: 0.74, blue: 0.92, alpha: 1)
@@ -227,65 +222,54 @@ final class FirstPersonEngine: NSObject {
         // Anchor that follows the player (but does not rotate with yaw/pitch)
         scene.rootNode.addChildNode(skyAnchor)
 
-        // --- Cloud domes (two layers, tiled) ---
-        // Far layer
-        let sphereFar = SCNSphere(radius: 820)
-        sphereFar.segmentCount = 48
-        let matFar = SCNMaterial()
-        matFar.lightingModel = .constant
-        matFar.isDoubleSided = true
-        matFar.cullMode = .front // render inside of sphere
-        matFar.diffuse.contents = cloudsImage(size: 1024, seed: 224466)
-        matFar.transparency = 0.72
-        matFar.writesToDepthBuffer = false
-        matFar.readsFromDepthBuffer = false
-        matFar.diffuse.wrapS = .repeat
-        matFar.diffuse.wrapT = .repeat
-        matFar.diffuse.contentsTransform = SCNMatrix4MakeScale(6, 3, 1) // tile many puffs
-        sphereFar.firstMaterial = matFar
+        // Single high-res cloud dome (no tiling, so no seams)
+        let sphere = SCNSphere(radius: 800)
+        sphere.segmentCount = 64
 
-        let far = SCNNode(geometry: sphereFar)
-        far.name = "cloudDomeFar"
-        far.renderingOrder = -1 // draw first
-        skyAnchor.addChildNode(far)
-        cloudDomeFar = far
-        far.runAction(.repeatForever(.rotateBy(x: 0, y: -0.02, z: 0, duration: 60)))
+        let cloudMat = SCNMaterial()
+        cloudMat.lightingModel = .constant
+        cloudMat.isDoubleSided = true
+        cloudMat.cullMode = .front // render inside of sphere
+        cloudMat.diffuse.contents = cloudsEquirect(width: 4096, height: 2048)
+        cloudMat.transparency = 0.8
+        cloudMat.writesToDepthBuffer = false
+        cloudMat.readsFromDepthBuffer = false
+        cloudMat.diffuse.wrapS = .clamp   // no repeat → no seam grid
+        cloudMat.diffuse.wrapT = .clamp
+        cloudMat.diffuse.mipFilter = .linear
+        cloudMat.diffuse.minificationFilter = .linear
+        cloudMat.diffuse.magnificationFilter = .linear
 
-        // Near/parallax layer
-        let sphereNear = SCNSphere(radius: 780)
-        sphereNear.segmentCount = 48
-        let matNear = matFar.copy() as! SCNMaterial
-        matNear.diffuse.contents = cloudsImage(size: 1024, seed: 987654321)
-        matNear.transparency = 0.58
-        matNear.diffuse.contentsTransform = SCNMatrix4MakeScale(9, 4, 1)
-        sphereNear.firstMaterial = matNear
+        sphere.firstMaterial = cloudMat
 
-        let near = SCNNode(geometry: sphereNear)
-        near.name = "cloudDomeNear"
-        near.renderingOrder = -1
-        skyAnchor.addChildNode(near)
-        cloudDomeNear = near
-        near.runAction(.repeatForever(.rotateBy(x: 0, y: 0.04, z: 0, duration: 60)))
+        let cloudNode = SCNNode(geometry: sphere)
+        cloudNode.name = "cloudDome"
+        cloudNode.renderingOrder = -1 // draw first
+        skyAnchor.addChildNode(cloudNode)
+        self.cloudDome = cloudNode
 
-        // --- Visible sun disc aligned with the light direction ---
+        // Slow drift (spin the dome itself)
+        cloudNode.runAction(.repeatForever(.rotateBy(x: 0, y: 0.02, z: 0, duration: 60)))
+
+        // Visible sun disc aligned with the light direction
         if let sunLightNode {
-            let discSize: CGFloat = 18.0
+            let discSize: CGFloat = 20.0
             let plane = SCNPlane(width: discSize, height: discSize)
             let sunMat = SCNMaterial()
             sunMat.lightingModel = .constant
             sunMat.isDoubleSided = true
             sunMat.emission.contents = sunImage(diameter: 512)
-            sunMat.blendMode = .add          // bright glow against sky
+            sunMat.blendMode = .add
             sunMat.writesToDepthBuffer = false
             sunMat.readsFromDepthBuffer = false
             plane.firstMaterial = sunMat
 
             let sunDisc = SCNNode(geometry: plane)
             sunDisc.name = "sunDisc"
-            sunDisc.renderingOrder = 10      // after clouds
-            sunDisc.constraints = [SCNBillboardConstraint()] // always face camera
+            sunDisc.renderingOrder = 50               // draw after clouds
+            sunDisc.constraints = [SCNBillboardConstraint()] // face camera
 
-            // Place it along the sun light direction at a fixed distance from the sky anchor
+            // Place along the sun light direction at a fixed distance
             let dir = -sunLightNode.presentation.simdWorldFront // sun shines along -Z
             let distance: Float = 500
             sunDisc.simdPosition = dir * distance
@@ -315,7 +299,7 @@ final class FirstPersonEngine: NSObject {
         }
 
         if isWalkable(tx: 0, tz: 0) {
-            return SCNVector3(ts * 0.5, sampleHeight(worldX: 0, z: 0) + cfg.eyeHeight, ts * 0.5)
+            return SCNVector3(ts * 0.5, TerrainMath.heightWorld(x: 0, z: 0, cfg: cfg, noise: noise) + cfg.eyeHeight, ts * 0.5)
         }
 
         for radius in 1...32 {
@@ -324,31 +308,22 @@ final class FirstPersonEngine: NSObject {
                     if isWalkable(tx: x, tz: z) {
                         let wx = Float(x) * ts + ts * 0.5
                         let wz = Float(z) * ts + ts * 0.5
-                        return SCNVector3(wx, sampleHeight(worldX: wx, z: wz) + cfg.eyeHeight, wz)
+                        return SCNVector3(wx, TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise) + cfg.eyeHeight, wz)
                     }
                 }
             }
         }
-
-        return SCNVector3(0, sampleHeight(worldX: 0, z: 0) + cfg.eyeHeight, 0)
-    }
-
-    private func sampleHeight(worldX x: Float, z: Float) -> Float {
-        let tx = Double(x) / Double(cfg.tileSize)
-        let tz = Double(z) / Double(cfg.tileSize)
-        let h0 = noise.sampleHeight(tx, tz)
-        let h1 = noise.sampleHeight(tx + 0.5, tz + 0.5)
-        return Float((h0 * 0.7 + h1 * 0.3)) * cfg.heightScale
+        return SCNVector3(0, TerrainMath.heightWorld(x: 0, z: 0, cfg: cfg, noise: noise) + cfg.eyeHeight, 0)
     }
 
     /// Samples a small "footprint" and returns the **highest** contact to avoid clipping on edges.
     private func groundHeightFootprint(worldX x: Float, z: Float) -> Float {
         let r: Float = 0.35
-        let h0 = sampleHeight(worldX: x,       z: z)
-        let h1 = sampleHeight(worldX: x - r,   z: z - r)
-        let h2 = sampleHeight(worldX: x + r,   z: z - r)
-        let h3 = sampleHeight(worldX: x - r,   z: z + r)
-        let h4 = sampleHeight(worldX: x + r,   z: z + r)
+        let h0 = TerrainMath.heightWorld(x: x,       z: z,       cfg: cfg, noise: noise)
+        let h1 = TerrainMath.heightWorld(x: x - r,   z: z - r,   cfg: cfg, noise: noise)
+        let h2 = TerrainMath.heightWorld(x: x + r,   z: z - r,   cfg: cfg, noise: noise)
+        let h3 = TerrainMath.heightWorld(x: x - r,   z: z + r,   cfg: cfg, noise: noise)
+        let h4 = TerrainMath.heightWorld(x: x + r,   z: z + r,   cfg: cfg, noise: noise)
         return max(h0, h1, h2, h3, h4)
     }
 
