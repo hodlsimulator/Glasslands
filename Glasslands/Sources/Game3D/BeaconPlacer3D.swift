@@ -4,6 +4,8 @@
 //
 //  Created by . . on 9/30/25.
 //
+//  Adds static physics so you can't walk through beacons.
+//
 
 import SceneKit
 import GameplayKit
@@ -14,6 +16,7 @@ struct BeaconPlacer3D {
                       cfg: FirstPersonEngine.Config,
                       noise: NoiseFields,
                       recipe: BiomeRecipe) -> [SCNNode] {
+
         let tilesX = cfg.tilesX
         let tilesZ = cfg.tilesZ
         let originTile = IVec2(ci.x * tilesX, ci.y * tilesZ)
@@ -22,9 +25,7 @@ struct BeaconPlacer3D {
         let tilesPerChunk = tilesX * tilesZ
         let expected = max(0, Int(round(Double(tilesPerChunk) * rarity)))
 
-        let seed = recipe.seed64
-            &+ UInt64(bitPattern: Int64(ci.x)) &* 0x9E3779B97F4A7C15
-            &+ UInt64(bitPattern: Int64(ci.y))
+        let seed = recipe.seed64 &+ UInt64(bitPattern: Int64(ci.x)) &* 0x9E3779B97F4A7C15 &+ UInt64(bitPattern: Int64(ci.y))
         let rng = GKMersenneTwisterRandomSource(seed: seed)
 
         var out: [SCNNode] = []
@@ -33,6 +34,7 @@ struct BeaconPlacer3D {
 
         while placed < expected && attempts < tilesPerChunk * 2 {
             attempts += 1
+
             let tx = originTile.x + rng.nextInt(upperBound: tilesX)
             let tz = originTile.y + rng.nextInt(upperBound: tilesZ)
 
@@ -41,7 +43,6 @@ struct BeaconPlacer3D {
             let s = noise.slope(Double(tx), Double(tz))
             let r = noise.riverMask(Double(tx), Double(tz))
 
-            // Allow on sand/grass/forest, not in water/rock, gentle slopes
             if h < 0.34 { continue }     // not water/beach
             if s > 0.25 { continue }
             if r > 0.55 { continue }
@@ -55,6 +56,15 @@ struct BeaconPlacer3D {
                 let n = SCNNode(geometry: beaconGeometry())
                 n.position = SCNVector3(wx, wy, wz)
                 n.name = "beacon"
+
+                // Collider (capsule) so it's solid
+                let radius: CGFloat = 0.18
+                let shape = SCNPhysicsShape(geometry: SCNCapsule(capRadius: radius, height: 0.46), options: nil)
+                let body = SCNPhysicsBody.static()
+                body.physicsShape = shape
+                n.physicsBody = body
+                n.setValue(radius as CGFloat, forKey: "hitRadius")
+
                 out.append(n)
                 placed += 1
             }
@@ -66,7 +76,7 @@ struct BeaconPlacer3D {
         let cyl = SCNCapsule(capRadius: 0.18, height: 0.46)
         let m = SCNMaterial()
         m.emission.contents = UIColor.white.withAlphaComponent(0.85)
-        m.diffuse.contents  = UIColor.white.withAlphaComponent(0.2)
+        m.diffuse.contents = UIColor.white.withAlphaComponent(0.2)
         m.lightingModel = .physicallyBased
         cyl.materials = [m]
         return cyl

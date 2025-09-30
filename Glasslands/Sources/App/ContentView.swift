@@ -58,9 +58,7 @@ struct ContentView: View {
                         do {
                             let palette = AppColours.uiColors(from: vm.recipe().paletteHex)
                             let postcard = try await vm.imageService.generatePostcard(
-                                from: img,
-                                title: vm.seedCharm,
-                                palette: palette
+                                from: img, title: vm.seedCharm, palette: palette
                             )
                             try await PhotoSaver.saveImageToPhotos(postcard)
                             lastSnapshot = postcard
@@ -81,20 +79,18 @@ struct ContentView: View {
             )
             .padding(.top, 8)
 
-            // Virtual sticks (bottom left/right). They don’t block the HUD.
+            // Virtual sticks (bottom left/right)
             if let engine {
                 VStack {
                     Spacer()
                     HStack {
                         MoveStickView { vec in
-                            engine.setMoveInput(vec) // x = strafe, y = forward
+                            engine.setMoveInput(vec)        // x = strafe, y = forward
                         }
                         Spacer(minLength: 24)
-                        LookPadView { delta in
-                            // Fix: horizontal was inverted. Drag right → look right.
-                            let yaw   = -Float(delta.x) * 0.10
-                            let pitch =  Float(-delta.y) * 0.08  // up = look up
-                            engine.addLook(yawDegrees: yaw, pitchDegrees: pitch)
+                        LookPadView { rate in
+                            // Inertial look: provide a *rate*, engine integrates each frame.
+                            engine.setLookRate(rate)
                         }
                     }
                     .padding(.horizontal, 18)
