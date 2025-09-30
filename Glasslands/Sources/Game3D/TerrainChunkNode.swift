@@ -14,12 +14,14 @@ import simd
 import UIKit
 
 struct TerrainChunkNode {
+
     static func makeNode(
         originChunk: IVec2,
         cfg: FirstPersonEngine.Config,
         noise: NoiseFields,
         recipe: BiomeRecipe
     ) -> SCNNode {
+
         let node = SCNNode()
         node.name = "chunk_\(originChunk.x)_\(originChunk.y)"
 
@@ -27,96 +29,98 @@ struct TerrainChunkNode {
         let tilesZ = cfg.tilesZ
         let vertsX = tilesX + 1
         let vertsZ = tilesZ + 1
-
         let tileSize = cfg.tileSize
 
         // Tile origin (in tile coordinates)
         let originTileX = originChunk.x * tilesX
         let originTileZ = originChunk.y * tilesZ
 
-        // Vertex positions, normals, vertex colours
+        // --- Vertex positions, normals, vertex colours
         func idx(_ x: Int, _ z: Int) -> Int { z * vertsX + x }
+
         var positions = [SCNVector3](repeating: .zero, count: vertsX * vertsZ)
         var normals   = [SCNVector3](repeating: .zero, count: vertsX * vertsZ)
-        var colours   = [UIColor](repeating: .white, count: vertsX * vertsZ)
+        var colours   = [UIColor](repeating: .white,  count: vertsX * vertsZ)
 
         let grad = HeightClassifier(recipe: recipe)
 
-        // Pre-pass to compute min/max for normalised colouring
+        // Pre‑pass to compute min/max for normalised colouring
         var minY: Float = .greatestFiniteMagnitude
         var maxY: Float = -.greatestFiniteMagnitude
+
+        for z in 0..<vertsZ {
+            for x in 0..<vertsX {
+                let tx = originTileX + x
+                let tz = originTileZ + z
+                let wx = Float(tx) * tileSize
+                let wz = Float(tz) * tileSize
+                let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
+                positions[idx(x, z)] = SCNVector3(wx, wy, wz)
+                minY = min(minY, wy); maxY = max(maxY, wy)
+            }
+        }
+
+        // Normals + vertex colours
         for z in 0..<vertsZ {
             for x in 0..<vertsX {
                 let tx = Double(originTileX + x)
                 let tz = Double(originTileZ + z)
-                let y = Float(TerrainMath.heightN(tx: tx, tz: tz, noise: noise)) * cfg.heightScale
-                minY = min(minY, y)
-                maxY = max(maxY, y)
-            }
-        }
-        let invRange: Float = (maxY > minY) ? 1.0 / (maxY - minY) : 1.0
-
-        for z in 0..<vertsZ {
-            for x in 0..<vertsX {
-                let txD = Double(originTileX + x)
-                let tzD = Double(originTileZ + z)
-                let txF = Float(originTileX + x)
-                let tzF = Float(originTileZ + z)
-
-                let wX = txF * tileSize
-                let wZ = tzF * tileSize
-                let y  = Float(TerrainMath.heightN(tx: txD, tz: tzD, noise: noise)) * cfg.heightScale
-
-                positions[idx(x, z)] = SCNVector3(wX, y, wZ)
-
-                // Normal from central differences using the same sampler
-                let n = TerrainMath.normal(tx: txD, tz: tzD, cfg: cfg, noise: noise)
+                let n = TerrainMath.normal(tx: tx, tz: tz, cfg: cfg, noise: noise)
                 normals[idx(x, z)] = SCNVector3(n)
 
-                // Vertex colour from height band + slope/river/moisture
-                let yNorm = (y - minY) * invRange
-                let slopeMag = min(1.0, abs(n.x) + abs(n.z)) // cheap slope proxy
-                let river = Float(noise.riverMask(txD, tzD))
-                let moistureRaw = Float(noise.sampleMoisture(txD, tzD))
-                let moisture = min(1, moistureRaw / max(0.001, Float(recipe.moisture.amplitude)))
-
-                let rgba = grad.color(yNorm: yNorm, slope: slopeMag, riverMask: river, moisture01: moisture)
-                colours[idx(x, z)] = UIColor(red: CGFloat(rgba.x), green: CGFloat(rgba.y), blue: CGFloat(rgba.z), alpha: CGFloat(rgba.w))
+                // Classify for colour
+                let hN = Float(TerrainMath.heightN(tx: tx, tz: tz, noise: noise))
+                let slope = Float(noise.slope(tx, tz))
+                let river = Float(noise.riverMask(tx, tz))
+                let moist = Float(noise.sampleMoisture(tx, tz))
+                let c = grad.color(yNorm: hN / max(0.0001, Float(recipe.height.amplitude)),
+                                   slope: slope,
+                                   riverMask: river,
+                                   moisture01: moist / max(0.0001, Float(recipe.moisture.amplitude)))
+                colours[idx(x, z)] = UIColor(red: CGFloat(c.x),
+                                             green: CGFloat(c.y),
+                                             blue: CGFloat(c.z),
+                                             alpha: CGFloat(c.w))
             }
         }
 
-        // Indices (two triangles per tile)
-        var indices = [Int32]()
+        // --- Indices (two triangles per tile; CCW winding)
+        var indices = [UInt32]()
         indices.reserveCapacity(tilesX * tilesZ * 6)
         for z in 0..<tilesZ {
             for x in 0..<tilesX {
-                let i0 = Int32(idx(x,   z))
-                let i1 = Int32(idx(x+1, z))
-                let i2 = Int32(idx(x,   z+1))
-                let i3 = Int32(idx(x+1, z+1))
-                indices.append(contentsOf: [i0, i1, i2,   i1, i3, i2])
+                let i0 = UInt32(idx(x,   z))
+                let i1 = UInt32(idx(x+1, z))
+                let i2 = UInt32(idx(x,   z+1))
+                let i3 = UInt32(idx(x+1, z+1))
+                // Triangle 1: i0, i1, i2
+                indices.append(i0); indices.append(i1); indices.append(i2)
+                // Triangle 2: i1, i3, i2
+                indices.append(i1); indices.append(i3); indices.append(i2)
             }
         }
 
+        // --- Geometry
         let vSource = SCNGeometrySource(vertices: positions)
         let nSource = SCNGeometrySource(normals: normals)
         let cSource = geometrySourceForVertexColors(colours)
 
-        let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
-        let element   = SCNGeometryElement(
+        let indexData = indices.withUnsafeBytes { Data($0) }
+        let element = SCNGeometryElement(
             data: indexData,
             primitiveType: .triangles,
             primitiveCount: indices.count / 3,
-            bytesPerIndex: MemoryLayout<Int32>.size
+            bytesPerIndex: MemoryLayout<UInt32>.size
         )
 
         let geom = SCNGeometry(sources: [vSource, nSource, cSource], elements: [element])
 
         let mat = SCNMaterial()
         mat.lightingModel = .physicallyBased
-        mat.diffuse.contents = UIColor.white // vertex colours carry the look
+        mat.diffuse.contents = UIColor.white    // vertex colours carry the look
         mat.roughness.contents = 0.95
         mat.metalness.contents = 0.0
+        mat.isDoubleSided = false
         mat.writesToDepthBuffer = true
         mat.readsFromDepthBuffer = true
         geom.materials = [mat]
@@ -134,24 +138,29 @@ struct TerrainChunkNode {
     }
 
     // MARK: - Height → palette (with slope & moisture)
+
     private struct HeightClassifier {
         // Colours (RGBA 0…1)
         // deep water, shallows, grass base, sand, rock/snow
-        let deep  = SIMD4<Float>(0.18, 0.42, 0.58, 1.0)
+        let deep = SIMD4<Float>(0.18, 0.42, 0.58, 1.0)
         let shore = SIMD4<Float>(0.55, 0.80, 0.88, 1.0)
         let grass = SIMD4<Float>(0.32, 0.62, 0.34, 1.0)
-        let sand  = SIMD4<Float>(0.92, 0.87, 0.68, 1.0)
-        let rock  = SIMD4<Float>(0.90, 0.92, 0.95, 1.0)
+        let sand = SIMD4<Float>(0.92, 0.87, 0.68, 1.0)
+        let rock = SIMD4<Float>(0.90, 0.92, 0.95, 1.0)
 
         // Thresholds (normalised height 0…1). Wide green band.
-        let deepCut:  Float = 0.22
+        let deepCut: Float = 0.22
         let shoreCut: Float = 0.30
-        let sandCut:  Float = 0.33
-        let snowCut:  Float = 0.88
+        let sandCut: Float  = 0.33
+        let snowCut: Float  = 0.88
 
         let recipe: BiomeRecipe
 
-        func color(yNorm y: Float, slope s: Float, riverMask r: Float, moisture01 m: Float) -> SIMD4<Float> {
+        func color(yNorm y: Float,
+                   slope s: Float,
+                   riverMask r: Float,
+                   moisture01 m: Float) -> SIMD4<Float>
+        {
             // Water first
             if y < deepCut { return deep }
             if y < shoreCut || r > 0.60 { return shore }

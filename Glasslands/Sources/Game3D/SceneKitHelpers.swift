@@ -18,20 +18,18 @@ extension SCNVector3 {
     init(_ v: SIMD3<Float>) { self.init(v.x, v.y, v.z) }
 }
 
-// Per-vertex colour source for iOS (RGBA float)
+// Per‑vertex colour source for iOS (RGBA float)
 func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
     var floats: [Float] = []
     floats.reserveCapacity(colors.count * 4)
     for c in colors {
         var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
         c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        floats.append(Float(r))
-        floats.append(Float(g))
-        floats.append(Float(b))
-        floats.append(Float(a))
+        floats.append(Float(r)); floats.append(Float(g))
+        floats.append(Float(b)); floats.append(Float(a))
     }
     let stride = MemoryLayout<Float>.size * 4
-    let data = floats.withUnsafeBufferPointer { Data(buffer: $0) }
+    let data = floats.withUnsafeBytes { Data($0) }
     return SCNGeometrySource(
         data: data,
         semantic: .color,
@@ -46,7 +44,7 @@ func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
 
 // Simple vertical gradient image for sky
 func gradientImage(top: UIColor, bottom: UIColor, height: Int) -> UIImage {
-    let size = CGSize(width: 2, height: height)
+    let size = CGSize(width: 2, height: max(2, height))
     UIGraphicsBeginImageContextWithOptions(size, true, 1)
     guard let ctx = UIGraphicsGetCurrentContext() else {
         let img = UIImage(); UIGraphicsEndImageContext(); return img
@@ -54,7 +52,10 @@ func gradientImage(top: UIColor, bottom: UIColor, height: Int) -> UIImage {
     let colors = [top.cgColor, bottom.cgColor] as CFArray
     let space = CGColorSpaceCreateDeviceRGB()
     let grad = CGGradient(colorsSpace: space, colors: colors, locations: [0,1])!
-    ctx.drawLinearGradient(grad, start: CGPoint(x: 1, y: 0), end: CGPoint(x: 1, y: CGFloat(height)), options: [])
+    ctx.drawLinearGradient(grad,
+                           start: CGPoint(x: 1, y: 0),
+                           end: CGPoint(x: 1, y: size.height),
+                           options: [])
     let img = UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
     UIGraphicsEndImageContext()
     return img.resizableImage(withCapInsets: .zero, resizingMode: .stretch)
@@ -65,40 +66,44 @@ func sunImage(diameter: Int) -> UIImage {
     let d = max(8, diameter)
     let size = CGSize(width: d, height: d)
     let r = min(size.width, size.height) * 0.5
-
     UIGraphicsBeginImageContextWithOptions(size, false, 1)
     guard let ctx = UIGraphicsGetCurrentContext() else {
         let img = UIImage(); UIGraphicsEndImageContext(); return img
     }
-
     // Outer glow
     let space = CGColorSpaceCreateDeviceRGB()
-    let glowColors = [UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.85).cgColor,
-                      UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.0).cgColor] as CFArray
+    let glowColors = [
+        UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.85).cgColor,
+        UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.0).cgColor
+    ] as CFArray
     let glowGrad = CGGradient(colorsSpace: space, colors: glowColors, locations: [0, 1])!
     ctx.drawRadialGradient(glowGrad,
                            startCenter: CGPoint(x: r, y: r), startRadius: 0,
-                           endCenter: CGPoint(x: r, y: r), endRadius: r,
+                           endCenter: CGPoint(x: r, y: r),   endRadius: r,
                            options: [])
-
     // Core disc (slightly smaller than full)
-    let coreRect = CGRect(x: size.width*0.5 - r*0.58, y: size.height*0.5 - r*0.58, width: r*1.16, height: r*1.16)
+    let coreRect = CGRect(x: size.width*0.5 - r*0.58,
+                          y: size.height*0.5 - r*0.58,
+                          width: r*1.16, height: r*1.16)
     ctx.setFillColor(UIColor(white: 1.0, alpha: 1.0).cgColor)
     ctx.fillEllipse(in: coreRect)
-
     let img = UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
     UIGraphicsEndImageContext()
     return img
 }
 
-/// Equirectangular, seamless cloud alpha map (premultiplied RGBA), 2:1 aspect.
+/// Equirectangular, seamless cloud **alpha** map (premultiplied RGBA), 2:1 aspect.
 /// We generate a single big texture and **do not tile** on the dome (no seams).
 func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
     let W = max(256, width)
     let H = max(128, height)
 
     // Slightly higher frequency to get lots of puffy detail across the 360° map.
-    let src  = GKPerlinNoiseSource(frequency: 1.6, octaveCount: 5, persistence: 0.55, lacunarity: 2.0, seed: seed)
+    let src = GKPerlinNoiseSource(frequency: 1.6,
+                                  octaveCount: 5,
+                                  persistence: 0.55,
+                                  lacunarity: 2.0,
+                                  seed: seed)
     let noise = GKNoise(src)
     let map = GKNoiseMap(noise,
                          size: vector_double2(1, 1),
@@ -108,9 +113,9 @@ func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
 
     // Pixels (premultiplied RGBA)
     var bytes = [UInt8](repeating: 0, count: W * H * 4)
-    var off = 0
 
-    @inline(__always) func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+    @inline(__always)
+    func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
         if x <= a { return 0 }
         if x >= b { return 1 }
         let t = (x - a) / (b - a)
@@ -122,27 +127,40 @@ func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
     let softness  = 0.16
     let gain: Double = 0.95 // overall alpha gain
 
+    var off = 0
     for y in 0..<H {
         for x in 0..<W {
-            let v = Double(map.value(at: vector_int2(Int32(x), Int32(y)))) // ~[-1,1]
-            let u = max(0.0, min(1.0, (v + 1.0) * 0.5))                    // [0,1]
-            let a = smoothstep(threshold - softness, threshold + softness, u) * gain
+            // Normalise GK value from [-1,1] → [0,1]
+            let n = Double(map.value(at: vector_int2(Int32(x), Int32(y))))
+            let v01 = (n * 0.5) + 0.5
 
-            // Premultiplied white = alpha
-            let a8 = UInt8(max(0, min(255, Int(a * 255.0))))
-            bytes[off + 0] = a8
-            bytes[off + 1] = a8
-            bytes[off + 2] = a8
-            bytes[off + 3] = a8
+            // Alpha via smooth threshold
+            let a = gain * smoothstep(threshold - softness,
+                                      threshold + softness,
+                                      v01)
+
+            // Premultiplied white: rgb = a, a = a
+            let aa = UInt8(max(0, min(255, Int(a * 255))))
+            bytes[off+0] = aa
+            bytes[off+1] = aa
+            bytes[off+2] = aa
+            bytes[off+3] = aa
             off += 4
         }
     }
 
-    let provider = CGDataProvider(data: NSData(bytes: &bytes, length: bytes.count))!
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-    let cg = CGImage(width: W, height: H, bitsPerComponent: 8, bitsPerPixel: 32,
-                     bytesPerRow: W * 4, space: colorSpace, bitmapInfo: bitmapInfo,
-                     provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)!
+    // Make CGImage
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let bitsPerComp = 8
+    let bytesPerRow = W * 4
+    guard let ctx = CGContext(data: &bytes,
+                              width: W, height: H,
+                              bitsPerComponent: bitsPerComp,
+                              bytesPerRow: bytesPerRow,
+                              space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return UIImage() }
+
+    guard let cg = ctx.makeImage() else { return UIImage() }
     return UIImage(cgImage: cg)
 }

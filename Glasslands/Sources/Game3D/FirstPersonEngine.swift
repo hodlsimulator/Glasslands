@@ -16,29 +16,26 @@ import simd
 import UIKit
 
 final class FirstPersonEngine: NSObject {
-    // MARK: Config
-    struct Config {
-        let tileSize: Float = 2.0     // world metres per tile
-        let heightScale: Float = 8.0  // world metres per height unit
 
+    // MARK: - Config
+    struct Config {
+        let tileSize: Float = 2.0          // world metres per tile
+        let heightScale: Float = 8.0       // world metres per height unit
         let chunkTiles = IVec2(64, 64)
         let preloadRadius: Int = 2
-
         let moveSpeed: Float = 6.0
         let eyeHeight: Float = 1.62
-
         // Descend gently so we don't "drop" down cliffs.
-        let maxDescentRate: Float = 8.0  // metres per second
+        let maxDescentRate: Float = 8.0    // metres per second
 
         var tilesX: Int { chunkTiles.x }
         var tilesZ: Int { chunkTiles.y }
     }
     let cfg = Config()
 
-    // MARK: Scene
+    // MARK: - Scene
     private var scene = SCNScene()
     private weak var scnView: SCNView?
-
     private var recipe: BiomeRecipe!
     private var noise: NoiseFields!
     private var chunker: ChunkStreamer3D!
@@ -67,7 +64,8 @@ final class FirstPersonEngine: NSObject {
     private var score = 0
     private var onScore: (Int) -> Void
 
-    // MARK: Init/attach
+    // MARK: - Init/attach
+
     init(onScore: @escaping (Int) -> Void) {
         self.onScore = onScore
         super.init()
@@ -76,12 +74,10 @@ final class FirstPersonEngine: NSObject {
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
-
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0) // no global gravity
 
         buildLighting()
         buildSky()
-
         apply(recipe: recipe, force: true)
     }
 
@@ -94,7 +90,7 @@ final class FirstPersonEngine: NSObject {
     }
 
     func addLook(yawDegrees: Float, pitchDegrees: Float) {
-        yaw += yawDegrees * Float.pi / 180
+        yaw   += yawDegrees   * Float.pi / 180
         pitch += pitchDegrees * Float.pi / 180
         pitch = max(-Float.pi/2 + 0.01, min(Float.pi/2 - 0.01, pitch))
         updateRig()
@@ -110,15 +106,16 @@ final class FirstPersonEngine: NSObject {
     @MainActor
     func snapshot() -> UIImage? { scnView?.snapshot() }
 
-    // MARK: Frame stepping (called by RendererProxy)
+    // MARK: - Frame stepping (called by RendererProxy)
+
     @MainActor
     func stepUpdateMain(at t: TimeInterval) {
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
         // Move along ground plane
-        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
+        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
         let delta   = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
 
         var pos = yawNode.simdPosition
@@ -127,6 +124,7 @@ final class FirstPersonEngine: NSObject {
         // Hard ground clamp, using the SAME sampler as the mesh (no more cracks).
         let groundY = groundHeightFootprint(worldX: pos.x, z: pos.z)
         let targetY = groundY + cfg.eyeHeight
+
         if !targetY.isFinite {
             pos = spawn().simd
         } else if pos.y <= targetY {
@@ -146,7 +144,8 @@ final class FirstPersonEngine: NSObject {
         collectNearbyBeacons(playerXZ: SIMD2(pos.x, pos.z))
     }
 
-    // MARK: Build scene
+    // MARK: - Build scene
+
     private func resetWorld() {
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
 
@@ -198,8 +197,8 @@ final class FirstPersonEngine: NSObject {
         sun.shadowMode = .deferred
         sun.shadowRadius = 4
         sun.shadowColor = UIColor.black.withAlphaComponent(0.33)
-
         let sunNode = SCNNode(); sunNode.light = sun
+
         // Elevation + azimuth
         sunNode.eulerAngles = SCNVector3(-Float.pi/3, Float.pi/4, 0)
         scene.rootNode.addChildNode(sunNode)
@@ -222,29 +221,28 @@ final class FirstPersonEngine: NSObject {
         // Anchor that follows the player (but does not rotate with yaw/pitch)
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Single high-res cloud dome (no tiling, so no seams)
+        // Single high‑res cloud dome (no tiling, so no seams)
         let sphere = SCNSphere(radius: 800)
-        sphere.segmentCount = 64
+        sphere.segmentCount = 96
 
         let cloudMat = SCNMaterial()
         cloudMat.lightingModel = .constant
         cloudMat.isDoubleSided = true
-        cloudMat.cullMode = .front // render inside of sphere
+        cloudMat.cullMode = .front              // render inside of sphere
         cloudMat.diffuse.contents = cloudsEquirect(width: 4096, height: 2048)
-        cloudMat.transparency = 0.8
+        cloudMat.transparency = 0.85
         cloudMat.writesToDepthBuffer = false
         cloudMat.readsFromDepthBuffer = false
-        cloudMat.diffuse.wrapS = .clamp   // no repeat → no seam grid
+        cloudMat.diffuse.wrapS = .clamp         // clamp = no repeat → no seam
         cloudMat.diffuse.wrapT = .clamp
         cloudMat.diffuse.mipFilter = .linear
         cloudMat.diffuse.minificationFilter = .linear
         cloudMat.diffuse.magnificationFilter = .linear
-
         sphere.firstMaterial = cloudMat
 
         let cloudNode = SCNNode(geometry: sphere)
         cloudNode.name = "cloudDome"
-        cloudNode.renderingOrder = -1 // draw first
+        cloudNode.renderingOrder = -1           // draw first
         skyAnchor.addChildNode(cloudNode)
         self.cloudDome = cloudNode
 
@@ -255,6 +253,7 @@ final class FirstPersonEngine: NSObject {
         if let sunLightNode {
             let discSize: CGFloat = 20.0
             let plane = SCNPlane(width: discSize, height: discSize)
+
             let sunMat = SCNMaterial()
             sunMat.lightingModel = .constant
             sunMat.isDoubleSided = true
@@ -266,7 +265,7 @@ final class FirstPersonEngine: NSObject {
 
             let sunDisc = SCNNode(geometry: plane)
             sunDisc.name = "sunDisc"
-            sunDisc.renderingOrder = 50               // draw after clouds
+            sunDisc.renderingOrder = 50          // draw after clouds
             sunDisc.constraints = [SCNBillboardConstraint()] // face camera
 
             // Place along the sun light direction at a fixed distance
@@ -280,9 +279,9 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func updateRig() {
-        yawNode.eulerAngles = SCNVector3(0, yaw, 0)
+        yawNode.eulerAngles   = SCNVector3(0, yaw, 0)
         pitchNode.eulerAngles = SCNVector3(pitch, 0, 0)
-        camNode.position = SCNVector3(0, 0, 0)
+        camNode.position      = SCNVector3(0, 0, 0)
     }
 
     private func spawn() -> SCNVector3 {
@@ -292,14 +291,18 @@ final class FirstPersonEngine: NSObject {
             let h = noise.sampleHeight(Double(tx), Double(tz)) / max(0.0001, recipe.height.amplitude)
             let s = noise.slope(Double(tx), Double(tz))
             let r = noise.riverMask(Double(tx), Double(tz))
-            if h < 0.28 { return false }   // water
-            if s > 0.35 { return false }   // too steep
-            if r > 0.60 { return false }   // river channel
+            if h < 0.28 { return false }  // water
+            if s > 0.35 { return false }  // too steep
+            if r > 0.60 { return false }  // river channel
             return true
         }
 
         if isWalkable(tx: 0, tz: 0) {
-            return SCNVector3(ts * 0.5, TerrainMath.heightWorld(x: 0, z: 0, cfg: cfg, noise: noise) + cfg.eyeHeight, ts * 0.5)
+            return SCNVector3(
+                ts * 0.5,
+                TerrainMath.heightWorld(x: 0, z: 0, cfg: cfg, noise: noise) + cfg.eyeHeight,
+                ts * 0.5
+            )
         }
 
         for radius in 1...32 {
@@ -308,22 +311,29 @@ final class FirstPersonEngine: NSObject {
                     if isWalkable(tx: x, tz: z) {
                         let wx = Float(x) * ts + ts * 0.5
                         let wz = Float(z) * ts + ts * 0.5
-                        return SCNVector3(wx, TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise) + cfg.eyeHeight, wz)
+                        return SCNVector3(
+                            wx,
+                            TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise) + cfg.eyeHeight,
+                            wz
+                        )
                     }
                 }
             }
         }
-        return SCNVector3(0, TerrainMath.heightWorld(x: 0, z: 0, cfg: cfg, noise: noise) + cfg.eyeHeight, 0)
+
+        return SCNVector3(0,
+                          TerrainMath.heightWorld(x: 0, z: 0, cfg: cfg, noise: noise) + cfg.eyeHeight,
+                          0)
     }
 
     /// Samples a small "footprint" and returns the **highest** contact to avoid clipping on edges.
     private func groundHeightFootprint(worldX x: Float, z: Float) -> Float {
         let r: Float = 0.35
-        let h0 = TerrainMath.heightWorld(x: x,       z: z,       cfg: cfg, noise: noise)
-        let h1 = TerrainMath.heightWorld(x: x - r,   z: z - r,   cfg: cfg, noise: noise)
-        let h2 = TerrainMath.heightWorld(x: x + r,   z: z - r,   cfg: cfg, noise: noise)
-        let h3 = TerrainMath.heightWorld(x: x - r,   z: z + r,   cfg: cfg, noise: noise)
-        let h4 = TerrainMath.heightWorld(x: x + r,   z: z + r,   cfg: cfg, noise: noise)
+        let h0 = TerrainMath.heightWorld(x: x,     z: z,     cfg: cfg, noise: noise)
+        let h1 = TerrainMath.heightWorld(x: x - r, z: z - r, cfg: cfg, noise: noise)
+        let h2 = TerrainMath.heightWorld(x: x + r, z: z - r, cfg: cfg, noise: noise)
+        let h3 = TerrainMath.heightWorld(x: x - r, z: z + r, cfg: cfg, noise: noise)
+        let h4 = TerrainMath.heightWorld(x: x + r, z: z + r, cfg: cfg, noise: noise)
         return max(h0, h1, h2, h3, h4)
     }
 

@@ -50,6 +50,7 @@ struct Scene3DView: UIViewRepresentable {
 
         // Hand engine to SwiftUI
         DispatchQueue.main.async { onReady(engine) }
+
         return view
     }
 
