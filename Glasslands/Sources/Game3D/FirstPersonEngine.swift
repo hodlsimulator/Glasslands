@@ -14,7 +14,6 @@ import GameplayKit
 import simd
 import UIKit
 
-@MainActor
 final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
 
     // MARK: Config
@@ -95,7 +94,10 @@ final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
         resetWorld()
     }
 
-    func snapshot() -> UIImage? { scnView?.snapshot() }
+    @MainActor
+    func snapshot() -> UIImage? {
+        scnView?.snapshot()
+    }
 
     // MARK: Frame
 
@@ -124,11 +126,13 @@ final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
 
     private func resetWorld() {
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
+
         buildLighting()
         buildSky()
 
         // Camera
-        yaw = 0; pitch = -0.1
+        yaw = 0
+        pitch = -0.1
         yawNode.position = spawn()
         updateRig()
 
@@ -146,13 +150,14 @@ final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
 
         // Terrain streamer
         chunker = ChunkStreamer3D(cfg: cfg, noise: noise, recipe: recipe, root: scene.rootNode) { [weak self] b in
-            b.forEach { self?.beacons.insert($0) }
+            guard let self else { return }
+            b.forEach { self.beacons.insert($0) }
         }
         chunker.buildAround(yawNode.position.simd)
 
-        // Reset score
+        // Reset score (notify UI on main)
         score = 0
-        onScore(score)
+        DispatchQueue.main.async { [score, onScore] in onScore(score) }
     }
 
     private func buildLighting() {
@@ -225,17 +230,27 @@ final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
     }
 
     private func collectNearbyBeacons(playerXZ: SIMD2<Float>) {
-        var picked = [SCNNode]()
+        var picked: [SCNNode] = []
+
         for n in beacons {
             let p = n.worldPosition
             let dx = playerXZ.x - p.x
             let dz = playerXZ.y - p.z
-            if dx*dx + dz*dz < 1.25*1.25 { picked.append(n) }
+            if dx*dx + dz*dz < 1.25 * 1.25 {
+                picked.append(n)
+            }
         }
+
         if !picked.isEmpty {
-            picked.forEach { $0.removeFromParentNode(); beacons.remove($0) }
+            picked.forEach {
+                $0.removeAllActions()
+                $0.removeFromParentNode()
+                beacons.remove($0)
+            }
             score += picked.count
-            onScore(score)
+
+            // Hop to main for SwiftUI/Game Center/UI state
+            DispatchQueue.main.async { [score, onScore] in onScore(score) }
         }
     }
 
