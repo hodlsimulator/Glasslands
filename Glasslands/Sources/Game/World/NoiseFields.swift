@@ -5,15 +5,15 @@
 //  Created by . . on 9/29/25.
 //
 //  Smoothed, domain-warped procedural fields for height, moisture, and rivers.
+//  Changes here make the world broader and flatter.
 //
 
 import GameplayKit
 import simd
 
 final class NoiseFields {
-
     // Primary noises
-    private let height: GKNoise
+    private let height:   GKNoise
     private let moisture: GKNoise
 
     // River + warp fields
@@ -33,76 +33,51 @@ final class NoiseFields {
     private let seed32: Int32
 
     init(recipe: BiomeRecipe) {
-        // Use a local seed while building noise to avoid touching `self`
-        // before stored properties are assigned (fixes the init error).
         let baseSeed32: Int32 = Int32(truncatingIfNeeded: recipe.seed64)
 
         func makeSource(_ p: NoiseParams, seed salt: Int32 = 0) -> GKNoiseSource {
             let s = baseSeed32 &+ salt
             switch p.base.lowercased() {
             case "ridged":
-                return GKRidgedNoiseSource(
-                    frequency: 1.0,
-                    octaveCount: max(1, p.octaves),
-                    lacunarity: 2.0,
-                    seed: s
-                )
+                return GKRidgedNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), lacunarity: 2.0, seed: s)
             case "billow":
-                return GKBillowNoiseSource(
-                    frequency: 1.0,
-                    octaveCount: max(1, p.octaves),
-                    persistence: 0.5,
-                    lacunarity: 2.0,
-                    seed: s
-                )
+                return GKBillowNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), persistence: 0.5, lacunarity: 2.0, seed: s)
             default:
-                return GKPerlinNoiseSource(
-                    frequency: 1.0,
-                    octaveCount: max(1, p.octaves),
-                    persistence: 0.55,
-                    lacunarity: 2.2,
-                    seed: s
-                )
+                return GKPerlinNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), persistence: 0.55, lacunarity: 2.2, seed: s)
             }
         }
 
-        // Build noises with the local seed
+        // Build noises
         let heightNoise   = GKNoise(makeSource(recipe.height))
         let moistureNoise = GKNoise(makeSource(recipe.moisture, seed: 101))
-        let riverNoise    = GKNoise(GKRidgedNoiseSource(
-            frequency: 1.0,
-            octaveCount: 5,
-            lacunarity: 2.0,
-            seed: baseSeed32 &+ 202
-        ))
-        let warpXNoise = GKNoise(GKPerlinNoiseSource(
-            frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 303
-        ))
-        let warpYNoise = GKNoise(GKPerlinNoiseSource(
-            frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 404
-        ))
+        let riverNoise    = GKNoise(GKRidgedNoiseSource(frequency: 1.0, octaveCount: 5, lacunarity: 2.0, seed: baseSeed32 &+ 202))
+        let warpXNoise    = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 303))
+        let warpYNoise    = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 404))
 
-        // Assign stored properties AFTER everything above is ready
-        self.height = heightNoise
+        // Assign stored props
+        self.height   = heightNoise
         self.moisture = moistureNoise
         self.riverBase = riverNoise
-        self.warpX = warpXNoise
-        self.warpY = warpYNoise
+        self.warpX     = warpXNoise
+        self.warpY     = warpYNoise
 
         self.ampH = recipe.height.amplitude
         self.ampM = recipe.moisture.amplitude
-        self.scaleH = max(1.2, recipe.height.scale * 1.8)
-        self.scaleM = max(1.0, recipe.moisture.scale * 1.5)
+
+        // ↑↑ bigger world scale = smoother terrain (previously roughly 1.8× the recipe scale).
+        self.scaleH = max(3.0, recipe.height.scale * 3.2)
+        self.scaleM = max(1.6, recipe.moisture.scale * 2.4)
         self.scaleR = max(1.0, scaleH * 0.9)
+
         self.warpScale = 6.0
-        self.warpAmp   = 0.65 / scaleH
+        // ↓ was 0.65/scaleH — halve the warp to remove craggy artefacts.
+        self.warpAmp   = 0.30 / scaleH
+
         self.seed32 = baseSeed32
     }
 
     // MARK: - Sampling helpers
-
-    @inline(__always)
-    private func n01(_ v: Double) -> Double { (v * 0.5) + 0.5 }
+    @inline(__always) private func n01(_ v: Double) -> Double { (v * 0.5) + 0.5 }
 
     private func warp(_ x: Double, _ y: Double) -> (Double, Double) {
         let wx = Double(warpX.value(atPosition: vector_float2(Float(x/warpScale), Float(y/warpScale))))
@@ -113,10 +88,17 @@ final class NoiseFields {
     /// Smoothed height sample in 0..ampH
     func sampleHeight(_ x: Double, _ y: Double) -> Double {
         let (u, v) = warp(x, y)
-        let v0 = Double(height.value(atPosition: vector_float2(Float(u/scaleH), Float(v/scaleH))))
-        let v1 = Double(height.value(atPosition: vector_float2(Float((u+0.73)/scaleH), Float((v-0.42)/scaleH))))
-        let h = (v0 * 0.7 + v1 * 0.3)
-        return n01(h) * ampH
+
+        // 4-tap smoothing (Gaussian-ish) before normalising.
+        let v0 = Double(height.value(atPosition: vector_float2(Float(u/scaleH),           Float(v/scaleH))))
+        let v1 = Double(height.value(atPosition: vector_float2(Float((u+0.73)/scaleH),    Float((v-0.42)/scaleH))))
+        let v2 = Double(height.value(atPosition: vector_float2(Float((u-0.61)/scaleH),    Float((v+0.37)/scaleH))))
+        let v3 = Double(height.value(atPosition: vector_float2(Float((u+0.21)/scaleH),    Float((v+0.58)/scaleH))))
+        let hRaw = (v0 * 0.46 + v1 * 0.24 + v2 * 0.18 + v3 * 0.12)
+
+        // Mild compression of peaks to flatten mountains.
+        let h = pow(n01(hRaw), 1.35)
+        return h * ampH
     }
 
     /// Moisture sample in 0..ampM
@@ -138,7 +120,7 @@ final class NoiseFields {
     /// Approximate slope magnitude in height-units per tile.
     func slope(_ x: Double, _ y: Double) -> Double {
         let s = 0.75
-        let c  = sampleHeight(x, y)
+        let c = sampleHeight(x, y)
         let dx = sampleHeight(x + s, y) - c
         let dy = sampleHeight(x, y + s) - c
         return sqrt(dx*dx + dy*dy)

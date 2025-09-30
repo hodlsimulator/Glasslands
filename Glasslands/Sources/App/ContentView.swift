@@ -11,7 +11,7 @@
 import SwiftUI
 import Combine
 import GameKit
-import UIKit       
+import UIKit
 
 final class GameViewModel: ObservableObject {
     @Published var seedCharm: String = SaveStore.shared.lastSeedCharm ?? "RAIN_FOX_PEAKS"
@@ -37,6 +37,7 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
+            // 3D view
             Scene3DView(
                 recipe: vm.recipe(),
                 isPaused: vm.isPaused,
@@ -57,7 +58,9 @@ struct ContentView: View {
                         do {
                             let palette = AppColours.uiColors(from: vm.recipe().paletteHex)
                             let postcard = try await vm.imageService.generatePostcard(
-                                from: img, title: vm.seedCharm, palette: palette
+                                from: img,
+                                title: vm.seedCharm,
+                                palette: palette
                             )
                             try await PhotoSaver.saveImageToPhotos(postcard)
                             lastSnapshot = postcard
@@ -78,7 +81,7 @@ struct ContentView: View {
             )
             .padding(.top, 8)
 
-            // Dual sticks (bottom left/right). They never block the HUD.
+            // Virtual sticks (bottom left/right). They don’t block the HUD.
             if let engine {
                 VStack {
                     Spacer()
@@ -88,9 +91,9 @@ struct ContentView: View {
                         }
                         Spacer(minLength: 24)
                         LookPadView { delta in
-                            // delta is CGPoint (CGFloat). Convert to Float for engine.
-                            let yaw   = Float(delta.x) * 0.10
-                            let pitch = Float(-delta.y) * 0.08
+                            // Fix: horizontal was inverted. Drag right → look right.
+                            let yaw   = -Float(delta.x) * 0.10
+                            let pitch =  Float(-delta.y) * 0.08  // up = look up
                             engine.addLook(yawDegrees: yaw, pitchDegrees: pitch)
                         }
                     }

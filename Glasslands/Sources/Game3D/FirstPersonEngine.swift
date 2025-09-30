@@ -4,12 +4,7 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  Camera + movement + world hookup. Heavy lifting is split into separate files:
-//  - ChunkStreamer3D.swift
-//  - TerrainChunkNode.swift
-//  - VegetationPlacer3D.swift
-//  - BeaconPlacer3D.swift
-//  - SceneKitHelpers.swift (tiny utilities)
+//  Camera + movement + world hookup.
 //
 
 import Foundation
@@ -23,8 +18,10 @@ final class FirstPersonEngine: NSObject {
     // MARK: Config
     struct Config {
         let tileSize: Float = 2.0
-        let heightScale: Float = 14.0
-        let chunkTiles = IVec2(48, 48)
+        // Flatter overall elevation
+        let heightScale: Float = 8.0
+        // Slightly denser mesh for smoother look
+        let chunkTiles = IVec2(64, 64)
         let preloadRadius: Int = 2
         let moveSpeed: Float = 6.0
         let eyeHeight: Float = 1.62
@@ -32,11 +29,13 @@ final class FirstPersonEngine: NSObject {
         var tilesX: Int { chunkTiles.x }
         var tilesZ: Int { chunkTiles.y }
     }
+
     let cfg = Config()
 
     // MARK: Scene
     private var scene = SCNScene()
     private weak var scnView: SCNView?
+
     private var recipe: BiomeRecipe!
     private var noise: NoiseFields!
     private var chunker: ChunkStreamer3D!
@@ -73,10 +72,7 @@ final class FirstPersonEngine: NSObject {
         apply(recipe: recipe, force: true)
     }
 
-    func setPaused(_ paused: Bool) {
-        scnView?.isPlaying = !paused
-    }
-
+    func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }
     func setMoveInput(_ v: SIMD2<Float>) { moveInput = v }
 
     func addLook(yawDegrees: Float, pitchDegrees: Float) {
@@ -89,12 +85,11 @@ final class FirstPersonEngine: NSObject {
     func apply(recipe: BiomeRecipe, force: Bool = false) {
         if !force, let r = self.recipe, r == recipe { return }
         self.recipe = recipe
-        noise = NoiseFields(recipe: recipe)
+        noise = NoiseFields(recipe: recipe)          // flatter noise (see NoiseFields.swift)
         resetWorld()
     }
 
-    @MainActor
-    func snapshot() -> UIImage? { scnView?.snapshot() }
+    @MainActor func snapshot() -> UIImage? { scnView?.snapshot() }
 
     // MARK: Frame stepping (called by RendererProxy)
     @MainActor
@@ -103,14 +98,15 @@ final class FirstPersonEngine: NSObject {
         lastTime = t
 
         // Move along ground plane
-        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
+        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
         let delta   = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
 
-        var pos = yawNode.position.simd
+        var pos = yawNode.simdPosition
         pos += delta
         pos.y = sampleHeight(worldX: pos.x, z: pos.z) + cfg.eyeHeight
-        yawNode.position = SCNVector3(pos)
+
+        yawNode.simdPosition = pos
 
         // Stream chunks + collect beacons
         chunker.updateVisible(center: pos)
@@ -120,6 +116,7 @@ final class FirstPersonEngine: NSObject {
     // MARK: Build scene
     private func resetWorld() {
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
+
         buildLighting()
         buildSky()
 
@@ -127,9 +124,10 @@ final class FirstPersonEngine: NSObject {
         yaw = 0; pitch = -0.1
         yawNode.position = spawn()
         updateRig()
+
         let camera = SCNCamera()
         camera.zNear = 0.01
-        camera.zFar = 5000
+        camera.zFar  = 5000
         camera.fieldOfView = 70
         camNode.camera = camera
         pitchNode.addChildNode(camNode)
@@ -142,7 +140,7 @@ final class FirstPersonEngine: NSObject {
             guard let self else { return }
             b.forEach { self.beacons.insert($0) }
         }
-        chunker.buildAround(yawNode.position.simd)
+        chunker.buildAround(yawNode.simdPosition)
 
         // Score reset
         score = 0
@@ -183,22 +181,22 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func spawn() -> SCNVector3 {
-        // Simple local “walkable finder” (no external classifier required).
         let ts = cfg.tileSize
 
         func isWalkable(tx: Int, tz: Int) -> Bool {
             let h = noise.sampleHeight(Double(tx), Double(tz)) / max(0.0001, recipe.height.amplitude)
             let s = noise.slope(Double(tx), Double(tz))
             let r = noise.riverMask(Double(tx), Double(tz))
-            if h < 0.28 { return false }         // water
-            if s > 0.35 { return false }         // too steep
-            if r > 0.60 { return false }         // river channel
+            if h < 0.28 { return false } // water
+            if s > 0.35 { return false } // too steep
+            if r > 0.60 { return false } // river channel
             return true
         }
 
         if isWalkable(tx: 0, tz: 0) {
             return SCNVector3(ts * 0.5, sampleHeight(worldX: 0, z: 0) + cfg.eyeHeight, ts * 0.5)
         }
+
         for radius in 1...32 {
             for z in -radius...radius {
                 for x in -radius...radius where abs(x) == radius || abs(z) == radius {
