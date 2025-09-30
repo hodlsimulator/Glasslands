@@ -1,0 +1,30 @@
+{
+  "configurations" : [
+    {
+      "id" : "CC599D8F-F194-4AE9-BD4B-BAB6484A5B1F",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "performanceAntipatternCheckerEnabled" : true,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:Glasslands.xcodeproj",
+      "identifier" : "E172D7F22E8A566700B2B817",
+      "name" : "Glasslands"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:Glasslands.xcodeproj",
+        "identifier" : "E172D7FF2E8A566A00B2B817",
+        "name" : "GlasslandsTests"
+      }
+    }
+  ],
+  "version" : 1
+}

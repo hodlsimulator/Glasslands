@@ -40,6 +40,7 @@
 		E172D8222E8A56F300B2B817 /* GameKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameKit.framework; path = System/Library/Frameworks/GameKit.framework; sourceTree = SDKROOT; };
 		E172D8242E8A573E00B2B817 /* ImagePlayground.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImagePlayground.framework; path = System/Library/Frameworks/ImagePlayground.framework; sourceTree = SDKROOT; };
 		E172D8262E8A576F00B2B817 /* FoundationModels.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FoundationModels.framework; path = System/Library/Frameworks/FoundationModels.framework; sourceTree = SDKROOT; };
+		E1B246F52E8B939A0026C6B6 /* Glasslands.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = Glasslands.xctestplan; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -106,6 +107,7 @@
 		E172D7EA2E8A566700B2B817 = {
 			isa = PBXGroup;
 			children = (
+				E1B246F52E8B939A0026C6B6 /* Glasslands.xctestplan */,
 				E172D7F52E8A566700B2B817 /* Glasslands */,
 				E172D8032E8A566A00B2B817 /* GlasslandsTests */,
 				E172D80D2E8A566A00B2B817 /* GlasslandsUITests */,
