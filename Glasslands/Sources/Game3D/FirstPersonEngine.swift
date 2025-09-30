@@ -5,6 +5,7 @@
 //  Created by . . on 9/30/25.
 //
 //  Camera + movement + world hookup.
+//  Adds a visible sun disc and a lightweight cloud dome.
 //
 
 import Foundation
@@ -14,22 +15,20 @@ import simd
 import UIKit
 
 final class FirstPersonEngine: NSObject {
-
     // MARK: Config
     struct Config {
-        let tileSize: Float = 2.0
-        // Flatter overall elevation
-        let heightScale: Float = 8.0
-        // Slightly denser mesh for smoother look
+        let tileSize: Float = 2.0     // world metres per tile
+        let heightScale: Float = 8.0  // world metres per height unit
+
         let chunkTiles = IVec2(64, 64)
         let preloadRadius: Int = 2
+
         let moveSpeed: Float = 6.0
         let eyeHeight: Float = 1.62
 
         var tilesX: Int { chunkTiles.x }
         var tilesZ: Int { chunkTiles.y }
     }
-
     let cfg = Config()
 
     // MARK: Scene
@@ -44,6 +43,12 @@ final class FirstPersonEngine: NSObject {
     private let yawNode = SCNNode()
     private let pitchNode = SCNNode()
     private let camNode = SCNNode()
+
+    // Sky bits
+    private let skyAnchor = SCNNode()
+    private var cloudDome: SCNNode?
+    private var sunVisualPivot: SCNNode?
+    private var sunLightNode: SCNNode?
 
     // Input
     private var moveInput = SIMD2<Float>(repeating: 0)
@@ -67,13 +72,20 @@ final class FirstPersonEngine: NSObject {
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
+
         buildLighting()
         buildSky()
+
         apply(recipe: recipe, force: true)
     }
 
-    func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }
-    func setMoveInput(_ v: SIMD2<Float>) { moveInput = v }
+    func setPaused(_ paused: Bool) {
+        scnView?.isPlaying = !paused
+    }
+
+    func setMoveInput(_ v: SIMD2<Float>) {
+        moveInput = v
+    }
 
     func addLook(yawDegrees: Float, pitchDegrees: Float) {
         yaw += yawDegrees * Float.pi / 180
@@ -85,11 +97,12 @@ final class FirstPersonEngine: NSObject {
     func apply(recipe: BiomeRecipe, force: Bool = false) {
         if !force, let r = self.recipe, r == recipe { return }
         self.recipe = recipe
-        noise = NoiseFields(recipe: recipe)          // flatter noise (see NoiseFields.swift)
+        noise = NoiseFields(recipe: recipe) // flatter noise (see NoiseFields.swift)
         resetWorld()
     }
 
-    @MainActor func snapshot() -> UIImage? { scnView?.snapshot() }
+    @MainActor
+    func snapshot() -> UIImage? { scnView?.snapshot() }
 
     // MARK: Frame stepping (called by RendererProxy)
     @MainActor
@@ -98,15 +111,17 @@ final class FirstPersonEngine: NSObject {
         lastTime = t
 
         // Move along ground plane
-        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
+        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
         let delta   = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
 
         var pos = yawNode.simdPosition
         pos += delta
         pos.y = sampleHeight(worldX: pos.x, z: pos.z) + cfg.eyeHeight
-
         yawNode.simdPosition = pos
+
+        // Keep sky centred on the player (infinite-distance effect)
+        skyAnchor.simdPosition = pos
 
         // Stream chunks + collect beacons
         chunker.updateVisible(center: pos)
@@ -130,6 +145,7 @@ final class FirstPersonEngine: NSObject {
         camera.zFar  = 5000
         camera.fieldOfView = 70
         camNode.camera = camera
+
         pitchNode.addChildNode(camNode)
         yawNode.addChildNode(pitchNode)
         scene.rootNode.addChildNode(yawNode)
@@ -148,6 +164,7 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func buildLighting() {
+        // Ambient
         let amb = SCNLight()
         amb.type = .ambient
         amb.intensity = 400
@@ -155,6 +172,7 @@ final class FirstPersonEngine: NSObject {
         let ambNode = SCNNode(); ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
+        // Sun (directional)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1100
@@ -163,15 +181,75 @@ final class FirstPersonEngine: NSObject {
         sun.shadowRadius = 4
         sun.shadowColor = UIColor.black.withAlphaComponent(0.35)
         let sunNode = SCNNode(); sunNode.light = sun
-        sunNode.eulerAngles = SCNVector3(-Float.pi/3, Float.pi/4, 0)
+        sunNode.eulerAngles = SCNVector3(-Float.pi/3, Float.pi/4, 0) // elevation + azimuth
         scene.rootNode.addChildNode(sunNode)
+        self.sunLightNode = sunNode
     }
 
     private func buildSky() {
+        // Clean up (in case of rebuild)
+        skyAnchor.removeFromParentNode()
+        skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
+        cloudDome = nil
+        sunVisualPivot = nil
+
+        // Subtle blue gradient background (fallback behind geometry)
         let top = UIColor(red: 0.50, green: 0.74, blue: 0.92, alpha: 1)
         let mid = UIColor(red: 0.72, green: 0.86, blue: 0.96, alpha: 1)
         let img = gradientImage(top: top, bottom: mid, height: 512)
         scene.background.contents = img
+
+        // Anchor that follows the player (but does not rotate with yaw/pitch)
+        scene.rootNode.addChildNode(skyAnchor)
+
+        // Cloud dome (large inward-facing sphere)
+        let sphere = SCNSphere(radius: 800)
+        sphere.segmentCount = 48
+
+        let cloudMat = SCNMaterial()
+        cloudMat.lightingModel = .constant
+        cloudMat.isDoubleSided = true
+        cloudMat.cullMode = .front // render inside of sphere
+        cloudMat.diffuse.contents = cloudsImage(size: 1024)
+        cloudMat.transparency = 0.82
+        cloudMat.writesToDepthBuffer = false
+        cloudMat.readsFromDepthBuffer = false
+
+        sphere.firstMaterial = cloudMat
+
+        let cloudNode = SCNNode(geometry: sphere)
+        cloudNode.name = "cloudDome"
+        cloudNode.renderingOrder = -1 // draw first
+        skyAnchor.addChildNode(cloudNode)
+        self.cloudDome = cloudNode
+
+        // Slow drift
+        let spin = SCNAction.repeatForever(.rotateBy(x: 0, y: 0.03, z: 0, duration: 60))
+        cloudNode.runAction(spin)
+
+        // Visible sun disc aligned with the sun light direction
+        if let sunLightNode {
+            let pivot = SCNNode()
+            pivot.eulerAngles = sunLightNode.eulerAngles
+
+            let d: CGFloat = 12.0
+            let plane = SCNPlane(width: d, height: d)
+            let sunMat = SCNMaterial()
+            sunMat.lightingModel = .constant
+            sunMat.isDoubleSided = true
+            sunMat.emission.contents = sunImage(diameter: 256)
+            sunMat.writesToDepthBuffer = false
+            sunMat.readsFromDepthBuffer = false
+            plane.firstMaterial = sunMat
+
+            let sunDisc = SCNNode(geometry: plane)
+            sunDisc.position = SCNVector3(0, 0, -400) // along -Z of pivot (towards light direction)
+            sunDisc.constraints = [SCNBillboardConstraint()] // always face camera
+
+            pivot.addChildNode(sunDisc)
+            skyAnchor.addChildNode(pivot)
+            self.sunVisualPivot = pivot
+        }
     }
 
     private func updateRig() {
@@ -187,9 +265,9 @@ final class FirstPersonEngine: NSObject {
             let h = noise.sampleHeight(Double(tx), Double(tz)) / max(0.0001, recipe.height.amplitude)
             let s = noise.slope(Double(tx), Double(tz))
             let r = noise.riverMask(Double(tx), Double(tz))
-            if h < 0.28 { return false } // water
-            if s > 0.35 { return false } // too steep
-            if r > 0.60 { return false } // river channel
+            if h < 0.28 { return false }   // water
+            if s > 0.35 { return false }   // too steep
+            if r > 0.60 { return false }   // river channel
             return true
         }
 
@@ -208,6 +286,7 @@ final class FirstPersonEngine: NSObject {
                 }
             }
         }
+
         return SCNVector3(0, sampleHeight(worldX: 0, z: 0) + cfg.eyeHeight, 0)
     }
 
