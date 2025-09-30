@@ -1,3 +1,5 @@
+<!-- Glasslands/Sources/App/Info.plist -->
+<!-- Adds UIRequiredDeviceCapabilities=metal (SceneKit/Metal), keeps Photos add-only reason. -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -22,22 +24,11 @@
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
-
-    <!-- ✅ Launch screen via Info.plist (no storyboard needed) -->
     <key>UILaunchScreen</key>
     <dict>
-        <!-- Uses a color from Assets by name -->
         <key>UIColorName</key>
         <string>LaunchBackground</string>
-        <!-- Optional centered image (comment out if you don't add it)
-        <key>UIImageName</key>
-        <string>LaunchMark</string>
-        <key>UIImageRespectsSafeAreaInsets</key>
-        <true/>
-        -->
     </dict>
-
-    <!-- iPhone orientations -->
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
@@ -45,8 +36,6 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
         <string>UIInterfaceOrientationPortraitUpsideDown</string>
     </array>
-
-    <!-- iPad must support all orientations when not requiring full screen -->
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
@@ -54,9 +43,11 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
-
-    <!-- Photos permission used by postcard save -->
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>We save your generated postcards to your Photos library.</string>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>metal</string>
+    </array>
 </dict>
 </plist>
