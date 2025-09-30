@@ -25,8 +25,7 @@ func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
     for c in colors {
         var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
         c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        floats.append(Float(r)); floats.append(Float(g))
-        floats.append(Float(b)); floats.append(Float(a))
+        floats.append(Float(r)); floats.append(Float(g)); floats.append(Float(b)); floats.append(Float(a))
     }
     let stride = MemoryLayout<Float>.size * 4
     let data = floats.withUnsafeBytes { Data($0) }
@@ -62,7 +61,6 @@ func skyGradientEquirect(width: Int, height: Int) -> UIImage {
     let colors = [top.cgColor, mid.cgColor, bot.cgColor] as CFArray
     let space = CGColorSpaceCreateDeviceRGB()
     let grad = CGGradient(colorsSpace: space, colors: colors, locations: [0, 0.55, 1])!
-
     ctx.drawLinearGradient(
         grad,
         start: CGPoint(x: size.width * 0.5, y: 0),
@@ -80,10 +78,12 @@ func sunImage(diameter: Int) -> UIImage {
     let d = max(8, diameter)
     let size = CGSize(width: d, height: d)
     let r = min(size.width, size.height) * 0.5
+
     UIGraphicsBeginImageContextWithOptions(size, false, 1)
     guard let ctx = UIGraphicsGetCurrentContext() else {
         let img = UIImage(); UIGraphicsEndImageContext(); return img
     }
+
     // Outer glow
     let space = CGColorSpaceCreateDeviceRGB()
     let glowColors = [
@@ -91,43 +91,45 @@ func sunImage(diameter: Int) -> UIImage {
         UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.0).cgColor
     ] as CFArray
     let glowGrad = CGGradient(colorsSpace: space, colors: glowColors, locations: [0, 1])!
-    ctx.drawRadialGradient(glowGrad,
-                           startCenter: CGPoint(x: r, y: r), startRadius: 0,
-                           endCenter: CGPoint(x: r, y: r),   endRadius: r,
-                           options: [])
+    ctx.drawRadialGradient(
+        glowGrad,
+        startCenter: CGPoint(x: r, y: r), startRadius: 0,
+        endCenter: CGPoint(x: r, y: r), endRadius: r,
+        options: []
+    )
+
     // Core disc
-    let coreRect = CGRect(x: size.width*0.5 - r*0.58,
-                          y: size.height*0.5 - r*0.58,
-                          width: r*1.16, height: r*1.16)
+    let coreRect = CGRect(x: size.width*0.5 - r*0.58, y: size.height*0.5 - r*0.58, width: r*1.16, height: r*1.16)
     ctx.setFillColor(UIColor(white: 1.0, alpha: 1.0).cgColor)
     ctx.fillEllipse(in: coreRect)
+
     let img = UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
     UIGraphicsEndImageContext()
     return img
 }
 
 /// Equirectangular, seamless cloud **alpha** map (premultiplied RGBA), 2:1 aspect.
+/// Adds a polar fade to eliminate the zenith seam you see when looking straight up.
 func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
     let W = max(256, width)
     let H = max(128, height)
 
     // Puffy fractal Perlin
-    let src = GKPerlinNoiseSource(frequency: 1.6,
-                                  octaveCount: 5,
-                                  persistence: 0.55,
-                                  lacunarity: 2.0,
-                                  seed: seed)
+    let src = GKPerlinNoiseSource(frequency: 1.6, octaveCount: 5, persistence: 0.55, lacunarity: 2.0, seed: seed)
     let noise = GKNoise(src)
-    let map = GKNoiseMap(noise,
-                         size: vector_double2(1, 1),
-                         origin: vector_double2(0, 0),
-                         sampleCount: vector_int2(Int32(W), Int32(H)),
-                         seamless: true) // horizontally seamless
+
+    // Seamless horizontally
+    let map = GKNoiseMap(
+        noise,
+        size: vector_double2(1, 1),
+        origin: vector_double2(0, 0),
+        sampleCount: vector_int2(Int32(W), Int32(H)),
+        seamless: true
+    )
 
     var bytes = [UInt8](repeating: 0, count: W * H * 4)
 
-    @inline(__always)
-    func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+    @inline(__always) func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
         if x <= a { return 0 }
         if x >= b { return 1 }
         let t = (x - a) / (b - a)
@@ -138,36 +140,50 @@ func cloudsEquirect(width: Int, height: Int, seed: Int32 = 424242) -> UIImage {
     let softness  = 0.18
     let gain: Double = 0.95
 
+    // Fade clouds near the poles (top/bottom of the dome) to avoid “starburst” seams.
+    // v ∈ [0,1] (0 = south pole, 1 = north pole). sin(πv) is 0 at poles, 1 at equator.
+    let polarFadeExp = 1.6
+
     var off = 0
     for y in 0..<H {
+        let v = Double(y) / Double(H-1)
+        let polar = pow(sin(.pi * v), polarFadeExp) // 0 at poles → 1 at mid
         for x in 0..<W {
             let n = Double(map.value(at: vector_int2(Int32(x), Int32(y))))
-            let v01 = (n * 0.5) + 0.5
-            let a = gain * smoothstep(threshold - softness,
-                                      threshold + softness,
-                                      v01)
-            let aa = UInt8(max(0, min(255, Int(a * 255))))
-            bytes[off+0] = aa
-            bytes[off+1] = aa
-            bytes[off+2] = aa
-            bytes[off+3] = aa
+            // Map to soft alpha islands
+            let a = smoothstep(threshold - softness, threshold + softness, (n * 0.5 + 0.5) * gain)
+            let alpha = a * polar
+
+            // Slightly bluish white for cloud colour; premultiplied by alpha
+            let r = UInt8((1.0 * alpha) * 255.0)
+            let g = UInt8((1.0 * alpha) * 255.0)
+            let b = UInt8((1.0 * alpha) * 255.0)
+            let A = UInt8(alpha * 255.0)
+
+            bytes[off + 0] = r
+            bytes[off + 1] = g
+            bytes[off + 2] = b
+            bytes[off + 3] = A
             off += 4
         }
     }
 
-    let cs = CGColorSpaceCreateDeviceRGB()
-    let bitsPerComp = 8
-    let bytesPerRow = W * 4
-    var mutable = bytes // CGContext needs a mutable pointer
+    let data = Data(bytes)
+    let space = CGColorSpaceCreateDeviceRGB()
+    let provider = CGDataProvider(data: data as CFData)!
+    let bmpInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
 
-    guard let ctx = CGContext(data: &mutable,
-                              width: W, height: H,
-                              bitsPerComponent: bitsPerComp,
-                              bytesPerRow: bytesPerRow,
-                              space: cs,
-                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-    else { return UIImage() }
+    let cg = CGImage(
+        width: W, height: H,
+        bitsPerComponent: 8, bitsPerPixel: 32,
+        bytesPerRow: W * 4,
+        space: space,
+        bitmapInfo: bmpInfo,
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: true,
+        intent: .defaultIntent
+    )!
 
-    guard let cg = ctx.makeImage() else { return UIImage() }
     return UIImage(cgImage: cg)
 }
