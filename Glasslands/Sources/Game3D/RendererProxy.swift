@@ -8,24 +8,27 @@
 import Foundation
 import SceneKit
 
-/// Lightweight delegate that receives SceneKit callbacks on the render thread,
-/// then schedules the real update on the MainActor.
-final class RendererProxy: NSObject {
-    weak var engine: FirstPersonEngine?
+/// Receives SceneKit callbacks on the render thread, then schedules the real
+/// update on the MainActor without touching main-isolated state here.
+final class RendererProxy: NSObject, SCNSceneRendererDelegate {
+    // We avoid storing/reading a @MainActor object here. Instead we store a
+    // @Sendable tick closure built on the main thread that hops to MainActor.
+    private let tick: @Sendable (TimeInterval) -> Void
 
     init(engine: FirstPersonEngine) {
-        self.engine = engine
+        // Build the closure on main, capturing the engine weakly and hopping
+        // to MainActor inside the closure body.
+        self.tick = { [weak engine] t in
+            Task { @MainActor in
+                engine?.stepUpdateMain(at: t)
+            }
+        }
         super.init()
     }
-}
 
-// Treat the delegate conformance as pre-concurrency so it doesn't inherit MainActor isolation.
-extension RendererProxy: @preconcurrency SCNSceneRendererDelegate {
-    // This is called by SceneKit on its render thread.
-    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        // Bounce to the MainActor before touching engine/SceneKit state.
-        Task { @MainActor [weak engine] in
-            engine?.stepUpdateMain(at: time)
-        }
+    // Nonisolated so SceneKit can call this from its render queue without
+    // any executor assertions. We don't touch main-isolated state here.
+    nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        tick(time)
     }
 }

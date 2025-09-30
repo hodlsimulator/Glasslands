@@ -14,7 +14,7 @@ import GameplayKit
 import simd
 import UIKit
 
-final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
+final class FirstPersonEngine: NSObject {
 
     // MARK: Config
 
