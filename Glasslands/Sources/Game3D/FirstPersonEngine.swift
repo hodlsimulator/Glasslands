@@ -5,7 +5,8 @@
 //  Created by . . on 9/30/25.
 //
 //  Camera + movement + world hookup.
-//  Adds a visible sun disc and a lightweight cloud dome.
+//  Adds a clearly visible sun disc, tiled/parallax clouds,
+//  and a ground clamp so the player cannot fall through.
 //
 
 import Foundation
@@ -25,6 +26,9 @@ final class FirstPersonEngine: NSObject {
 
         let moveSpeed: Float = 6.0
         let eyeHeight: Float = 1.62
+
+        // Descent smoothing so we don't "drop" down cliffs too hard.
+        let maxDescentRate: Float = 8.0  // metres per second
 
         var tilesX: Int { chunkTiles.x }
         var tilesZ: Int { chunkTiles.y }
@@ -46,8 +50,9 @@ final class FirstPersonEngine: NSObject {
 
     // Sky bits
     private let skyAnchor = SCNNode()
-    private var cloudDome: SCNNode?
-    private var sunVisualPivot: SCNNode?
+    private var cloudDomeNear: SCNNode?
+    private var cloudDomeFar: SCNNode?
+    private var sunDiscNode: SCNNode?
     private var sunLightNode: SCNNode?
 
     // Input
@@ -72,6 +77,9 @@ final class FirstPersonEngine: NSObject {
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
+
+        // No gravity-driven physics for this free-fly camera.
+        scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
 
         buildLighting()
         buildSky()
@@ -117,7 +125,21 @@ final class FirstPersonEngine: NSObject {
 
         var pos = yawNode.simdPosition
         pos += delta
-        pos.y = sampleHeight(worldX: pos.x, z: pos.z) + cfg.eyeHeight
+
+        // Hard ground clamp with gentle downhill smoothing
+        let groundY = groundHeightFootprint(worldX: pos.x, z: pos.z)
+        let targetY = groundY + cfg.eyeHeight
+        if !targetY.isFinite {
+            // Fail-safe: respawn on any NaN/Inf
+            pos = spawn().simd
+        } else if pos.y <= targetY {
+            pos.y = targetY
+        } else {
+            // Allow descending slopes, but not instant drops
+            let maxDrop = cfg.maxDescentRate * dt
+            pos.y = max(targetY, pos.y - maxDrop)
+        }
+
         yawNode.simdPosition = pos
 
         // Keep sky centred on the player (infinite-distance effect)
@@ -167,21 +189,23 @@ final class FirstPersonEngine: NSObject {
         // Ambient
         let amb = SCNLight()
         amb.type = .ambient
-        amb.intensity = 400
-        amb.color = UIColor(white: 0.92, alpha: 1)
+        amb.intensity = 450
+        amb.color = UIColor(white: 0.94, alpha: 1)
         let ambNode = SCNNode(); ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
         // Sun (directional)
         let sun = SCNLight()
         sun.type = .directional
-        sun.intensity = 1100
+        sun.intensity = 1200
         sun.castsShadow = true
         sun.shadowMode = .deferred
         sun.shadowRadius = 4
-        sun.shadowColor = UIColor.black.withAlphaComponent(0.35)
+        sun.shadowColor = UIColor.black.withAlphaComponent(0.33)
+
         let sunNode = SCNNode(); sunNode.light = sun
-        sunNode.eulerAngles = SCNVector3(-Float.pi/3, Float.pi/4, 0) // elevation + azimuth
+        // Elevation + azimuth
+        sunNode.eulerAngles = SCNVector3(-Float.pi/3, Float.pi/4, 0)
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
     }
@@ -190,8 +214,9 @@ final class FirstPersonEngine: NSObject {
         // Clean up (in case of rebuild)
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
-        cloudDome = nil
-        sunVisualPivot = nil
+        sunDiscNode = nil
+        cloudDomeNear = nil
+        cloudDomeFar = nil
 
         // Subtle blue gradient background (fallback behind geometry)
         let top = UIColor(red: 0.50, green: 0.74, blue: 0.92, alpha: 1)
@@ -202,53 +227,71 @@ final class FirstPersonEngine: NSObject {
         // Anchor that follows the player (but does not rotate with yaw/pitch)
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Cloud dome (large inward-facing sphere)
-        let sphere = SCNSphere(radius: 800)
-        sphere.segmentCount = 48
+        // --- Cloud domes (two layers, tiled) ---
+        // Far layer
+        let sphereFar = SCNSphere(radius: 820)
+        sphereFar.segmentCount = 48
+        let matFar = SCNMaterial()
+        matFar.lightingModel = .constant
+        matFar.isDoubleSided = true
+        matFar.cullMode = .front // render inside of sphere
+        matFar.diffuse.contents = cloudsImage(size: 1024, seed: 224466)
+        matFar.transparency = 0.72
+        matFar.writesToDepthBuffer = false
+        matFar.readsFromDepthBuffer = false
+        matFar.diffuse.wrapS = .repeat
+        matFar.diffuse.wrapT = .repeat
+        matFar.diffuse.contentsTransform = SCNMatrix4MakeScale(6, 3, 1) // tile many puffs
+        sphereFar.firstMaterial = matFar
 
-        let cloudMat = SCNMaterial()
-        cloudMat.lightingModel = .constant
-        cloudMat.isDoubleSided = true
-        cloudMat.cullMode = .front // render inside of sphere
-        cloudMat.diffuse.contents = cloudsImage(size: 1024)
-        cloudMat.transparency = 0.82
-        cloudMat.writesToDepthBuffer = false
-        cloudMat.readsFromDepthBuffer = false
+        let far = SCNNode(geometry: sphereFar)
+        far.name = "cloudDomeFar"
+        far.renderingOrder = -1 // draw first
+        skyAnchor.addChildNode(far)
+        cloudDomeFar = far
+        far.runAction(.repeatForever(.rotateBy(x: 0, y: -0.02, z: 0, duration: 60)))
 
-        sphere.firstMaterial = cloudMat
+        // Near/parallax layer
+        let sphereNear = SCNSphere(radius: 780)
+        sphereNear.segmentCount = 48
+        let matNear = matFar.copy() as! SCNMaterial
+        matNear.diffuse.contents = cloudsImage(size: 1024, seed: 987654321)
+        matNear.transparency = 0.58
+        matNear.diffuse.contentsTransform = SCNMatrix4MakeScale(9, 4, 1)
+        sphereNear.firstMaterial = matNear
 
-        let cloudNode = SCNNode(geometry: sphere)
-        cloudNode.name = "cloudDome"
-        cloudNode.renderingOrder = -1 // draw first
-        skyAnchor.addChildNode(cloudNode)
-        self.cloudDome = cloudNode
+        let near = SCNNode(geometry: sphereNear)
+        near.name = "cloudDomeNear"
+        near.renderingOrder = -1
+        skyAnchor.addChildNode(near)
+        cloudDomeNear = near
+        near.runAction(.repeatForever(.rotateBy(x: 0, y: 0.04, z: 0, duration: 60)))
 
-        // Slow drift
-        let spin = SCNAction.repeatForever(.rotateBy(x: 0, y: 0.03, z: 0, duration: 60))
-        cloudNode.runAction(spin)
-
-        // Visible sun disc aligned with the sun light direction
+        // --- Visible sun disc aligned with the light direction ---
         if let sunLightNode {
-            let pivot = SCNNode()
-            pivot.eulerAngles = sunLightNode.eulerAngles
-
-            let d: CGFloat = 12.0
-            let plane = SCNPlane(width: d, height: d)
+            let discSize: CGFloat = 18.0
+            let plane = SCNPlane(width: discSize, height: discSize)
             let sunMat = SCNMaterial()
             sunMat.lightingModel = .constant
             sunMat.isDoubleSided = true
-            sunMat.emission.contents = sunImage(diameter: 256)
+            sunMat.emission.contents = sunImage(diameter: 512)
+            sunMat.blendMode = .add          // bright glow against sky
             sunMat.writesToDepthBuffer = false
             sunMat.readsFromDepthBuffer = false
             plane.firstMaterial = sunMat
 
             let sunDisc = SCNNode(geometry: plane)
-            sunDisc.position = SCNVector3(0, 0, -400) // along -Z of pivot (towards light direction)
+            sunDisc.name = "sunDisc"
+            sunDisc.renderingOrder = 10      // after clouds
             sunDisc.constraints = [SCNBillboardConstraint()] // always face camera
 
-            pivot.addChildNode(sunDisc)
-            skyAnchor.addChildNode(pivot)
-            self.sunVisualPivot = pivot
+            // Place it along the sun light direction at a fixed distance from the sky anchor
+            let dir = -sunLightNode.presentation.simdWorldFront // sun shines along -Z
+            let distance: Float = 500
+            sunDisc.simdPosition = dir * distance
+
+            skyAnchor.addChildNode(sunDisc)
+            self.sunDiscNode = sunDisc
         }
     }
 
@@ -296,6 +339,17 @@ final class FirstPersonEngine: NSObject {
         let h0 = noise.sampleHeight(tx, tz)
         let h1 = noise.sampleHeight(tx + 0.5, tz + 0.5)
         return Float((h0 * 0.7 + h1 * 0.3)) * cfg.heightScale
+    }
+
+    /// Samples a small "footprint" and returns the **highest** contact to avoid clipping on edges.
+    private func groundHeightFootprint(worldX x: Float, z: Float) -> Float {
+        let r: Float = 0.35
+        let h0 = sampleHeight(worldX: x,       z: z)
+        let h1 = sampleHeight(worldX: x - r,   z: z - r)
+        let h2 = sampleHeight(worldX: x + r,   z: z - r)
+        let h3 = sampleHeight(worldX: x - r,   z: z + r)
+        let h4 = sampleHeight(worldX: x + r,   z: z + r)
+        return max(h0, h1, h2, h3, h4)
     }
 
     private func collectNearbyBeacons(playerXZ: SIMD2<Float>) {

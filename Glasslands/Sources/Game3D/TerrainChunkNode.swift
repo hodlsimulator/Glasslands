@@ -5,7 +5,8 @@
 //  Created by . . on 9/30/25.
 //
 //  Builds one SceneKit mesh chunk from the noise fields.
-//  This version makes the mid-altitude band green (grass).
+//  This version dramatically increases grass coverage,
+//  adds slope-aware rock, and gives the mesh a static physics body.
 //
 
 import SceneKit
@@ -74,7 +75,7 @@ struct TerrainChunkNode {
         var normals   = [SCNVector3](repeating: .zero, count: vertsX * vertsZ)
         var colours   = [UIColor](repeating: .white, count: vertsX * vertsZ)
 
-        let grad = HeightGradient()
+        let grad = HeightClassifier(recipe: recipe)
         let minY = heights.min() ?? 0
         let maxY = heights.max() ?? 1
         let invRange: Float = (maxY > minY) ? 1.0 / (maxY - minY) : 1.0
@@ -86,8 +87,11 @@ struct TerrainChunkNode {
 
         for z in 0..<vertsZ {
             for x in 0..<vertsX {
-                let wX = Float(originTileX + x) * tileSize
-                let wZ = Float(originTileZ + z) * tileSize
+                let tx = Float(originTileX + x)
+                let tz = Float(originTileZ + z)
+
+                let wX = tx * tileSize
+                let wZ = tz * tileSize
                 let y  = heights[idx(x, z)]
 
                 positions[idx(x, z)] = SCNVector3(wX, y, wZ)
@@ -102,11 +106,15 @@ struct TerrainChunkNode {
                 let n  = simd_normalize(simd_cross(tZ, tX)) // right-handed
                 normals[idx(x, z)] = SCNVector3(n)
 
-                // Vertex colour from height band + river mask
+                // Additional local metrics for colouring
                 let yNorm = (y - minY) * invRange
-                let rMask = Float(noise.riverMask(Double(originTileX + x), Double(originTileZ + z)))
-                let c = grad.color(yNorm: yNorm, riverMask: rMask)
-                colours[idx(x, z)] = UIColor(red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: CGFloat(c.w))
+                let slopeMag = min(1.0, (abs(hR - hL) + abs(hU - hD)) * 0.20) // tuned slope proxy
+                let river = Float(noise.riverMask(Double(tx), Double(tz)))
+                let moistureRaw = Float(noise.sampleMoisture(Double(tx), Double(tz)))
+                let moisture = min(1, moistureRaw / max(0.001, Float(recipe.moisture.amplitude)))
+
+                let rgba = grad.color(yNorm: yNorm, slope: slopeMag, riverMask: river, moisture01: moisture)
+                colours[idx(x, z)] = UIColor(red: CGFloat(rgba.x), green: CGFloat(rgba.y), blue: CGFloat(rgba.z), alpha: CGFloat(rgba.w))
             }
         }
 
@@ -143,32 +151,62 @@ struct TerrainChunkNode {
         mat.roughness.contents = 0.95
         mat.metalness.contents = 0.0
         mat.writesToDepthBuffer = true
+        mat.readsFromDepthBuffer = true
         geom.materials = [mat]
 
         let meshNode = SCNNode(geometry: geom)
         meshNode.castsShadow = false
+
+        // Give terrain a static physics body so *anything* with physics won't fall through.
+        meshNode.physicsBody = SCNPhysicsBody.static()
+        meshNode.physicsBody?.restitution = 0.0
+        meshNode.physicsBody?.friction = 1.0
+        meshNode.physicsBody?.categoryBitMask = 1
+
         return meshNode
     }
 
-    // Minimal height palette → RGBA (0…1)
-    private struct HeightGradient {
-        // beach, deep water, GRASS, dry/sand, rock/snow
-        // (changed the mid band to a natural grass green)
-        let stops: [SIMD4<Float>] = [
-            SIMD4(0.55, 0.80, 0.85, 1.0), // shallows / beach tint
-            SIMD4(0.20, 0.45, 0.55, 1.0), // deep water
-            SIMD4(0.36, 0.62, 0.34, 1.0), // grasslands  ← NEW (was off-white)
-            SIMD4(0.93, 0.88, 0.70, 1.0), // dry/sand
-            SIMD4(0.92, 0.92, 0.95, 1.0)  // rock/snow
-        ]
+    // MARK: - Height → palette (with slope & moisture)
+    private struct HeightClassifier {
+        // Colours (RGBA 0…1)
+        // deep water, shallows, grass base, sand, rock/snow
+        let deep  = SIMD4<Float>(0.18, 0.42, 0.58, 1.0)
+        let shore = SIMD4<Float>(0.55, 0.80, 0.88, 1.0)
+        let grass = SIMD4<Float>(0.32, 0.62, 0.34, 1.0)
+        let sand  = SIMD4<Float>(0.92, 0.87, 0.68, 1.0)
+        let rock  = SIMD4<Float>(0.90, 0.92, 0.95, 1.0)
 
-        func color(yNorm: Float, riverMask r: Float) -> SIMD4<Float> {
-            if r > 0.55, yNorm >= 0.28 { return stops[0] } // water channel tint
-            if yNorm < 0.18 { return stops[1] }            // deep water
-            if yNorm < 0.28 { return stops[0] }            // shallows / beach
-            if yNorm < 0.34 { return stops[3] }            // sand/dry
-            if yNorm < 0.62 { return stops[2] }            // grasslands
-            return stops[4]                                 // high/rock/snow
+        // Thresholds (normalised height 0…1). Wide green band.
+        let deepCut:  Float = 0.22
+        let shoreCut: Float = 0.30
+        let sandCut:  Float = 0.33
+        let snowCut:  Float = 0.88
+
+        let recipe: BiomeRecipe
+
+        func color(yNorm y: Float, slope s: Float, riverMask r: Float, moisture01 m: Float) -> SIMD4<Float> {
+            // Water first
+            if y < deepCut { return deep }
+            if y < shoreCut || r > 0.60 { return shore }
+
+            // Very steep or very high → rock/snow
+            if s > 0.55 || y > snowCut {
+                return rock
+            }
+
+            // A tiny beach/sand fringe just above shore
+            if y < sandCut { return sand }
+
+            // Everything else → lush grass (modulated by moisture)
+            // Moisture lightens & saturates the green slightly.
+            let t = max(0, min(1, m * 0.65 + r * 0.20)) // rivers make it lusher
+            let g = mix(grass, SIMD4<Float>(0.40, 0.75, 0.38, 1.0), t)
+            return g
+        }
+
+        @inline(__always)
+        private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> {
+            a + (b - a) * t
         }
     }
 }

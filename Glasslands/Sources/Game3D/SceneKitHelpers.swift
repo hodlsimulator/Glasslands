@@ -73,7 +73,7 @@ func sunImage(diameter: Int) -> UIImage {
 
     // Outer glow
     let space = CGColorSpaceCreateDeviceRGB()
-    let glowColors = [UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.75).cgColor,
+    let glowColors = [UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.85).cgColor,
                       UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.0).cgColor] as CFArray
     let glowGrad = CGGradient(colorsSpace: space, colors: glowColors, locations: [0, 1])!
     ctx.drawRadialGradient(glowGrad,
@@ -82,7 +82,7 @@ func sunImage(diameter: Int) -> UIImage {
                            options: [])
 
     // Core disc (slightly smaller than full)
-    let coreRect = CGRect(x: size.width*0.5 - r*0.6, y: size.height*0.5 - r*0.6, width: r*1.2, height: r*1.2)
+    let coreRect = CGRect(x: size.width*0.5 - r*0.58, y: size.height*0.5 - r*0.58, width: r*1.16, height: r*1.16)
     ctx.setFillColor(UIColor(white: 1.0, alpha: 1.0).cgColor)
     ctx.fillEllipse(in: coreRect)
 
@@ -92,11 +92,13 @@ func sunImage(diameter: Int) -> UIImage {
 }
 
 // Seamless Perlin-noise clouds alpha mask (premultiplied RGBA)
+// We keep the texture itself fairly "broad" and tile it on the dome
+// so you see many smaller clouds instead of one giant blotch.
 func cloudsImage(size: Int, seed: Int32 = 1337) -> UIImage {
     let N = max(64, size)
 
-    // Tileable noise map
-    let src  = GKPerlinNoiseSource(frequency: 1.2, octaveCount: 5, persistence: 0.55, lacunarity: 2.0, seed: seed)
+    // Tileable noise map (a bit higher frequency)
+    let src  = GKPerlinNoiseSource(frequency: 1.8, octaveCount: 5, persistence: 0.55, lacunarity: 2.0, seed: seed)
     let noise = GKNoise(src)
     let map = GKNoiseMap(noise,
                          size: vector_double2(1, 1),
@@ -116,8 +118,8 @@ func cloudsImage(size: Int, seed: Int32 = 1337) -> UIImage {
     }
 
     // Threshold and softness
-    let threshold = 0.55
-    let softness  = 0.15
+    let threshold = 0.58
+    let softness  = 0.18
     let gain: Double = 0.95 // overall alpha gain
 
     for y in 0..<N {
