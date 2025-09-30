@@ -16,9 +16,9 @@ struct Scene3DView: UIViewRepresentable {
     var onScore: (Int) -> Void
     var onReady: (FirstPersonEngine) -> Void
 
-    // Keep a strong reference to the engine so it isn't released.
     final class Coordinator {
         var engine: FirstPersonEngine?
+        var proxy: RendererProxy?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -33,17 +33,23 @@ struct Scene3DView: UIViewRepresentable {
         // Ensure SwiftUI overlay (virtual sticks) always receives touches.
         view.isUserInteractionEnabled = false
 
+        // Engine
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
 
+        // Attach scene (engine no longer sets itself as delegate).
         engine.attach(to: view, recipe: recipe)
+
+        // Install the proxy as the SCNView delegate and keep a strong reference.
+        let proxy = RendererProxy(engine: engine)
+        context.coordinator.proxy = proxy
+        view.delegate = proxy
+
+        // Start/stop rendering
         engine.setPaused(isPaused)
 
-        // Surface the engine to SwiftUI so ContentView can wire the sticks.
-        DispatchQueue.main.async {
-            onReady(engine)
-        }
-
+        // Hand engine to SwiftUI
+        DispatchQueue.main.async { onReady(engine) }
         return view
     }
 

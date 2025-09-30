@@ -67,13 +67,15 @@ final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
-        view.delegate = self
-        view.isPlaying = true
+
+        // Do NOT set view.delegate here; Scene3DView installs a RendererProxy after attach.
+        // Do NOT flip isPlaying here; Scene3DView drives it via setPaused(_:)
 
         // Lighting + sky
         buildLighting()
         buildSky()
 
+        // Initial world
         apply(recipe: recipe, force: true)
     }
 
@@ -100,14 +102,38 @@ final class FirstPersonEngine: NSObject, SCNSceneRendererDelegate {
     }
 
     // MARK: Frame
+    
+    @MainActor
+    func stepUpdateMain(at t: TimeInterval) {
+        let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
+        lastTime = t
 
-    func renderer(_ renderer: SCNSceneRenderer, updateAtTime t: TimeInterval) {
+        // Move along ground plane
+        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
+        let delta   = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
+
+        var pos = yawNode.position.simd
+        pos += delta
+
+        // Height lock + eye height
+        pos.y = sampleHeight(worldX: pos.x, z: pos.z) + cfg.eyeHeight
+        yawNode.position = SCNVector3(pos)
+
+        // Stream chunks + pickups
+        chunker.updateVisible(center: pos)
+        collectNearbyBeacons(playerXZ: SIMD2<Float>(pos.x, pos.z))
+    }
+
+    @objc
+    func stepUpdate(at t: TimeInterval) {
+        // identical logic to your old renderer(_:updateAtTime:)
         let dt: Float = lastTime == 0 ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
         // Move along ground plane
         let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3<Float>(cosf(yaw),  0, -sinf(yaw))
+        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
         let delta   = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
 
         var pos = yawNode.position.simd
