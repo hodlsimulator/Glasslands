@@ -230,18 +230,17 @@ final class FirstPersonEngine: NSObject {
         sunDiscNode = nil
 
         // Seamless vertical gradient as a single image — no seams.
-        let size = CGSize(width: 2, height: 512) // tiny, stretches fine
+        let size = CGSize(width: 2, height: 512)
         UIGraphicsBeginImageContextWithOptions(size, true, 1)
         let ctx = UIGraphicsGetCurrentContext()!
-
         let top = UIColor(red: 0.50, green: 0.74, blue: 0.92, alpha: 1.0).cgColor
         let mid = UIColor(red: 0.70, green: 0.86, blue: 0.95, alpha: 1.0).cgColor
         let bot = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0).cgColor
-
         let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
                               colors: [top, mid, bot] as CFArray,
                               locations: [0.0, 0.55, 1.0])!
-        ctx.drawLinearGradient(grad, start: CGPoint(x: 1, y: 0), end: CGPoint(x: 1, y: size.height), options: [])
+        ctx.drawLinearGradient(grad, start: CGPoint(x: 1, y: 0),
+                               end: CGPoint(x: 1, y: size.height), options: [])
         let img = UIGraphicsGetImageFromCurrentImageContext()!
         UIGraphicsEndImageContext()
 
@@ -249,7 +248,7 @@ final class FirstPersonEngine: NSObject {
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0.0
 
-        // Optional soft sun disc (billboard)
+        // Sun billboard (matches your light direction).
         if let sunLightNode {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
@@ -268,6 +267,15 @@ final class FirstPersonEngine: NSObject {
             node.simdPosition = simd_normalize(dirToSun) * (cfg.skyDistance - 180)
             skyAnchor.addChildNode(node)
             self.sunDiscNode = node
+
+            // Clouds: seam-free skydome using direction-space FBM
+            let (cloudNode, cloudMat) = CloudDome.make(radius: CGFloat(cfg.skyDistance - 2))
+            cloudMat.setValue(SCNVector3(dirToSun.x, dirToSun.y, dirToSun.z), forKey: "sunDir")
+            skyAnchor.addChildNode(cloudNode)
+        } else {
+            // No sun light present; still add clouds.
+            let (cloudNode, _) = CloudDome.make(radius: CGFloat(cfg.skyDistance - 2))
+            skyAnchor.addChildNode(cloudNode)
         }
     }
 
