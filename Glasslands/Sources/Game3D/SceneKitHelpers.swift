@@ -40,7 +40,14 @@ func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
 }
 
 enum SceneKitHelpers {
-    static func groundDetailTexture(size: Int = 256) -> UIImage { groundDetailImage(size: size) }
+    // Cache the ground detail so each chunk reuses it
+    private static var _groundDetail: UIImage?
+    static func groundDetailTexture(size: Int = 256) -> UIImage {
+        if let img = _groundDetail { return img }
+        let img = groundDetailImage(size: size)
+        _groundDetail = img
+        return img
+    }
 
     static func skyboxImages(size: Int) -> [UIImage] {
         let W = max(64, size), H = max(64, size)
@@ -74,9 +81,9 @@ enum SceneKitHelpers {
                     let d = simd_normalize(dir(forFace: face, u: u, v: v))
                     let t = smooth((d.y + 1.0) * 0.5)
                     let c = horizon * (1.0 - t) + zenith * t
-                    let r = UInt8(max(0, min(255, Int((c.x) * 255.0))))
-                    let g = UInt8(max(0, min(255, Int((c.y) * 255.0))))
-                    let b = UInt8(max(0, min(255, Int((c.z) * 255.0))))
+                    let r = UInt8(max(0, min(255, Int(c.x * 255.0))))
+                    let g = UInt8(max(0, min(255, Int(c.y * 255.0))))
+                    let b = UInt8(max(0, min(255, Int(c.z * 255.0))))
                     let i = (y * W + x) * 4
                     bytes[i+0] = r; bytes[i+1] = g; bytes[i+2] = b; bytes[i+3] = 255
                 }
@@ -113,7 +120,6 @@ enum SceneKitHelpers {
         return img
     }
 
-    /// Seamless, tileable ground detail built from GKNoise.
     static func groundDetailImage(size: Int) -> UIImage {
         let W = max(64, size), H = max(64, size)
 
@@ -132,7 +138,6 @@ enum SceneKitHelpers {
 
         for y in 0..<H {
             for x in 0..<W {
-                // FIX: call instance method on GKNoiseMap
                 let v = map.value(at: vector_int2(Int32(x), Int32(y))) // -1..1
                 let n = pow(max(0, min(1, (v * 0.5 + 0.5))), 1.2)
                 let g = UInt8(max(0, min(255, Int(n * 255.0))))

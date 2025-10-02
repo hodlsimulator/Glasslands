@@ -9,7 +9,7 @@
 //
 
 import simd
-import Dispatch   // FIX: for DispatchSemaphore
+import Dispatch
 
 enum TerrainMeshBuilder {
     static func makeData(
@@ -22,9 +22,9 @@ enum TerrainMeshBuilder {
         noise: NoiseFields,
         recipe: BiomeRecipe
     ) -> TerrainChunkData {
+        // Use the background actor but wait once (no double-wait).
         let actor = ChunkMeshBuilder(tilesX: tilesX, tilesZ: tilesZ, tileSize: tileSize, heightScale: heightScale, recipe: recipe)
-        let sem = DispatchSemaphore(value: 1)
-        sem.wait()
+        let sem = DispatchSemaphore(value: 0)
         var out: TerrainChunkData?
         Task {
             out = await actor.build(originChunkX: originChunkX, originChunkY: originChunkY)

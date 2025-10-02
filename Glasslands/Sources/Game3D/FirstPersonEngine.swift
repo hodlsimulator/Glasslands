@@ -43,8 +43,6 @@ final class FirstPersonEngine: NSObject {
     private let camNode = SCNNode()
 
     private var moveInput = SIMD2<Float>(repeating: 0)
-
-    // Accumulate swipe deltas (UIKit points) — no inertia
     private var pendingLookDeltaPts = SIMD2<Float>(repeating: 0)
 
     private var yaw: Float = 0
@@ -53,6 +51,7 @@ final class FirstPersonEngine: NSObject {
     private let skyAnchor = SCNNode()
     private var sunDiscNode: SCNNode?
     private var sunLightNode: SCNNode?
+    private var skyboxTask: Task<Void, Never>?    // async sky build
 
     private var lastTime: TimeInterval = 0
     private var beacons = Set<SCNNode>()
@@ -83,12 +82,9 @@ final class FirstPersonEngine: NSObject {
     }
 
     func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }
-
     func setMoveInput(_ v: SIMD2<Float>) { moveInput = v }
-
     func setLookRate(_ _: SIMD2<Float>) { }
 
-    // FIX: use += (not &+=) for floats
     func applyLookDelta(points: SIMD2<Float>) {
         pendingLookDeltaPts += points
     }
@@ -178,17 +174,12 @@ final class FirstPersonEngine: NSObject {
             recipe: recipe,
             root: scene.rootNode,
             renderer: scnView!,
-            beaconSink: { [weak self] beacons in
-                beacons.forEach { self?.beacons.insert($0) }
-            },
-            obstacleSink: { [weak self] chunk, nodes in
-                self?.registerObstacles(for: chunk, from: nodes)
-            },
-            onChunkRemoved: { [weak self] chunk in
-                self?.obstaclesByChunk.removeValue(forKey: chunk)
-            }
+            beaconSink: { [weak self] beacons in beacons.forEach { self?.beacons.insert($0) } },
+            obstacleSink: { [weak self] chunk, nodes in self?.registerObstacles(for: chunk, from: nodes) },
+            onChunkRemoved: { [weak self] chunk in self?.obstaclesByChunk.removeValue(forKey: chunk) }
         )
 
+        // Immediate centre so there’s no void; the work is light enough now the sky is async.
         chunker.warmupCenter(at: yawNode.simdPosition)
 
         score = 0
@@ -214,22 +205,25 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func buildSky() {
+        skyboxTask?.cancel()
+
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        scene.background.contents = SceneKitHelpers.skyboxImages(size: 1024)
+        // Fast: solid gradient-ish colour first (no heavy loops on main).
+        scene.background.contents = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0)
 
         if let sunLightNode {
-            let discSize: CGFloat = 260.0
+            let discSize: CGFloat = 192.0
             let plane = SCNPlane(width: discSize, height: discSize)
             plane.cornerRadius = discSize * 0.5
 
             let sunMat = SCNMaterial()
             sunMat.lightingModel = .constant
             sunMat.isDoubleSided = true
-            sunMat.emission.contents = SceneKitHelpers.sunImage(diameter: 512)
+            sunMat.emission.contents = SceneKitHelpers.sunImage(diameter: 192)
             sunMat.blendMode = .add
             sunMat.writesToDepthBuffer = false
             sunMat.readsFromDepthBuffer = true
@@ -248,6 +242,15 @@ final class FirstPersonEngine: NSObject {
 
             skyAnchor.addChildNode(sunDisc)
             self.sunDiscNode = sunDisc
+        }
+
+        // Build the real skybox off-thread at a modest resolution; swap in when ready.
+        skyboxTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let imgs = SceneKitHelpers.skyboxImages(size: 256)
+            await MainActor.run {
+                guard let self else { return }
+                self.scene.background.contents = imgs
+            }
         }
     }
 
