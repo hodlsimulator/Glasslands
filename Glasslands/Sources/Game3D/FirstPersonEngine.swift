@@ -7,8 +7,6 @@
 //  Updated: stream chunks off-thread + prewarm before attach.
 //
 
-// Glasslands/Sources/Game3D/FirstPersonEngine.swift
-
 import SceneKit
 import GameplayKit
 import simd
@@ -244,9 +242,9 @@ final class FirstPersonEngine: NSObject {
             self.sunDiscNode = sunDisc
         }
 
-        // Build CGImage faces off-main; wrap as UIImage on main.
+        // Build CG faces off-main, wrap as UIImage on main
         skyboxTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let facesCG = SceneKitHelpers.skyboxImagesCG(size: 256)
+            let facesCG = buildSkyboxCG(size: 256)
             await MainActor.run {
                 guard let self else { return }
                 let facesUI = facesCG.map { UIImage(cgImage: $0) }
