@@ -9,7 +9,6 @@
 
 import SwiftUI
 import SceneKit
-import Metal
 import QuartzCore
 
 struct Scene3DView: UIViewRepresentable {
@@ -24,9 +23,11 @@ struct Scene3DView: UIViewRepresentable {
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
 
-        // Force compositing (disables Direct-to-Display)
+        // Force CA compositing: any non-zero corner radius + clipping disables Direct-to-Display.
         view.isOpaque = false
         view.backgroundColor = UIColor(white: 0, alpha: 0.001)
+        view.layer.cornerRadius = 0.5
+        view.layer.masksToBounds = true
 
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = false
@@ -36,7 +37,7 @@ struct Scene3DView: UIViewRepresentable {
             metal.presentsWithTransaction = true
         }
 
-        // Transparent overlay guarantees compositing
+        // Transparent overlay keeps the compositing path bullet-proof.
         let overlay = UIView()
         overlay.isUserInteractionEnabled = false
         overlay.backgroundColor = UIColor(white: 0, alpha: 0.001)
