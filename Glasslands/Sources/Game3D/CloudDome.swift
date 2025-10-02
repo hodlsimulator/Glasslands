@@ -5,10 +5,9 @@
 //  Created by . . on 10/3/25.
 //
 //  Seam-free white fluffy clouds on an inside-out skydome.
-//  Key points:
-//  • Samples noise in direction space (no UVs → no seams)
-//  • Uses _surface.opacity for transparency (SceneKit expects this)
-//  • Draw order & depth set so it never affects ground rendering
+//  – Samples noise in direction space (no UVs → no seams)
+//  – Uses FRAGMENT stage and writes _output.color.a
+//  – Draws LAST with depth-test ON, depth-write OFF (can’t affect terrain)
 //
 
 import SceneKit
@@ -30,12 +29,12 @@ enum CloudDome {
         mat.transparencyMode = .aOne
         mat.isDoubleSided = false
         mat.cullMode = .front                 // render inside
-        mat.writesToDepthBuffer = false       // never write depth
-        mat.readsFromDepthBuffer = false      // and don’t test depth either
-        mat.shaderModifiers = [.surface: shader]
+        mat.writesToDepthBuffer = false       // don’t write depth
+        mat.readsFromDepthBuffer = true       // but do respect depth (when drawing last)
+        mat.shaderModifiers = [.fragment: fragment]   // <<< fragment stage (reliable alpha)
 
-        // Defaults (tweak from FirstPersonEngine if you like)
-        mat.setValue(0.50, forKey: "coverage")            // 0..1; higher = more fill
+        // Tunables
+        mat.setValue(0.50, forKey: "coverage")            // 0…1; higher = more fill
         mat.setValue(0.22, forKey: "thickness")           // edge softness
         mat.setValue(2.5,  forKey: "detailScale")         // feature size
         mat.setValue(SCNVector3(0.06, 0.0, 0.02), forKey: "windDir")
@@ -47,16 +46,14 @@ enum CloudDome {
         let node = SCNNode(geometry: sphere)
         node.name = "CloudDome"
         node.categoryBitMask = 1
-        node.renderingOrder = -1000                       // draw before everything else
+        node.renderingOrder = 10_000                      // draw after everything
 
         return (node, mat)
     }
 
-    private static let shader = """
-    #pragma transparent
-    #pragma body
-
-    // Arguments provided via material.setValue(..., forKey:)
+    // Fragment-stage shader: computes clouds and blends into output with alpha.
+    private static let fragment = """
+    #pragma arguments
     float  coverage;
     float  thickness;
     float  detailScale;
@@ -66,7 +63,10 @@ enum CloudDome {
     float  brightness;
     float  seed;
 
-    // --- Helpers ------------------------------------------------------------
+    #pragma transparent
+    #pragma body
+
+    // Helpers
     float fractf(float x) { return x - floor(x); }
     float hash1(float n)  { return fractf(sin(n) * 43758.5453123); }
     float hash3(float3 p) { return hash1(dot(p, float3(127.1, 311.7, 74.7))); }
@@ -75,7 +75,6 @@ enum CloudDome {
         float3 p = floor(x);
         float3 f = fract(x);
         f = f*f*(3.0 - 2.0*f);
-
         float3 S = float3(seed);
         float n000 = hash3(p + float3(0,0,0) + S);
         float n100 = hash3(p + float3(1,0,0) + S);
@@ -85,7 +84,6 @@ enum CloudDome {
         float n101 = hash3(p + float3(1,0,1) + S);
         float n011 = hash3(p + float3(0,1,1) + S);
         float n111 = hash3(p + float3(1,1,1) + S);
-
         float nx00 = mix(n000, n100, f.x);
         float nx10 = mix(n010, n110, f.x);
         float nx01 = mix(n001, n101, f.x);
@@ -101,8 +99,8 @@ enum CloudDome {
         return v;
     }
 
-    // --- Direction-space sampling (no UV wrapping → no seams) --------------
-    float3 dir  = -normalize(_surface.normal);           // inside-out sphere
+    // Direction-space sampling (no UVs → no seams)
+    float3 dir  = -normalize(_surface.normal);     // inside-out sphere
     float   t   = windSpeed * u_time;
     float3  w   = (length(windDir) > 0.0) ? normalize(windDir) : float3(1,0,0);
     float3  p   = dir * max(0.5, detailScale) + w * t;
@@ -119,13 +117,14 @@ enum CloudDome {
     float horizon = clamp((dir.y + 0.20) * 1.4, 0.0, 1.0);
     alpha *= horizon;
 
-    // Simple silver-lining towards the sun
-    float sunDot    = max(0.0, dot(dir, normalize(sunDir)));
-    float silver    = pow(sunDot, 10.0) * 0.6 + pow(sunDot, 28.0) * 0.4;
-    float b         = max(0.0, brightness);
+    // Silver lining towards sun
+    float  sunDot   = max(0.0, dot(dir, normalize(sunDir)));
+    float  silver   = pow(sunDot, 10.0) * 0.6 + pow(sunDot, 28.0) * 0.4;
+    float  b        = max(0.0, brightness);
     float3 cloudCol = float3(1.0) * (0.84 + 0.30 * silver) * (0.75 + 0.25*b);
 
-    _surface.emission.rgb = mix(_surface.emission.rgb, cloudCol, alpha);
-    _surface.opacity      = alpha;    // << correct way to drive transparency
+    // Blend over whatever SceneKit has computed so far.
+    _output.color.rgb = mix(_output.color.rgb, cloudCol, alpha);
+    _output.color.a   = max(_output.color.a, alpha);
     """
 }
