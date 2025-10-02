@@ -28,31 +28,29 @@ enum CloudDome {
         mat.blendMode = .alpha
         mat.transparencyMode = .aOne
         mat.isDoubleSided = false
-        mat.cullMode = .front                 // render inside
-        mat.writesToDepthBuffer = false       // don’t write depth
-        mat.readsFromDepthBuffer = true       // but do respect depth (when drawing last)
-        mat.shaderModifiers = [.fragment: fragment]   // <<< fragment stage (reliable alpha)
+        mat.cullMode = .front            // render inside of the dome
+        mat.writesToDepthBuffer = false  // clouds never write depth
+        mat.readsFromDepthBuffer = false // …or read it (drawn under everything)
+        mat.shaderModifiers = [.surface: surface]   // rock-solid in SceneKit
 
         // Tunables
-        mat.setValue(0.50, forKey: "coverage")            // 0…1; higher = more fill
-        mat.setValue(0.22, forKey: "thickness")           // edge softness
-        mat.setValue(2.5,  forKey: "detailScale")         // feature size
+        mat.setValue(0.40, forKey: "coverage")            // 0…1; higher = more fill
+        mat.setValue(0.25, forKey: "thickness")           // edge softness
+        mat.setValue(2.2,  forKey: "detailScale")         // feature size
         mat.setValue(SCNVector3(0.06, 0.0, 0.02), forKey: "windDir")
         mat.setValue(0.005, forKey: "windSpeed")          // units/s (uses u_time)
         mat.setValue(1.0,   forKey: "brightness")
         mat.setValue(Float(seed & 0xFFFF), forKey: "seed")
-        mat.setValue(SCNVector3(0,1,0), forKey: "sunDir") // safe default; real dir set in buildSky()
+        mat.setValue(SCNVector3(0,1,0), forKey: "sunDir") // replaced in buildSky()
 
         let node = SCNNode(geometry: sphere)
         node.name = "CloudDome"
-        node.categoryBitMask = 1
-        node.renderingOrder = 10_000                      // draw after everything
-
+        node.renderingOrder = -10_000    // draw first; terrain & UI draw over it
         return (node, mat)
     }
 
-    // Fragment-stage shader: computes clouds and blends into output with alpha.
-    private static let fragment = """
+    // SURFACE stage: uses _surface.* and sets _surface.opacity (reliable on iOS)
+    private static let surface = """
     #pragma arguments
     float  coverage;
     float  thickness;
@@ -66,65 +64,54 @@ enum CloudDome {
     #pragma transparent
     #pragma body
 
-    // Helpers
     float fractf(float x) { return x - floor(x); }
     float hash1(float n)  { return fractf(sin(n) * 43758.5453123); }
-    float hash3(float3 p) { return hash1(dot(p, float3(127.1, 311.7, 74.7))); }
+    float hash3(float3 p) { return hash1(dot(p, float3(127.1,311.7,74.7))); }
 
-    float noise3(float3 x) {
-        float3 p = floor(x);
-        float3 f = fract(x);
-        f = f*f*(3.0 - 2.0*f);
-        float3 S = float3(seed);
-        float n000 = hash3(p + float3(0,0,0) + S);
-        float n100 = hash3(p + float3(1,0,0) + S);
-        float n010 = hash3(p + float3(0,1,0) + S);
-        float n110 = hash3(p + float3(1,1,0) + S);
-        float n001 = hash3(p + float3(0,0,1) + S);
-        float n101 = hash3(p + float3(1,0,1) + S);
-        float n011 = hash3(p + float3(0,1,1) + S);
-        float n111 = hash3(p + float3(1,1,1) + S);
-        float nx00 = mix(n000, n100, f.x);
-        float nx10 = mix(n010, n110, f.x);
-        float nx01 = mix(n001, n101, f.x);
-        float nx11 = mix(n011, n111, f.x);
-        float nxy0 = mix(nx00, nx10, f.y);
-        float nxy1 = mix(nx01, nx11, f.y);
-        return mix(nxy0, nxy1, f.z);
+    float noise3(float3 x){
+        float3 p=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
+        float3 S=float3(seed);
+        float n000=hash3(p+float3(0,0,0)+S), n100=hash3(p+float3(1,0,0)+S);
+        float n010=hash3(p+float3(0,1,0)+S), n110=hash3(p+float3(1,1,0)+S);
+        float n001=hash3(p+float3(0,0,1)+S), n101=hash3(p+float3(1,0,1)+S);
+        float n011=hash3(p+float3(0,1,1)+S), n111=hash3(p+float3(1,1,1)+S);
+        float nx00=mix(n000,n100,f.x), nx10=mix(n010,n110,f.x);
+        float nx01=mix(n001,n101,f.x), nx11=mix(n011,n111,f.x);
+        float nxy0=mix(nx00,nx10,f.y), nxy1=mix(nx01,nx11,f.y);
+        return mix(nxy0,nxy1,f.z);
     }
 
-    float fbm(float3 p) {
-        float v = 0.0, a = 0.5;
-        for (int i = 0; i < 5; i++) { v += a * noise3(p); p *= 2.0; a *= 0.5; }
+    float fbm(float3 p){
+        float v=0.0, a=0.5;
+        for (int i=0;i<5;i++){ v+=a*noise3(p); p*=2.0; a*=0.5; }
         return v;
     }
 
-    // Direction-space sampling (no UVs → no seams)
-    float3 dir  = -normalize(_surface.normal);     // inside-out sphere
-    float   t   = windSpeed * u_time;
-    float3  w   = (length(windDir) > 0.0) ? normalize(windDir) : float3(1,0,0);
-    float3  p   = dir * max(0.5, detailScale) + w * t;
+    // Inside-out dome → use the inverted surface normal
+    float3 dir = -normalize(_surface.normal);
+    float  t   = windSpeed * u_time;
+    float3 w   = (length(windDir)>0.0)? normalize(windDir) : float3(1,0,0);
 
-    float warp  = noise3(p * 0.75 + 13.37);
-    float n     = fbm(p + warp * 0.75);
+    float3 p = dir * max(0.5, detailScale) + w * t;
+    float warp = noise3(p * 0.75 + 13.37);
+    float n    = fbm(p + warp * 0.75);
     n = pow(n, 1.45);
 
     float cov   = clamp(coverage, 0.0, 1.0);
     float thick = max(0.001, thickness);
     float alpha = smoothstep(cov, cov + thick, n);
 
-    // Horizon fade
+    // Fade to horizon so we never see a hard ring
     float horizon = clamp((dir.y + 0.20) * 1.4, 0.0, 1.0);
     alpha *= horizon;
 
-    // Silver lining towards sun
+    // Gentle silver lining facing the sun
     float  sunDot   = max(0.0, dot(dir, normalize(sunDir)));
     float  silver   = pow(sunDot, 10.0) * 0.6 + pow(sunDot, 28.0) * 0.4;
     float  b        = max(0.0, brightness);
     float3 cloudCol = float3(1.0) * (0.84 + 0.30 * silver) * (0.75 + 0.25*b);
 
-    // Blend over whatever SceneKit has computed so far.
-    _output.color.rgb = mix(_output.color.rgb, cloudCol, alpha);
-    _output.color.a   = max(_output.color.a, alpha);
+    _surface.emission.rgb = mix(_surface.emission.rgb, cloudCol, alpha);
+    _surface.opacity      = alpha;
     """
 }

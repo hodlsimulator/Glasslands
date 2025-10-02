@@ -274,6 +274,7 @@ final class FirstPersonEngine: NSObject {
             // Clouds: skydome that never interferes with terrain
             let (cloudNode, cloudMat) = CloudDome.make(radius: CGFloat(cfg.skyDistance - 2))
             cloudMat.setValue(SCNVector3(dirToSun.x, dirToSun.y, dirToSun.z), forKey: "sunDir")
+            cloudMat.setValue(0.5, forKey: "coverage")   // makes clouds obvious
             skyAnchor.addChildNode(cloudNode)
         } else {
             // No sun light present; still add clouds safely

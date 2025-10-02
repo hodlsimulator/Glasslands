@@ -19,7 +19,7 @@ struct TerrainChunkData: Sendable {
     let tileSize: Float
     let positions: [simd_float3]
     let normals: [simd_float3]
-    let colors: [simd_float4]    // not used in this hard reset
+    let colors: [simd_float4]     // kept for compatibility; not used here
     let uvs: [simd_float2]
     let indices: [UInt32]
 }
@@ -53,10 +53,9 @@ enum TerrainChunkNode {
         let node = SCNNode()
         node.name = "chunk_\(data.originChunkX)_\(data.originChunkY)"
 
-        // Geometry sources
+        // Interleaved buffers → SceneKit sources
         let posData = data.positions.withUnsafeBytes { Data($0) }
         let nrmData = data.normals.withUnsafeBytes { Data($0) }
-        let colData = data.colors.withUnsafeBytes { Data($0) }
         let uvData  = data.uvs.withUnsafeBytes { Data($0) }
         let idxData = data.indices.withUnsafeBytes { Data($0) }
 
@@ -72,12 +71,7 @@ enum TerrainChunkNode {
             componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size,
             dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
         )
-        let colSrc = SCNGeometrySource(
-            data: colData, semantic: .color,
-            vectorCount: data.colors.count, usesFloatComponents: true,
-            componentsPerVector: 4, bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0, dataStride: MemoryLayout<simd_float4>.stride
-        )
+        // Intentionally NO vertex-color source here (prevents accidental black)
         let uvSrc = SCNGeometrySource(
             data: uvData, semantic: .texcoord,
             vectorCount: data.uvs.count, usesFloatComponents: true,
@@ -89,9 +83,9 @@ enum TerrainChunkNode {
             primitiveCount: data.indices.count / 3, bytesPerIndex: MemoryLayout<UInt32>.size
         )
 
-        let geom = SCNGeometry(sources: [posSrc, nrmSrc, colSrc, uvSrc], elements: [element])
+        let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
-        // Solid emissive green so it can’t render black.
+        // Solid emissive green (can’t go black)
         let mat = SCNMaterial()
         mat.lightingModel = .constant
         let green = UIColor(red: 0.32, green: 0.62, blue: 0.34, alpha: 1.0)
@@ -99,7 +93,7 @@ enum TerrainChunkNode {
         mat.diffuse.contents  = green
         mat.emission.intensity = 1.0
 
-        // Avoid any culling surprises on terrain.
+        // Safety: no backface surprises
         mat.isDoubleSided = true
         mat.cullMode = .back
         mat.readsFromDepthBuffer = true
