@@ -224,108 +224,95 @@ final class FirstPersonEngine: NSObject {
 
     private func buildSky() {
         skyboxTask?.cancel()
-
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Fast placeholder so we render immediately
         scene.background.contents = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0)
 
         if let sunLightNode {
-            let discSize: CGFloat = 192.0
+            let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
             plane.cornerRadius = discSize * 0.5
+            let mat = SCNMaterial()
+            mat.lightingModel = .constant
+            mat.isDoubleSided = true
+            mat.emission.contents = SceneKitHelpers.sunImage(diameter: Int(discSize))
+            mat.blendMode = .add
+            mat.writesToDepthBuffer = false
+            mat.readsFromDepthBuffer = true
+            plane.firstMaterial = mat
 
-            let sunMat = SCNMaterial()
-            sunMat.lightingModel = .constant
-            sunMat.isDoubleSided = true
-            sunMat.emission.contents = SceneKitHelpers.sunImage(diameter: 192)
-            sunMat.blendMode = .add
-            sunMat.writesToDepthBuffer = false
-            sunMat.readsFromDepthBuffer = true
-            plane.firstMaterial = sunMat
-
-            let sunDisc = SCNNode(geometry: plane)
-            sunDisc.name = "sunDisc"
-            sunDisc.renderingOrder = -15
-
-            let bb = SCNBillboardConstraint(); bb.freeAxes = []
-            sunDisc.constraints = [bb]
-
+            let node = SCNNode(geometry: plane)
+            node.name = "sunDisc"
+            node.renderingOrder = -15
+            node.constraints = [SCNBillboardConstraint()]  // faces camera
             let dirToSun = -sunLightNode.presentation.simdWorldFront
-            let distance = cfg.skyDistance - 180
-            sunDisc.simdPosition = simd_normalize(dirToSun) * distance
-
-            skyAnchor.addChildNode(sunDisc)
-            self.sunDiscNode = sunDisc
+            node.simdPosition = simd_normalize(dirToSun) * (cfg.skyDistance - 180)
+            skyAnchor.addChildNode(node)
+            self.sunDiscNode = node
         }
 
-        // Build CG faces off-main (no UIKit here), then wrap as UIImage on main.
+        // Build a seamless cube map off the main thread, based only on normalized dir.y
         skyboxTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
+            let size = 512
+            let W = size, H = size
 
-            let size = 256
-            let W = max(64, size), H = max(64, size)
-            let zenith  = SIMD3<Double>(0.50, 0.74, 0.92)
-            let horizon = SIMD3<Double>(0.86, 0.93, 0.98)
+            let zenith = SIMD3<Float>(0.50, 0.74, 0.92)   // top
+            let horizon = SIMD3<Float>(0.86, 0.93, 0.98)  // sides/bottom
 
-            @inline(__always) func smooth(_ x: Double) -> Double {
-                let t = max(0.0, min(1.0, x))
-                return t * t * (3.0 - 2.0 * t)
+            @inline(__always) func smooth(_ x: Float) -> Float {
+                let t = max(0, min(1, x))
+                return t*t*(3 - 2*t)
             }
 
-            func dir(forFace i: Int, u: Double, v: Double) -> SIMD3<Double> {
+            func dir(forFace i: Int, u: Float, v: Float) -> SIMD3<Float> {
                 switch i {
-                case 0: return SIMD3( 1, v, -u) // +X
-                case 1: return SIMD3(-1, v,  u) // -X
-                case 2: return SIMD3( u, 1,  v) // +Y
-                case 3: return SIMD3( u,-1, -v) // -Y
-                case 4: return SIMD3( u, v,  1) // +Z
-                default:return SIMD3(-u, v, -1) // -Z
+                case 0: return SIMD3( 1,  v, -u)   // +X
+                case 1: return SIMD3(-1,  v,  u)   // -X
+                case 2: return SIMD3( u,  1,  v)   // +Y
+                case 3: return SIMD3( u, -1, -v)   // -Y
+                case 4: return SIMD3( u,  v,  1)   // +Z
+                default:return SIMD3(-u,  v, -1)   // -Z
                 }
             }
 
-            func makeFaceCG(_ face: Int) -> CGImage {
+            func makeFace(_ face: Int) -> CGImage {
                 var bytes = [UInt8](repeating: 0, count: W * H * 4)
                 let bpr = W * 4
                 for y in 0..<H {
+                    // Centre of pixel in −1…+1
+                    let vv = (Float(y) + 0.5) / Float(H) * 2 - 1
                     for x in 0..<W {
-                        let u = (Double(x) / Double(W - 1)) * 2.0 - 1.0
-                        let v = (Double(y) / Double(H - 1)) * 2.0 - 1.0
-                        let d = simd_normalize(dir(forFace: face, u: u, v: v))
-                        let t = smooth((d.y + 1.0) * 0.5)
-                        let c = horizon * (1.0 - t) + zenith * t
-                        let r = UInt8(max(0, min(255, Int(c.x * 255.0))))
-                        let g = UInt8(max(0, min(255, Int(c.y * 255.0))))
-                        let b = UInt8(max(0, min(255, Int(c.z * 255.0))))
-                        let i = (y * W + x) * 4
-                        bytes[i+0] = r; bytes[i+1] = g; bytes[i+2] = b; bytes[i+3] = 255
+                        let uu = (Float(x) + 0.5) / Float(W) * 2 - 1
+                        var d = dir(forFace: face, u: uu, v: vv)
+                        d = simd_normalize(d)                  // <<< critical to kill seams
+                        let t = smooth((d.y + 1) * 0.5)        // 0 bottom → 1 top
+                        let c = horizon + (zenith - horizon) * t
+                        let idx = y * bpr + x * 4
+                        bytes[idx+0] = UInt8(max(0,min(1,c.x)) * 255)
+                        bytes[idx+1] = UInt8(max(0,min(1,c.y)) * 255)
+                        bytes[idx+2] = UInt8(max(0,min(1,c.z)) * 255)
+                        bytes[idx+3] = 255
                     }
                 }
                 let cs = CGColorSpaceCreateDeviceRGB()
-                let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-                let cg: CGImage = bytes.withUnsafeMutableBytes { raw in
-                    let ctx = CGContext(
-                        data: raw.baseAddress,
-                        width: W,
-                        height: H,
-                        bitsPerComponent: 8,
-                        bytesPerRow: bpr,
-                        space: cs,
-                        bitmapInfo: bitmapInfo.rawValue
-                    )!
-                    return ctx.makeImage()!
-                }
-                return cg
+                var buf = bytes
+                let ctx = CGContext(data: &buf, width: W, height: H, bitsPerComponent: 8,
+                                    bytesPerRow: bpr, space: cs,
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+                return ctx.makeImage()!
             }
 
-            let facesCG: [CGImage] = [0, 1, 2, 3, 4, 5].map { makeFaceCG($0) }
+            let faces = (0..<6).map { makeFace($0) }
+            let images = faces.map { UIImage(cgImage: $0) }
 
             await MainActor.run {
-                let facesUI = facesCG.map { UIImage(cgImage: $0) }
-                self.scene.background.contents = facesUI
+                self.scene.background.contents = images
+                self.scene.lightingEnvironment.contents = images
+                self.scene.lightingEnvironment.intensity = 1.0
             }
         }
     }
