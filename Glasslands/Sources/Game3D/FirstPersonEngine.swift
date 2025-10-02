@@ -165,33 +165,23 @@ final class FirstPersonEngine: NSObject {
             noise: noise,
             recipe: recipe,
             root: scene.rootNode,
-            beaconSink: { [weak self] beacons in
-                beacons.forEach { self?.beacons.insert($0) }
-            },
-            obstacleSink: { [weak self] chunk, nodes in
-                self?.registerObstacles(for: chunk, from: nodes)
-            },
-            onChunkRemoved: { [weak self] chunk in
-                self?.obstaclesByChunk.removeValue(forKey: chunk)
-            }
+            beaconSink: { [weak self] beacons in beacons.forEach { self?.beacons.insert($0) } },
+            obstacleSink: { [weak self] chunk, nodes in self?.registerObstacles(for: chunk, from: nodes) },
+            onChunkRemoved: { [weak self] chunk in self?.obstaclesByChunk.removeValue(forKey: chunk) }
         )
 
-        // Build just the centre chunk so the renderer sees real geometry.
+        // Build one centre chunk so the renderer sees real geometry.
         chunker.warmupCenter(at: yawNode.simdPosition)
 
-        // Pre-warm a couple of frames and keep streaming off initially.
+        // Pre-warm a couple of frames; start streaming gently after 1s.
         warmupFramesRemaining = 6
         allowStreaming = false
         _ = scnView?.prepare(scene.rootNode, shouldAbortBlock: nil)
         _ = scnView?.snapshot()
 
-        // After 1s, allow streaming and (optionally) switch back to opaque,
-        // which lets iOS re-enter Direct-to-Display without the visible stall.
         chunker.tasksPerFrame = 1
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self else { return }
-            self.scnView?.isOpaque = true      // comment this line to keep D2D disabled permanently
-            self.allowStreaming = true
+            self?.allowStreaming = true
             Signposts.event("WarmStart.Done")
         }
 

@@ -9,7 +9,8 @@
 
 import SwiftUI
 import SceneKit
-import MetalKit
+import Metal
+import QuartzCore
 
 struct Scene3DView: UIViewRepresentable {
     let recipe: BiomeRecipe
@@ -19,21 +20,34 @@ struct Scene3DView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
-        view.preferredRenderingAPI = .metal
         view.antialiasingMode = .none
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
-        view.backgroundColor = .black
-        view.isUserInteractionEnabled = false
 
-        // Start with composited presentation (disables Direct-to-Display)
+        // Force compositing (disables Direct-to-Display)
         view.isOpaque = false
+        view.backgroundColor = UIColor(white: 0, alpha: 0.001)
 
         if let metal = view.layer as? CAMetalLayer {
+            metal.isOpaque = false
             metal.wantsExtendedDynamicRangeContent = false
             metal.pixelFormat = .bgra8Unorm
             metal.maximumDrawableCount = 3
+            metal.presentsWithTransaction = true
         }
+
+        // Transparent overlay guarantees compositing
+        let overlay = UIView()
+        overlay.isUserInteractionEnabled = false
+        overlay.backgroundColor = UIColor(white: 0, alpha: 0.001)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        ])
 
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
@@ -44,14 +58,13 @@ struct Scene3DView: UIViewRepresentable {
         view.delegate = proxy
 
         engine.setPaused(isPaused)
-
         DispatchQueue.main.async { onReady(engine) }
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {}
-    func makeCoordinator() -> Coordinator { Coordinator() }
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
     final class Coordinator {
         var engine: FirstPersonEngine?
         var proxy: RendererProxy?
