@@ -21,21 +21,21 @@ final class ChunkStreamer3D {
     private var loaded: [IVec2: SCNNode] = [:]
     private var desired: Set<IVec2> = []
 
-    // Per-chunk staged work
     private enum Phase { case build, beacons, vegetation, done }
-    private struct Rec { var node: SCNNode?; var phase: Phase }
+    private struct Rec {
+        var node: SCNNode?
+        var phase: Phase
+        var beacons: [SCNNode]      // stored to include in obstacle sink
+    }
     private var recs: [IVec2: Rec] = [:]
 
-    // Prioritised queue (nearest-first to the player)
     private var queue: [IVec2] = []
     private var queued: Set<IVec2> = []
 
-    // Sinks
     private let beaconSink: ([SCNNode]) -> Void
     private let obstacleSink: (IVec2, [SCNNode]) -> Void
     private let onChunkRemoved: (IVec2) -> Void
 
-    // Budget: number of staged tasks to run per frame (not chunks – stages)
     var tasksPerFrame: Int = 2
 
     init(
@@ -60,12 +60,26 @@ final class ChunkStreamer3D {
         updateVisible(center: center)
     }
 
+    /// Build just the centre chunk immediately (to warm pipelines before gameplay).
+    func warmupCenter(at center: simd_float3) {
+        guard let root else { return }
+        let ci = chunkIndex(forWorldX: center.x, z: center.z)
+        let k = IVec2(ci.x, ci.y)
+        guard loaded[k] == nil else { return }
+
+        let sp = Signposts.begin("BuildChunk")
+        let node = TerrainChunkNode.makeNode(originChunk: k, cfg: cfg, noise: noise, recipe: recipe)
+        root.addChildNode(node)
+        loaded[k] = node
+        recs[k] = Rec(node: node, phase: .done, beacons: [])
+        Signposts.end("BuildChunk", sp)
+    }
+
     func updateVisible(center: simd_float3) {
         guard let root else { return }
 
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
 
-        // Desired window
         var keep = Set<IVec2>()
         var toStage: [IVec2] = []
 
@@ -74,13 +88,12 @@ final class ChunkStreamer3D {
                 let k = IVec2(ci.x + dx, ci.y + dy)
                 keep.insert(k)
                 if recs[k] == nil, loaded[k] == nil {
-                    recs[k] = Rec(node: nil, phase: .build)
+                    recs[k] = Rec(node: nil, phase: .build, beacons: [])
                     toStage.append(k)
                 }
             }
         }
 
-        // Cull far chunks
         for (k, n) in loaded where !keep.contains(k) {
             n.removeAllActions()
             n.removeFromParentNode()
@@ -89,7 +102,6 @@ final class ChunkStreamer3D {
             onChunkRemoved(k)
         }
 
-        // Rebuild queue: keep only desired entries, then add new ones by nearest-first
         if !queue.isEmpty {
             var newQ: [IVec2] = []
             newQ.reserveCapacity(queue.count)
@@ -99,15 +111,11 @@ final class ChunkStreamer3D {
         }
         if !toStage.isEmpty {
             toStage.sort { priority(of: $0, around: ci) < priority(of: $1, around: ci) }
-            for k in toStage {
-                queue.append(k)
-                queued.insert(k)
-            }
+            for k in toStage { queue.append(k); queued.insert(k) }
         }
 
         desired = keep
 
-        // Drain small staged work per frame
         var tasks = 0
         while tasks < tasksPerFrame, !queue.isEmpty {
             let k = queue.removeFirst()
@@ -130,6 +138,7 @@ final class ChunkStreamer3D {
                     let beacons = BeaconPlacer3D.place(inChunk: k, cfg: cfg, noise: noise, recipe: recipe)
                     beacons.forEach { node.addChildNode($0) }
                     beaconSink(beacons)
+                    rec.beacons = beacons          // keep for obstacle sink next phase
                 }
                 rec.phase = .vegetation
                 enqueueIfNeeded(k)
@@ -139,7 +148,7 @@ final class ChunkStreamer3D {
                     Signposts.event("PlaceVegetation")
                     let veg = VegetationPlacer3D.place(inChunk: k, cfg: cfg, noise: noise, recipe: recipe)
                     veg.forEach { node.addChildNode($0) }
-                    obstacleSink(k, veg + (node.childNodes ?? []))
+                    obstacleSink(k, veg + rec.beacons)
                 }
                 rec.phase = .done
                 if let node = rec.node { loaded[k] = node }
@@ -155,8 +164,7 @@ final class ChunkStreamer3D {
 
     private func enqueueIfNeeded(_ k: IVec2) {
         guard desired.contains(k), !queued.contains(k) else { return }
-        queue.append(k)
-        queued.insert(k)
+        queue.append(k); queued.insert(k)
     }
 
     private func chunkIndex(forWorldX x: Float, z: Float) -> IVec2 {
