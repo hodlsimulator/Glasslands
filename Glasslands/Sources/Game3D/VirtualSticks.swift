@@ -57,11 +57,9 @@ private extension CGSize {
     }
 }
 
-// MARK: - Look pad (SWIPE-TO-LOOK: sends incremental deltas in UIKit points, no inertia)
+// MARK: - Look pad (swipe-to-look: sends incremental deltas in UIKit points)
 struct LookPadView: View {
-    /// Called with incremental deltas (UIKit points) since the previous event.
-    /// x > 0 = swipe right (turn right), y > 0 = swipe DOWN (UIKit coordinates).
-    /// We invert Y so: thumb up => positive pitch (look up), thumb down => look down.
+    // x > 0 = swipe right (turn right), y uses raw UIKit sign so thumb up (dy < 0) looks UP.
     var onDelta: (SIMD2<Float>) -> Void
 
     @State private var lastLocation: CGPoint?
@@ -82,8 +80,8 @@ struct LookPadView: View {
                         if let last = lastLocation {
                             let dx = Float(v.location.x - last.x)
                             let dy = Float(v.location.y - last.y)
-                            // Invert vertical: thumb up (dy < 0) -> -dy > 0 -> look up
-                            onDelta(SIMD2<Float>(dx, -dy))
+                            // Use raw dy here so engine’s mapping yields: thumb up => look up.
+                            onDelta(SIMD2<Float>(dx, dy))
                         }
                         lastLocation = v.location
                     }
