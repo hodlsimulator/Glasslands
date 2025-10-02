@@ -11,6 +11,7 @@ import SceneKit
 import GameplayKit
 import simd
 import UIKit
+import CoreGraphics
 
 final class FirstPersonEngine: NSObject {
     struct Config {
@@ -211,6 +212,7 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
+        // Fast placeholder so we render immediately
         scene.background.contents = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0)
 
         if let sunLightNode {
@@ -242,11 +244,68 @@ final class FirstPersonEngine: NSObject {
             self.sunDiscNode = sunDisc
         }
 
-        // Build CG faces off-main, wrap as UIImage on main
+        // Build CG faces off-main (no UIKit here), then wrap as UIImage on main.
         skyboxTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let facesCG = buildSkyboxCG(size: 256)
+            guard let self else { return }
+
+            let size = 256
+            let W = max(64, size), H = max(64, size)
+            let zenith  = SIMD3<Double>(0.50, 0.74, 0.92)
+            let horizon = SIMD3<Double>(0.86, 0.93, 0.98)
+
+            @inline(__always) func smooth(_ x: Double) -> Double {
+                let t = max(0.0, min(1.0, x))
+                return t * t * (3.0 - 2.0 * t)
+            }
+
+            func dir(forFace i: Int, u: Double, v: Double) -> SIMD3<Double> {
+                switch i {
+                case 0: return SIMD3( 1, v, -u) // +X
+                case 1: return SIMD3(-1, v,  u) // -X
+                case 2: return SIMD3( u, 1,  v) // +Y
+                case 3: return SIMD3( u,-1, -v) // -Y
+                case 4: return SIMD3( u, v,  1) // +Z
+                default:return SIMD3(-u, v, -1) // -Z
+                }
+            }
+
+            func makeFaceCG(_ face: Int) -> CGImage {
+                var bytes = [UInt8](repeating: 0, count: W * H * 4)
+                let bpr = W * 4
+                for y in 0..<H {
+                    for x in 0..<W {
+                        let u = (Double(x) / Double(W - 1)) * 2.0 - 1.0
+                        let v = (Double(y) / Double(H - 1)) * 2.0 - 1.0
+                        let d = simd_normalize(dir(forFace: face, u: u, v: v))
+                        let t = smooth((d.y + 1.0) * 0.5)
+                        let c = horizon * (1.0 - t) + zenith * t
+                        let r = UInt8(max(0, min(255, Int(c.x * 255.0))))
+                        let g = UInt8(max(0, min(255, Int(c.y * 255.0))))
+                        let b = UInt8(max(0, min(255, Int(c.z * 255.0))))
+                        let i = (y * W + x) * 4
+                        bytes[i+0] = r; bytes[i+1] = g; bytes[i+2] = b; bytes[i+3] = 255
+                    }
+                }
+                let cs = CGColorSpaceCreateDeviceRGB()
+                let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+                let cg: CGImage = bytes.withUnsafeMutableBytes { raw in
+                    let ctx = CGContext(
+                        data: raw.baseAddress,
+                        width: W,
+                        height: H,
+                        bitsPerComponent: 8,
+                        bytesPerRow: bpr,
+                        space: cs,
+                        bitmapInfo: bitmapInfo.rawValue
+                    )!
+                    return ctx.makeImage()!
+                }
+                return cg
+            }
+
+            let facesCG: [CGImage] = [0, 1, 2, 3, 4, 5].map { makeFaceCG($0) }
+
             await MainActor.run {
-                guard let self else { return }
                 let facesUI = facesCG.map { UIImage(cgImage: $0) }
                 self.scene.background.contents = facesUI
             }

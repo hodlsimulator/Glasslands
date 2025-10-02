@@ -41,52 +41,6 @@ func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
     )
 }
 
-// Pure CG builder for skybox faces (background-safe).
-func buildSkyboxCG(size: Int) -> [CGImage] {
-    let W = max(64, size), H = max(64, size)
-
-    let zenith  = SIMD3<Double>(0.50, 0.74, 0.92)
-    let horizon = SIMD3<Double>(0.86, 0.93, 0.98)
-
-    @inline(__always) func smooth(_ x: Double) -> Double {
-        let t = max(0.0, min(1.0, x))
-        return t * t * (3.0 - 2.0 * t)
-    }
-
-    func dir(forFace i: Int, u: Double, v: Double) -> SIMD3<Double> {
-        switch i {
-        case 0: return SIMD3( 1, v, -u)
-        case 1: return SIMD3(-1, v,  u)
-        case 2: return SIMD3( u, 1,  v)
-        case 3: return SIMD3( u,-1, -v)
-        case 4: return SIMD3( u, v,  1)
-        default:return SIMD3(-u, v, -1)
-        }
-    }
-
-    func makeFaceCG(_ face: Int) -> CGImage {
-        var bytes = [UInt8](repeating: 0, count: W * H * 4)
-        let bpr = W * 4
-        for y in 0..<H {
-            for x in 0..<W {
-                let u = (Double(x) / Double(W - 1)) * 2.0 - 1.0
-                let v = (Double(y) / Double(H - 1)) * 2.0 - 1.0
-                let d = simd_normalize(dir(forFace: face, u: u, v: v))
-                let t = smooth((d.y + 1.0) * 0.5)
-                let c = horizon * (1.0 - t) + zenith * t
-                let r = UInt8(max(0, min(255, Int(c.x * 255.0))))
-                let g = UInt8(max(0, min(255, Int(c.y * 255.0))))
-                let b = UInt8(max(0, min(255, Int(c.z * 255.0))))
-                let i = (y * W + x) * 4
-                bytes[i+0] = r; bytes[i+1] = g; bytes[i+2] = b; bytes[i+3] = 255
-            }
-        }
-        return CGImageHelper.makeCGImage(width: W, height: H, bytes: &bytes, bpr: bpr)!
-    }
-
-    return [0, 1, 2, 3, 4, 5].map { makeFaceCG($0) }
-}
-
 enum SceneKitHelpers {
     private static var _groundDetail: UIImage?
 
@@ -99,7 +53,68 @@ enum SceneKitHelpers {
 
     @MainActor
     static func skyboxImages(size: Int) -> [UIImage] {
-        buildSkyboxCG(size: size).map { UIImage(cgImage: $0) }
+        // Kept for any synchronous/main use
+        let size = max(64, size)
+        let W = size, H = size
+
+        let zenith  = SIMD3<Double>(0.50, 0.74, 0.92)
+        let horizon = SIMD3<Double>(0.86, 0.93, 0.98)
+
+        @inline(__always) func smooth(_ x: Double) -> Double {
+            let t = max(0.0, min(1.0, x))
+            return t * t * (3.0 - 2.0 * t)
+        }
+
+        func dir(forFace i: Int, u: Double, v: Double) -> SIMD3<Double> {
+            switch i {
+            case 0: return SIMD3( 1, v, -u)
+            case 1: return SIMD3(-1, v,  u)
+            case 2: return SIMD3( u, 1,  v)
+            case 3: return SIMD3( u,-1, -v)
+            case 4: return SIMD3( u, v,  1)
+            default:return SIMD3(-u, v, -1)
+            }
+        }
+
+        func makeFace() -> (Int) -> UIImage {
+            return { face in
+                var bytes = [UInt8](repeating: 0, count: W * H * 4)
+                let bpr = W * 4
+                for y in 0..<H {
+                    for x in 0..<W {
+                        let u = (Double(x) / Double(W - 1)) * 2.0 - 1.0
+                        let v = (Double(y) / Double(H - 1)) * 2.0 - 1.0
+                        let d = simd_normalize(dir(forFace: face, u: u, v: v))
+                        let t = smooth((d.y + 1.0) * 0.5)
+                        let c = horizon * (1.0 - t) + zenith * t
+                        let r = UInt8(max(0, min(255, Int(c.x * 255.0))))
+                        let g = UInt8(max(0, min(255, Int(c.y * 255.0))))
+                        let b = UInt8(max(0, min(255, Int(c.z * 255.0))))
+                        let i = (y * W + x) * 4
+                        bytes[i+0] = r; bytes[i+1] = g; bytes[i+2] = b; bytes[i+3] = 255
+                    }
+                }
+                let cs = CGColorSpaceCreateDeviceRGB()
+                let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+                let img: UIImage = bytes.withUnsafeMutableBytes { raw in
+                    let ctx = CGContext(
+                        data: raw.baseAddress,
+                        width: W,
+                        height: H,
+                        bitsPerComponent: 8,
+                        bytesPerRow: bpr,
+                        space: cs,
+                        bitmapInfo: bitmapInfo.rawValue
+                    )!
+                    let cg = ctx.makeImage()!
+                    return UIImage(cgImage: cg, scale: 1, orientation: .up)
+                }
+                return img
+            }
+        }
+
+        let faceFn = makeFace()
+        return [0, 1, 2, 3, 4, 5].map(faceFn)
     }
 
     static func sunImage(diameter: Int) -> UIImage {
@@ -146,7 +161,7 @@ enum SceneKitHelpers {
 
         for y in 0..<H {
             for x in 0..<W {
-                let v = map.value(at: vector_int2(Int32(x), Int32(y)))
+                let v = map.value(at: vector_int2(Int32(x), Int32(y))) // -1..1
                 let n = pow(max(0, min(1, (v * 0.5 + 0.5))), 1.2)
                 let g = UInt8(max(0, min(255, Int(n * 255.0))))
                 let i = (y * W + x) * 4
@@ -157,16 +172,10 @@ enum SceneKitHelpers {
             }
         }
 
-        return CGImageHelper.makeImage(width: W, height: H, bytes: &bytes, bpr: bpr)
-    }
-}
-
-enum CGImageHelper {
-    static func makeCGImage(width W: Int, height H: Int, bytes: inout [UInt8], bpr: Int) -> CGImage? {
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-        return bytes.withUnsafeMutableBytes { raw in
-            guard let ctx = CGContext(
+        let img: UIImage = bytes.withUnsafeMutableBytes { raw in
+            let ctx = CGContext(
                 data: raw.baseAddress,
                 width: W,
                 height: H,
@@ -174,13 +183,10 @@ enum CGImageHelper {
                 bytesPerRow: bpr,
                 space: cs,
                 bitmapInfo: bitmapInfo.rawValue
-            ) else { return nil }
-            return ctx.makeImage()
+            )!
+            let cg = ctx.makeImage()!
+            return UIImage(cgImage: cg, scale: 1, orientation: .up)
         }
-    }
-
-    static func makeImage(width W: Int, height H: Int, bytes: inout [UInt8], bpr: Int) -> UIImage {
-        guard let cg = makeCGImage(width: W, height: H, bytes: &bytes, bpr: bpr) else { return UIImage() }
-        return UIImage(cgImage: cg, scale: 1, orientation: .up)
+        return img
     }
 }
