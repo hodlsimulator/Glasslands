@@ -18,22 +18,23 @@ final class GameCenterHelper: NSObject, ObservableObject {
     private override init() { super.init() }
 
     func authenticate() async {
+        Signposts.event("GC.Auth.start")
         let player = GKLocalPlayer.local
         player.authenticateHandler = { [weak self] vc, error in
             Task { @MainActor in
                 if let vc {
-                    self?.present(vc)
+                    self?.present(vc)            // System UI if needed
                 } else {
                     self?.isAuthenticated = player.isAuthenticated
                     if let error { print("Game Center auth error:", error.localizedDescription) }
                 }
+                Signposts.event("GC.Auth.done")
             }
         }
     }
 
     func presentLeaderboards() {
         guard GKLocalPlayer.local.isAuthenticated else { return }
-        // iOS 26+: use Access Point trigger (no deprecated VC).
         GKAccessPoint.shared.location = .topLeading
         GKAccessPoint.shared.isActive = true
         GKAccessPoint.shared.trigger(state: .leaderboards) { }
@@ -45,15 +46,13 @@ final class GameCenterHelper: NSObject, ObservableObject {
         top.present(vc, animated: true)
     }
 
-    @MainActor
-    private static func topViewController() -> UIViewController? {
+    @MainActor private static func topViewController() -> UIViewController? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let keyWin = scenes.flatMap { $0.windows }.first { $0.isKeyWindow }
         return crawl(from: keyWin?.rootViewController)
     }
 
-    @MainActor
-    private static func crawl(from base: UIViewController?) -> UIViewController? {
+    @MainActor private static func crawl(from base: UIViewController?) -> UIViewController? {
         guard let base else { return nil }
         if let nav = base as? UINavigationController { return crawl(from: nav.visibleViewController) }
         if let tab = base as? UITabBarController, let sel = tab.selectedViewController { return crawl(from: sel) }

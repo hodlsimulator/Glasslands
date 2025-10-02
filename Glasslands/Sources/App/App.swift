@@ -16,7 +16,8 @@ struct GlasslandsApp: App {
         WindowGroup {
             ContentView()
                 .task {
-                    // Authenticate Game Center on launch.
+                    // Delay Game Center auth to avoid the launch hitch.
+                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s
                     await gcHelper.authenticate()
                 }
         }
