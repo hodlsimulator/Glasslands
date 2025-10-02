@@ -17,15 +17,13 @@ final class ChunkStreamer3D {
 
     private let cfg: FirstPersonEngine.Config
     private let recipe: BiomeRecipe
-    private let noise: NoiseFields               // <-- keep ONE shared NoiseFields
+    private let noise: NoiseFields
 
     private weak var root: SCNNode?
     private let renderer: SCNSceneRenderer
 
-    // Background builder does pure math and returns TerrainChunkData.
     private let builder: ChunkMeshBuilder
 
-    // Live scene state (main-actor only)
     private var loaded: [IVec2: SCNNode] = [:]
     private var desired: Set<IVec2> = []
     private var pending: Set<IVec2> = []
@@ -49,14 +47,13 @@ final class ChunkStreamer3D {
     ) {
         self.cfg = cfg
         self.recipe = recipe
-        self.noise = noise                              // <-- store shared noise
+        self.noise = noise
         self.root = root
         self.renderer = renderer
         self.beaconSink = beaconSink
         self.obstacleSink = obstacleSink
         self.onChunkRemoved = onChunkRemoved
 
-        // Pass only primitives to the actor.
         self.builder = ChunkMeshBuilder(
             tilesX: cfg.tilesX,
             tilesZ: cfg.tilesZ,
@@ -66,7 +63,6 @@ final class ChunkStreamer3D {
         )
     }
 
-    /// Build the centre chunk immediately so the renderer has real geometry.
     func warmupCenter(at center: simd_float3) {
         guard let root else { return }
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
@@ -84,7 +80,13 @@ final class ChunkStreamer3D {
         guard root != nil else { return }
 
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
+
+        // Build radius (what we want to ensure is loaded)
         var keep = Set<IVec2>()
+        // Unload radius (hysteresis): keep an extra ring so we never reveal holes
+        let unloadRadius = cfg.preloadRadius + 1
+        var keepWithMargin = Set<IVec2>()
+
         var toStage: [IVec2] = []
 
         for dy in -cfg.preloadRadius...cfg.preloadRadius {
@@ -96,8 +98,14 @@ final class ChunkStreamer3D {
                 }
             }
         }
+        for dy in -unloadRadius...unloadRadius {
+            for dx in -unloadRadius...unloadRadius {
+                keepWithMargin.insert(IVec2(ci.x + dx, ci.y + dy))
+            }
+        }
 
-        for (k, n) in loaded where !keep.contains(k) {
+        // Defer unloading until chunks are well outside view
+        for (k, n) in loaded where !keepWithMargin.contains(k) {
             n.removeAllActions()
             n.removeFromParentNode()
             loaded.removeValue(forKey: k)
@@ -132,35 +140,26 @@ final class ChunkStreamer3D {
         Task { [weak self] in
             guard let self = self else { return }
 
-            // Heavy work off the main thread inside the actor.
             let data = await self.builder.build(originChunkX: ox, originChunkY: oy)
 
-            // Back on main: still desired?
             guard let root = self.root else { self.pending.remove(k); return }
             let key = IVec2(ox, oy)
             guard self.desired.contains(key) else { self.pending.remove(key); return }
 
-            // Create the SCNNode for terrain.
             let terrainNode = TerrainChunkNode.node(from: data)
 
-            // Build beacons/vegetation ON MAIN but DO NOT attach yet.
-            // (Critically, use the shared `noise` — no per-chunk NoiseFields init.)
             let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
             let veg     = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
 
-            // Prewarm everything together so first render doesn't compile pipelines.
             await self.prepareAsync([terrainNode] + beacons + veg)
 
-            // Re-check desire after prepare.
             guard self.desired.contains(key) else { self.pending.remove(key); return }
 
-            // Attach to the scene.
             root.addChildNode(terrainNode)
             beacons.forEach { terrainNode.addChildNode($0) }
             veg.forEach     { terrainNode.addChildNode($0) }
             self.loaded[key] = terrainNode
 
-            // Report to gameplay systems.
             self.beaconSink(beacons)
             self.obstacleSink(key, veg + beacons)
 
@@ -184,7 +183,6 @@ final class ChunkStreamer3D {
         return dx &* dx &+ dy &* dy
     }
 
-    // Async wrapper so we don't capture SceneKit types in a completion.
     private func prepareAsync(_ objects: [Any]) async {
         await withCheckedContinuation { cont in
             renderer.prepare(objects) { _ in cont.resume() }
@@ -192,7 +190,7 @@ final class ChunkStreamer3D {
     }
 }
 
-// MARK: - Background mesh builder (actor) — pure math only.
+// MARK: - Background mesh builder (actor) — pure math only, now with SKIRTS.
 
 actor ChunkMeshBuilder {
     private let tilesX: Int
@@ -234,13 +232,12 @@ actor ChunkMeshBuilder {
 
                 let wX = Float(tx) * tileSize
                 let wZ = Float(tz) * tileSize
-                let hT = sampler.sampleHeight(Double(tx), Double(tz))        // 0..ampH
+                let hT = sampler.sampleHeight(Double(tx), Double(tz))
                 let wY = Float(hT) * heightScale
 
                 let idx = vi(x, z)
-                positions[idx] = SIMD3(wX, wY, wZ)
+                positions[idx] = SIMD3<Float>(wX, wY, wZ)
 
-                // Central differences → normal (tile coords -> world Y via heightScale)
                 let hL = sampler.sampleHeight(Double(tx - 1), Double(tz))
                 let hR = sampler.sampleHeight(Double(tx + 1), Double(tz))
                 let hD = sampler.sampleHeight(Double(tx), Double(tz - 1))
@@ -249,7 +246,6 @@ actor ChunkMeshBuilder {
                 let tZv = SIMD3<Float>(0,        Float(hU - hD) * heightScale, tileSize)
                 normals[idx] = simd_normalize(simd_cross(tZv, tXv))
 
-                // Colour classification inputs
                 let hN   = Float(sampler.heightNorm(Double(tx), Double(tz), ampH: recipe.height.amplitude))
                 let slope = Float(sampler.slope(Double(tx), Double(tz)))
                 let river = Float(sampler.riverMask(Double(tx), Double(tz)))
@@ -257,12 +253,13 @@ actor ChunkMeshBuilder {
                 colors[idx] = palette.color(yNorm: hN, slope: slope, riverMask: river, moisture01: moist)
 
                 let detailScale: Float = 1.0 / (tileSize * 2.0)
-                uvs[idx] = SIMD2(wX * detailScale, wZ * detailScale)
+                uvs[idx] = SIMD2<Float>(wX * detailScale, wZ * detailScale)
             }
         }
 
         var indices: [UInt32] = []
         indices.reserveCapacity(tilesX * tilesZ * 6)
+
         for z in 0..<tilesZ {
             for x in 0..<tilesX {
                 let a = UInt32(vi(x,     z))
@@ -272,6 +269,69 @@ actor ChunkMeshBuilder {
                 indices.append(contentsOf: [a, b, c, b, d, c])
             }
         }
+
+        // --- Skirts (vertical side walls) ---
+        let skirtDepth: Float = max(tileSize, heightScale * 1.2)
+
+        var bottomIndex = [Int: Int]()
+        @inline(__always)
+        func dupBottom(_ x: Int, _ z: Int, normalHint: SIMD3<Float>) -> Int {
+            let top = vi(x, z)
+            if let id = bottomIndex[top] { return id }
+            let p = positions[top]
+            positions.append(SIMD3<Float>(p.x, p.y - skirtDepth, p.z))
+            // Simple normal: use hint for side lighting; colours/uvs from top
+            normals.append(normalHint)
+            colors.append(colors[top])
+            uvs.append(uvs[top])
+            let id = positions.count - 1
+            bottomIndex[top] = id
+            return id
+        }
+
+        // North edge (z = 0) → outward -Z
+        if vertsZ > 1 {
+            let n = SIMD3<Float>(0, 0, -1)
+            for x in 0..<tilesX {
+                let tl = vi(x, 0), tr = vi(x + 1, 0)
+                let bl = dupBottom(x, 0, n), br = dupBottom(x + 1, 0, n)
+                indices.append(contentsOf: [UInt32(tl), UInt32(tr), UInt32(bl),
+                                            UInt32(tr), UInt32(br), UInt32(bl)])
+            }
+        }
+        // South edge (z = vertsZ - 1) → outward +Z
+        if vertsZ > 1 {
+            let n = SIMD3<Float>(0, 0, 1)
+            let z = vertsZ - 1
+            for x in 0..<tilesX {
+                let tl = vi(x, z), tr = vi(x + 1, z)
+                let bl = dupBottom(x, z, n), br = dupBottom(x + 1, z, n)
+                indices.append(contentsOf: [UInt32(tr), UInt32(tl), UInt32(br),
+                                            UInt32(tl), UInt32(bl), UInt32(br)])
+            }
+        }
+        // West edge (x = 0) → outward -X
+        if vertsX > 1 {
+            let n = SIMD3<Float>(-1, 0, 0)
+            for z in 0..<tilesZ {
+                let tt = vi(0, z), tb = vi(0, z + 1)
+                let bt = dupBottom(0, z, n), bb = dupBottom(0, z + 1, n)
+                indices.append(contentsOf: [UInt32(tt), UInt32(bt), UInt32(tb),
+                                            UInt32(tb), UInt32(bt), UInt32(bb)])
+            }
+        }
+        // East edge (x = vertsX - 1) → outward +X
+        if vertsX > 1 {
+            let n = SIMD3<Float>(1, 0, 0)
+            let x = vertsX - 1
+            for z in 0..<tilesZ {
+                let tt = vi(x, z), tb = vi(x, z + 1)
+                let bt = dupBottom(x, z, n), bb = dupBottom(x, z + 1, n)
+                indices.append(contentsOf: [UInt32(tb), UInt32(bt), UInt32(tt),
+                                            UInt32(tb), UInt32(bb), UInt32(bt)])
+            }
+        }
+        // --- end skirts ---
 
         return TerrainChunkData(
             originChunkX: originChunkX,
