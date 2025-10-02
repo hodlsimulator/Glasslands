@@ -14,11 +14,9 @@ import simd
 
 @MainActor
 final class ChunkStreamer3D {
-
     private let cfg: FirstPersonEngine.Config
     private let recipe: BiomeRecipe
     private let noise: NoiseFields
-
     private weak var root: SCNNode?
     private let renderer: SCNSceneRenderer
 
@@ -63,6 +61,7 @@ final class ChunkStreamer3D {
         )
     }
 
+    // Build centre chunk immediately so there’s never a hole underfoot.
     func warmupCenter(at center: simd_float3) {
         guard let root else { return }
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
@@ -70,7 +69,17 @@ final class ChunkStreamer3D {
         guard loaded[key] == nil else { return }
 
         let sp = Signposts.begin("BuildChunk")
-        let node = TerrainChunkNode.makeNode(originChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+        let data = TerrainMeshBuilder.makeData(
+            originChunkX: key.x,
+            originChunkY: key.y,
+            tilesX: cfg.tilesX,
+            tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize,
+            heightScale: cfg.heightScale,
+            noise: noise,
+            recipe: recipe
+        )
+        let node = TerrainChunkNode.node(from: data)
         root.addChildNode(node)
         loaded[key] = node
         Signposts.end("BuildChunk", sp)
@@ -81,10 +90,9 @@ final class ChunkStreamer3D {
 
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
 
-        var keep = Set<IVec2>()                 // build radius
+        var keep = Set<IVec2>()
         let unloadRadius = cfg.preloadRadius + 1
-        var keepWithMargin = Set<IVec2>()       // unload hysteresis
-
+        var keepWithMargin = Set<IVec2>()
         var toStage: [IVec2] = []
 
         for dy in -cfg.preloadRadius...cfg.preloadRadius {
@@ -96,6 +104,7 @@ final class ChunkStreamer3D {
                 }
             }
         }
+
         for dy in -unloadRadius...unloadRadius {
             for dx in -unloadRadius...unloadRadius {
                 keepWithMargin.insert(IVec2(ci.x + dx, ci.y + dy))
@@ -133,7 +142,6 @@ final class ChunkStreamer3D {
 
     private func enqueueBuild(_ k: IVec2) {
         let ox = k.x, oy = k.y
-
         Task { [weak self] in
             guard let self = self else { return }
 
@@ -144,9 +152,8 @@ final class ChunkStreamer3D {
             guard self.desired.contains(key) else { self.pending.remove(key); return }
 
             let terrainNode = TerrainChunkNode.node(from: data)
-
             let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
-            let veg     = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let veg = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
 
             await self.prepareAsync([terrainNode] + beacons + veg)
 
@@ -154,12 +161,11 @@ final class ChunkStreamer3D {
 
             root.addChildNode(terrainNode)
             beacons.forEach { terrainNode.addChildNode($0) }
-            veg.forEach     { terrainNode.addChildNode($0) }
-            self.loaded[key] = terrainNode
+            veg.forEach { terrainNode.addChildNode($0) }
 
+            self.loaded[key] = terrainNode
             self.beaconSink(beacons)
             self.obstacleSink(key, veg + beacons)
-
             self.pending.remove(key)
         }
     }
@@ -170,9 +176,7 @@ final class ChunkStreamer3D {
         return IVec2(floorDiv(tX, cfg.tilesX), floorDiv(tZ, cfg.tilesZ))
     }
 
-    private func floorDiv(_ a: Int, _ b: Int) -> Int {
-        a >= 0 ? a / b : ((a + 1) / b - 1)
-    }
+    private func floorDiv(_ a: Int, _ b: Int) -> Int { a >= 0 ? a / b : ((a + 1) / b - 1) }
 
     private func priority(of k: IVec2, around c: IVec2) -> Int {
         let dx = k.x - c.x
@@ -187,7 +191,7 @@ final class ChunkStreamer3D {
     }
 }
 
-// MARK: - Background mesh builder (actor) — pure math only, with skirts.
+// MARK: - Background mesh builder (actor) — pure math only, with skirts and stitched UVs.
 
 actor ChunkMeshBuilder {
     private let tilesX: Int
@@ -195,7 +199,6 @@ actor ChunkMeshBuilder {
     private let tileSize: Float
     private let heightScale: Float
     private let recipe: BiomeRecipe
-
     private let sampler: NoiseSampler
 
     init(tilesX: Int, tilesZ: Int, tileSize: Float, heightScale: Float, recipe: BiomeRecipe) {
@@ -210,6 +213,7 @@ actor ChunkMeshBuilder {
     func build(originChunkX: Int, originChunkY: Int) -> TerrainChunkData {
         let vertsX = tilesX + 1
         let vertsZ = tilesZ + 1
+
         let originTileX = originChunkX * tilesX
         let originTileZ = originChunkY * tilesZ
 
@@ -217,7 +221,7 @@ actor ChunkMeshBuilder {
 
         var positions = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
         var normals   = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
-        var colors    = [SIMD4<Float>](repeating: SIMD4<Float>(1,1,1,1), count: vertsX * vertsZ)
+        var colors    = [SIMD4<Float>](repeating: SIMD4(1,1,1,1), count: vertsX * vertsZ)
         var uvs       = [SIMD2<Float>](repeating: .zero, count: vertsX * vertsZ)
 
         let palette = HeightClassifier(recipe: recipe)
@@ -229,56 +233,59 @@ actor ChunkMeshBuilder {
 
                 let wX = Float(tx) * tileSize
                 let wZ = Float(tz) * tileSize
-                let hT = sampler.sampleHeight(Double(tx), Double(tz))        // 0..ampH
-                let wY = Float(hT) * heightScale
+
+                let hN = Float(sampler.heightNorm(Double(tx), Double(tz), ampH: recipe.height.amplitude))
+                let y  = hN * heightScale
 
                 let idx = vi(x, z)
-                positions[idx] = SIMD3<Float>(wX, wY, wZ)
+                positions[idx] = SIMD3(wX, y, wZ)
 
-                // Central differences → normal
+                // Central-difference normal across global tile coords (seamless at chunk borders)
                 let hL = sampler.sampleHeight(Double(tx - 1), Double(tz))
                 let hR = sampler.sampleHeight(Double(tx + 1), Double(tz))
                 let hD = sampler.sampleHeight(Double(tx), Double(tz - 1))
                 let hU = sampler.sampleHeight(Double(tx), Double(tz + 1))
-                let tXv = SIMD3<Float>(tileSize, Float(hR - hL) * heightScale, 0)
-                let tZv = SIMD3<Float>(0,        Float(hU - hD) * heightScale, tileSize)
+                let tXv = SIMD3(tileSize, Float(hR - hL) * heightScale, 0)
+                let tZv = SIMD3(0, Float(hU - hD) * heightScale, tileSize)
                 normals[idx] = simd_normalize(simd_cross(tZv, tXv))
 
-                // Colour inputs
-                let hN   = Float(sampler.heightNorm(Double(tx), Double(tz), ampH: recipe.height.amplitude))
-                let slope = Float(sampler.slope(Double(tx), Double(tz)))
-                let river = Float(sampler.riverMask(Double(tx), Double(tz)))
-                let moist = Float(sampler.sampleMoisture(Double(tx), Double(tz)) / max(0.0001, recipe.moisture.amplitude))
+                // Colour classification inputs
+                let slope  = Float(sampler.slope(Double(tx), Double(tz)))
+                let river  = Float(sampler.riverMask(Double(tx), Double(tz)))
+                let moist  = Float(sampler.sampleMoisture(Double(tx), Double(tz)) / max(0.0001, recipe.moisture.amplitude))
                 colors[idx] = palette.color(yNorm: hN, slope: slope, riverMask: river, moisture01: moist)
 
-                let detailScale: Float = 1.0 / (tileSize * 2.0)
-                uvs[idx] = SIMD2<Float>(wX * detailScale, wZ * detailScale)
+                // World-space UVs so detail texture is continuous across chunks.
+                // Increased frequency to reduce visible square tiling.
+                let detailScale: Float = 1.0 / (tileSize * 8.0)
+                uvs[idx] = SIMD2(wX * detailScale, wZ * detailScale)
             }
         }
 
+        // Top surface indices
         var indices: [UInt32] = []
         indices.reserveCapacity(tilesX * tilesZ * 6)
         for z in 0..<tilesZ {
             for x in 0..<tilesX {
-                let a = UInt32(vi(x,     z))
-                let b = UInt32(vi(x + 1, z))
-                let c = UInt32(vi(x,     z + 1))
-                let d = UInt32(vi(x + 1, z + 1))
-                indices.append(contentsOf: [a, b, c, b, d, c])
+                let i0 = UInt32(vi(x,     z))
+                let i1 = UInt32(vi(x + 1, z))
+                let i2 = UInt32(vi(x,     z + 1))
+                let i3 = UInt32(vi(x + 1, z + 1))
+                indices.append(contentsOf: [i0, i2, i1,  i1, i2, i3])
             }
         }
 
-        // Skirts
-        let skirtDepth: Float = max(tileSize, heightScale * 1.2)
+        // Edge skirts to hide sub-pixel cracks between chunks
+        let skirtDepth: Float = 0.20
+        var bottomIndex: [Int: Int] = [:]
 
-        var bottomIndex = [Int: Int]()
         @inline(__always)
-        func dupBottom(_ x: Int, _ z: Int, normalHint: SIMD3<Float>) -> Int {
+        func bottomOf(_ x: Int, _ z: Int, normalHint n: SIMD3<Float>) -> Int {
             let top = vi(x, z)
             if let id = bottomIndex[top] { return id }
             let p = positions[top]
-            positions.append(SIMD3<Float>(p.x, p.y - skirtDepth, p.z))
-            normals.append(normalHint)
+            positions.append(SIMD3(p.x, p.y - skirtDepth, p.z))
+            normals.append(n)
             colors.append(colors[top])
             uvs.append(uvs[top])
             let id = positions.count - 1
@@ -286,46 +293,54 @@ actor ChunkMeshBuilder {
             return id
         }
 
-        // North edge (z = 0) → outward -Z
+        // North edge
         if vertsZ > 1 {
             let n = SIMD3<Float>(0, 0, -1)
-            for x in 0..<tilesX {
-                let tl = vi(x, 0), tr = vi(x + 1, 0)
-                let bl = dupBottom(x, 0, normalHint: n), br = dupBottom(x + 1, 0, normalHint: n)
-                indices.append(contentsOf: [UInt32(tl), UInt32(tr), UInt32(bl),
-                                            UInt32(tr), UInt32(br), UInt32(bl)])
+            for x in 0..<vertsX {
+                let topA = vi(x, 0)
+                let topB = vi(max(0, x-1), 0)
+                let botA = bottomOf(x, 0, normalHint: n)
+                let botB = bottomOf(max(0, x-1), 0, normalHint: n)
+                indices.append(contentsOf: [UInt32(topB), UInt32(botB), UInt32(topA),
+                                            UInt32(topA), UInt32(botB), UInt32(botA)])
             }
         }
-        // South edge (z = vertsZ - 1) → outward +Z
+        // South edge
         if vertsZ > 1 {
             let n = SIMD3<Float>(0, 0, 1)
             let z = vertsZ - 1
-            for x in 0..<tilesX {
-                let tl = vi(x, z), tr = vi(x + 1, z)
-                let bl = dupBottom(x, z, normalHint: n), br = dupBottom(x + 1, z, normalHint: n)
-                indices.append(contentsOf: [UInt32(tr), UInt32(tl), UInt32(br),
-                                            UInt32(tl), UInt32(bl), UInt32(br)])
+            for x in 0..<vertsX {
+                let topA = vi(x, z)
+                let topB = vi(max(0, x-1), z)
+                let botA = bottomOf(x, z, normalHint: n)
+                let botB = bottomOf(max(0, x-1), z, normalHint: n)
+                indices.append(contentsOf: [UInt32(topA), UInt32(botB), UInt32(topB),
+                                            UInt32(topA), UInt32(botA), UInt32(botB)])
             }
         }
-        // West edge (x = 0) → outward -X
+        // West edge
         if vertsX > 1 {
             let n = SIMD3<Float>(-1, 0, 0)
-            for z in 0..<tilesZ {
-                let tt = vi(0, z), tb = vi(0, z + 1)
-                let bt = dupBottom(0, z, normalHint: n), bb = dupBottom(0, z + 1, normalHint: n)
-                indices.append(contentsOf: [UInt32(tt), UInt32(bt), UInt32(tb),
-                                            UInt32(tb), UInt32(bt), UInt32(bb)])
+            for z in 0..<vertsZ {
+                let topA = vi(0, z)
+                let topB = vi(0, max(0, z-1))
+                let botA = bottomOf(0, z, normalHint: n)
+                let botB = bottomOf(0, max(0, z-1), normalHint: n)
+                indices.append(contentsOf: [UInt32(topB), UInt32(botB), UInt32(topA),
+                                            UInt32(topA), UInt32(botB), UInt32(botA)])
             }
         }
-        // East edge (x = vertsX - 1) → outward +X
+        // East edge
         if vertsX > 1 {
             let n = SIMD3<Float>(1, 0, 0)
             let x = vertsX - 1
-            for z in 0..<tilesZ {
-                let tt = vi(x, z), tb = vi(x, z + 1)
-                let bt = dupBottom(x, z, normalHint: n), bb = dupBottom(x, z + 1, normalHint: n)
-                indices.append(contentsOf: [UInt32(tb), UInt32(bt), UInt32(tt),
-                                            UInt32(tb), UInt32(bb), UInt32(bt)])
+            for z in 0..<vertsZ {
+                let topA = vi(x, z)
+                let topB = vi(x, max(0, z-1))
+                let botA = bottomOf(x, z, normalHint: n)
+                let botB = bottomOf(x, max(0, z-1), normalHint: n)
+                indices.append(contentsOf: [UInt32(topA), UInt32(botB), UInt32(topB),
+                                            UInt32(topA), UInt32(botA), UInt32(botB)])
             }
         }
 
@@ -343,16 +358,25 @@ actor ChunkMeshBuilder {
         )
     }
 
+    // Colour classifier used by the mesh builder
     private struct HeightClassifier {
         let deep  = SIMD4<Float>(0.18, 0.42, 0.58, 1.0)
         let shore = SIMD4<Float>(0.55, 0.80, 0.88, 1.0)
         let grass = SIMD4<Float>(0.32, 0.62, 0.34, 1.0)
         let sand  = SIMD4<Float>(0.92, 0.87, 0.68, 1.0)
         let rock  = SIMD4<Float>(0.90, 0.92, 0.95, 1.0)
-        let deepCut: Float = 0.22, shoreCut: Float = 0.30, sandCut: Float = 0.33, snowCut: Float = 0.88
-        let recipe: BiomeRecipe
-        @inline(__always)
-        private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
+
+        let deepCut:  Float = 0.22
+        let shoreCut: Float = 0.30
+        let sandCut:  Float = 0.33
+        let snowCut:  Float = 0.88
+
+        init(recipe: BiomeRecipe) { _ = recipe }
+
+        @inline(__always) private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> {
+            a + (b - a) * t
+        }
+
         func color(yNorm y: Float, slope s: Float, riverMask r: Float, moisture01 m: Float) -> SIMD4<Float> {
             if y < deepCut { return deep }
             if y < shoreCut || r > 0.60 { return shore }
@@ -391,19 +415,21 @@ actor ChunkMeshBuilder {
                 }
             }
 
-            self.height    = GKNoise(makeSource(recipe.height))
-            self.moisture  = GKNoise(makeSource(recipe.moisture, seed: 101))
+            self.height = GKNoise(makeSource(recipe.height))
+            self.moisture = GKNoise(makeSource(recipe.moisture, seed: 101))
             self.riverBase = GKNoise(GKRidgedNoiseSource(frequency: 1.0, octaveCount: 5, lacunarity: 2.0, seed: baseSeed32 &+ 202))
-            self.warpX     = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 303))
-            self.warpY     = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 404))
+            self.warpX = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 303))
+            self.warpY = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 404))
 
             self.ampH = recipe.height.amplitude
             self.ampM = recipe.moisture.amplitude
+
             self.scaleH = max(20.0, recipe.height.scale * 12.0)
             self.scaleM = max(10.0, recipe.moisture.scale * 8.0)
             self.scaleR = max(12.0, scaleH * 0.85)
+
             self.warpScale = 12.0
-            self.warpAmp   = 0.15 / scaleH
+            self.warpAmp = 0.15 / scaleH
         }
 
         @inline(__always) private func n01(_ v: Double) -> Double { (v * 0.5) + 0.5 }

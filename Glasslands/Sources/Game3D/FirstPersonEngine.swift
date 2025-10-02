@@ -13,7 +13,6 @@ import simd
 import UIKit
 
 final class FirstPersonEngine: NSObject {
-
     struct Config {
         let tileSize: Float = 16.0
         let heightScale: Float = 24.0
@@ -23,13 +22,16 @@ final class FirstPersonEngine: NSObject {
         let eyeHeight: Float = 1.62
         let playerRadius: Float = 0.34
         let maxDescentRate: Float = 8.0
-        let yawSpeedDegPerSec: Float = 170.0
-        let pitchSpeedDegPerSec: Float = 120.0
         let skyDistance: Float = 4600
+
+        // Swipe look (degrees per UIKit point of finger travel)
+        let swipeYawDegPerPt: Float = 0.22
+        let swipePitchDegPerPt: Float = 0.18
 
         var tilesX: Int { chunkTiles.x }
         var tilesZ: Int { chunkTiles.y }
     }
+
     let cfg = Config()
 
     private var scene = SCNScene()
@@ -44,7 +46,10 @@ final class FirstPersonEngine: NSObject {
     private let camNode = SCNNode()
 
     private var moveInput = SIMD2<Float>(repeating: 0)
-    private var lookRate  = SIMD2<Float>(repeating: 0)
+
+    // New: swipe-based look (accumulate touch deltas; no inertia)
+    private var pendingLookDeltaPts = SIMD2<Float>(repeating: 0)
+
     private var yaw: Float = 0
     private var pitch: Float = -0.1
 
@@ -60,10 +65,6 @@ final class FirstPersonEngine: NSObject {
     private struct Obstacle { weak var node: SCNNode?; let position: SIMD2<Float>; let radius: Float }
     private var obstaclesByChunk: [IVec2: [Obstacle]] = [:]
 
-    // Warm-start gates
-    private var warmupFramesRemaining = 0
-    private var allowStreaming = false
-
     init(onScore: @escaping (Int) -> Void) {
         self.onScore = onScore
         super.init()
@@ -78,15 +79,23 @@ final class FirstPersonEngine: NSObject {
         view.backgroundColor = .black
 
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
-
         buildLighting()
         buildSky()
+
         apply(recipe: recipe, force: true)
     }
 
     func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }
+
     func setMoveInput(_ v: SIMD2<Float>) { moveInput = v }
-    func setLookRate(_ v: SIMD2<Float>) { lookRate  = v }
+
+    // Backwards-compat shim (not used anymore)
+    func setLookRate(_ _: SIMD2<Float>) { /* no-op with swipe controls */ }
+
+    // New entry point used by LookPadView: accumulate UIKit-point deltas
+    func applyLookDelta(points: SIMD2<Float>) {
+        pendingLookDeltaPts &+= points
+    }
 
     func apply(recipe: BiomeRecipe, force: Bool = false) {
         if !force, let r = self.recipe, r == recipe { return }
@@ -105,21 +114,29 @@ final class FirstPersonEngine: NSObject {
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
-        // Look integration
-        yaw   -= lookRate.x * (cfg.yawSpeedDegPerSec * (.pi/180)) * dt
-        pitch += lookRate.y * (cfg.pitchSpeedDegPerSec * (.pi/180)) * dt
-        clampAngles()
+        // 1) Apply one-shot swipe deltas (no inertia)
+        if pendingLookDeltaPts != .zero {
+            let yawRadPerPt   = cfg.swipeYawDegPerPt   * (.pi / 180)
+            let pitchRadPerPt = cfg.swipePitchDegPerPt * (.pi / 180)
+            // Right swipe → look right; up swipe → look up
+            yaw   -= pendingLookDeltaPts.x * yawRadPerPt
+            pitch -= pendingLookDeltaPts.y * pitchRadPerPt
+            pendingLookDeltaPts = .zero
+            clampAngles()
+        }
+
         updateRig()
 
+        // 2) Movement
         let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
         let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
         let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
-
         var next = yawNode.simdPosition + attemptedDelta
 
         // Ground clamp
         let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
         let targetY = groundY + cfg.eyeHeight
+
         if !targetY.isFinite {
             next = spawn().simd
         } else if next.y <= targetY {
@@ -129,20 +146,18 @@ final class FirstPersonEngine: NSObject {
             next.y = max(targetY, next.y - maxDrop)
         }
 
-        // Collide with simple radial obstacles
+        // Simple radial obstacle collisions
         next = resolveObstacleCollisions(position: next)
 
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
 
-        if warmupFramesRemaining > 0 {
-            warmupFramesRemaining -= 1
-        } else if allowStreaming {
-            // Asynchronous now — just tell the chunker where we are.
-            chunker.updateVisible(center: next)
-            collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
-        }
+        // Stream/update world each frame (no artificial warm-up delay)
+        chunker.updateVisible(center: next)
+        collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
     }
+
+    // MARK: - World
 
     private func resetWorld() {
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
@@ -154,6 +169,7 @@ final class FirstPersonEngine: NSObject {
 
         yaw = 0
         pitch = -0.08
+
         yawNode.position = spawn()
         updateRig()
 
@@ -162,12 +178,13 @@ final class FirstPersonEngine: NSObject {
         camera.zFar = 20_000
         camera.fieldOfView = 70
         camNode.camera = camera
+
         pitchNode.addChildNode(camNode)
         yawNode.addChildNode(pitchNode)
         scene.rootNode.addChildNode(yawNode)
         scnView?.pointOfView = camNode
 
-        // NEW: pass renderer (SCNView) so ChunkStreamer can prewarm nodes.
+        // Streamer: immediate, with a synchronous centre warmup so there’s never a hole underfoot.
         chunker = ChunkStreamer3D(
             cfg: cfg,
             noise: noise,
@@ -185,28 +202,14 @@ final class FirstPersonEngine: NSObject {
             }
         )
 
-        // Build one centre chunk so the renderer sees real geometry.
+        // Build centre chunk immediately
         chunker.warmupCenter(at: yawNode.simdPosition)
-
-        // Pre‑warm a couple of frames; start streaming gently after 1s.
-        warmupFramesRemaining = 6
-        allowStreaming = false
-
-        _ = scnView?.prepare(scene.rootNode, shouldAbortBlock: nil)
-        _ = scnView?.snapshot()
-
-        // NOTE: chunker now builds off-thread; no need to throttle tasksPerFrame here.
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.allowStreaming = true
-            Signposts.event("WarmStart.Done")
-        }
 
         score = 0
         DispatchQueue.main.async { [score, onScore] in onScore(score) }
     }
 
-    // --- unchanged helpers below ---
+    // MARK: - Visuals
 
     private func buildLighting() {
         let amb = SCNLight()
@@ -251,12 +254,14 @@ final class FirstPersonEngine: NSObject {
             let sunDisc = SCNNode(geometry: plane)
             sunDisc.name = "sunDisc"
             sunDisc.renderingOrder = -15
+
             let bb = SCNBillboardConstraint(); bb.freeAxes = []
             sunDisc.constraints = [bb]
 
             let dirToSun = -sunLightNode.presentation.simdWorldFront
             let distance = cfg.skyDistance - 180
             sunDisc.simdPosition = simd_normalize(dirToSun) * distance
+
             skyAnchor.addChildNode(sunDisc)
             self.sunDiscNode = sunDisc
         }
@@ -276,6 +281,7 @@ final class FirstPersonEngine: NSObject {
 
     private func spawn() -> SCNVector3 {
         let ts = cfg.tileSize
+
         func isWalkable(tx: Int, tz: Int) -> Bool {
             let h = noise.sampleHeight(Double(tx), Double(tz)) / max(0.0001, recipe.height.amplitude)
             let s = noise.slope(Double(tx), Double(tz))
@@ -285,6 +291,7 @@ final class FirstPersonEngine: NSObject {
             if r > 0.60 { return false }
             return true
         }
+
         if isWalkable(tx: 0, tz: 0) {
             return SCNVector3(
                 ts * 0.5,
@@ -292,6 +299,7 @@ final class FirstPersonEngine: NSObject {
                 ts * 0.5
             )
         }
+
         for radius in 1...32 {
             for z in -radius...radius {
                 for x in -radius...radius where abs(x) == radius || abs(z) == radius {
@@ -307,6 +315,7 @@ final class FirstPersonEngine: NSObject {
                 }
             }
         }
+
         return SCNVector3(0, TerrainMath.heightWorld(x: 0, z: 0, cfg: cfg, noise: noise) + cfg.eyeHeight, 0)
     }
 
@@ -326,9 +335,7 @@ final class FirstPersonEngine: NSObject {
         for n in nodes {
             let p = n.worldPosition
             let r = (n.value(forKey: "hitRadius") as? CGFloat).map { Float($0) } ?? 0.5
-            obs.append(Obstacle(node: n,
-                                position: SIMD2(Float(p.x), Float(p.z)),
-                                radius: r))
+            obs.append(Obstacle(node: n, position: SIMD2(Float(p.x), Float(p.z)), radius: r))
         }
         obstaclesByChunk[chunk] = obs
     }
@@ -337,6 +344,7 @@ final class FirstPersonEngine: NSObject {
         var pos = p
         let pr = cfg.playerRadius
         let ci = chunkIndex(forWorldX: pos.x, z: pos.z)
+
         for dz in -1...1 {
             for dx in -1...1 {
                 let key = IVec2(ci.x + dx, ci.y + dz)
@@ -364,7 +372,10 @@ final class FirstPersonEngine: NSObject {
         let tZ = Int(floor(Double(z) / Double(cfg.tileSize)))
         return IVec2(floorDiv(tX, cfg.tilesX), floorDiv(tZ, cfg.tilesZ))
     }
-    private func floorDiv(_ a: Int, _ b: Int) -> Int { a >= 0 ? a / b : ((a + 1) / b - 1) }
+
+    private func floorDiv(_ a: Int, _ b: Int) -> Int {
+        a >= 0 ? a / b : ((a + 1) / b - 1)
+    }
 
     private func collectNearbyBeacons(playerXZ: SIMD2<Float>) {
         var picked: [SCNNode] = []
@@ -372,7 +383,9 @@ final class FirstPersonEngine: NSObject {
             let p = n.worldPosition
             let dx = playerXZ.x - p.x
             let dz = playerXZ.y - p.z
-            if dx*dx + dz*dz < 1.25 * 1.25 { picked.append(n) }
+            if dx*dx + dz*dz < 1.25 * 1.25 {
+                picked.append(n)
+            }
         }
         if !picked.isEmpty {
             picked.forEach { $0.removeAllActions(); $0.removeFromParentNode(); beacons.remove($0) }

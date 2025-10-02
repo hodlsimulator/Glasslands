@@ -58,7 +58,9 @@ struct ContentView: View {
                         do {
                             let palette = AppColours.uiColors(from: vm.recipe().paletteHex)
                             let postcard = try await vm.imageService.generatePostcard(
-                                from: img, title: vm.seedCharm, palette: palette
+                                from: img,
+                                title: vm.seedCharm,
+                                palette: palette
                             )
                             try await PhotoSaver.saveImageToPhotos(postcard)
                             lastSnapshot = postcard
@@ -85,12 +87,12 @@ struct ContentView: View {
                     Spacer()
                     HStack {
                         MoveStickView { vec in
-                            engine.setMoveInput(vec)        // x = strafe, y = forward
+                            engine.setMoveInput(vec)   // x = strafe, y = forward
                         }
                         Spacer(minLength: 24)
-                        LookPadView { rate in
-                            // Inertial look: provide a *rate*, engine integrates each frame.
-                            engine.setLookRate(rate)
+                        // NEW: swipe-to-look (no inertia)
+                        LookPadView { delta in
+                            engine.applyLookDelta(points: delta)
                         }
                     }
                     .padding(.horizontal, 18)

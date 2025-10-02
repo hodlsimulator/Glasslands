@@ -17,16 +17,14 @@ struct TerrainChunkData: Sendable {
     let tilesX: Int
     let tilesZ: Int
     let tileSize: Float
-
     let positions: [SIMD3<Float>]
-    let normals:   [SIMD3<Float>]
-    let colors:    [SIMD4<Float>]  // RGBA 0…1
-    let uvs:       [SIMD2<Float>]
-    let indices:   [UInt32]
+    let normals: [SIMD3<Float>]
+    let colors: [SIMD4<Float>]   // RGBA 0…1
+    let uvs: [SIMD2<Float>]
+    let indices: [UInt32]
 }
 
 enum TerrainChunkNode {
-
     static func makeNode(
         originChunk: IVec2,
         cfg: FirstPersonEngine.Config,
@@ -36,7 +34,10 @@ enum TerrainChunkNode {
         let data = TerrainMeshBuilder.makeData(
             originChunkX: originChunk.x,
             originChunkY: originChunk.y,
-            cfg: cfg,
+            tilesX: cfg.tilesX,
+            tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize,
+            heightScale: cfg.heightScale,
             noise: noise,
             recipe: recipe
         )
@@ -64,6 +65,7 @@ enum TerrainChunkNode {
             dataOffset: 0,
             dataStride: MemoryLayout<SIMD3<Float>>.stride
         )
+
         let nrmSrc = SCNGeometrySource(
             data: nrmData,
             semantic: .normal,
@@ -74,6 +76,7 @@ enum TerrainChunkNode {
             dataOffset: 0,
             dataStride: MemoryLayout<SIMD3<Float>>.stride
         )
+
         let colSrc = SCNGeometrySource(
             data: colData,
             semantic: .color,
@@ -84,7 +87,8 @@ enum TerrainChunkNode {
             dataOffset: 0,
             dataStride: MemoryLayout<SIMD4<Float>>.stride
         )
-        let uvSrc  = SCNGeometrySource(
+
+        let uvSrc = SCNGeometrySource(
             data: uvData,
             semantic: .texcoord,
             vectorCount: data.uvs.count,
@@ -106,8 +110,8 @@ enum TerrainChunkNode {
 
         let mat = SCNMaterial()
         mat.lightingModel = .lambert
-        mat.isDoubleSided = true              // never see through underside
-        mat.diffuse.contents = SceneKitHelpers.groundDetailTexture(size: 128)
+        mat.isDoubleSided = true
+        mat.diffuse.contents = SceneKitHelpers.groundDetailTexture(size: 256) // higher-res, less obvious tiling
         mat.diffuse.wrapS = .repeat
         mat.diffuse.wrapT = .repeat
         mat.roughness.contents = 1.0
