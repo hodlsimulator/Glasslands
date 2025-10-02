@@ -11,8 +11,6 @@ import SceneKit
 import UIKit
 import GameplayKit
 
-// MARK: - Convenience
-
 extension SCNVector3 {
     static var zero: SCNVector3 { SCNVector3(0, 0, 0) }
     var simd: SIMD3<Float> { SIMD3(Float(x), Float(y), Float(z)) }
@@ -41,8 +39,6 @@ func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
     )
 }
 
-// MARK: - Procedural images
-
 enum SceneKitHelpers {
     static func groundDetailTexture(size: Int = 256) -> UIImage { groundDetailImage(size: size) }
 
@@ -59,12 +55,12 @@ enum SceneKitHelpers {
 
         func dir(forFace i: Int, u: Double, v: Double) -> SIMD3<Double> {
             switch i {
-            case 0: return SIMD3( 1, v, -u) // +X
-            case 1: return SIMD3(-1, v,  u) // -X
-            case 2: return SIMD3( u, 1,  v) // +Y
-            case 3: return SIMD3( u,-1, -v) // -Y
-            case 4: return SIMD3( u, v,  1) // +Z
-            default:return SIMD3(-u, v, -1) // -Z
+            case 0: return SIMD3( 1, v, -u)
+            case 1: return SIMD3(-1, v,  u)
+            case 2: return SIMD3( u, 1,  v)
+            case 3: return SIMD3( u,-1, -v)
+            case 4: return SIMD3( u, v,  1)
+            default:return SIMD3(-u, v, -1)
             }
         }
 
@@ -117,11 +113,10 @@ enum SceneKitHelpers {
         return img
     }
 
-    /// Seamless, tileable ground detail built from GKNoise (less obvious grid than sines).
+    /// Seamless, tileable ground detail built from GKNoise.
     static func groundDetailImage(size: Int) -> UIImage {
         let W = max(64, size), H = max(64, size)
 
-        // Seamless noise map
         let src = GKPerlinNoiseSource(frequency: 2.0, octaveCount: 5, persistence: 0.55, lacunarity: 2.1, seed: 424242)
         let noise = GKNoise(src)
         let map = GKNoiseMap(
@@ -137,8 +132,8 @@ enum SceneKitHelpers {
 
         for y in 0..<H {
             for x in 0..<W {
-                let v = GKNoiseMap.value(map, at: vector_int2(Int32(x), Int32(y))) // -1..1
-                // Gentle contrast curve
+                // FIX: call instance method on GKNoiseMap
+                let v = map.value(at: vector_int2(Int32(x), Int32(y))) // -1..1
                 let n = pow(max(0, min(1, (v * 0.5 + 0.5))), 1.2)
                 let g = UInt8(max(0, min(255, Int(n * 255.0))))
                 let i = (y * W + x) * 4
@@ -153,7 +148,6 @@ enum SceneKitHelpers {
     }
 }
 
-// Small CG helper
 enum CGImageHelper {
     static func makeImage(width W: Int, height H: Int, bytes: inout [UInt8], bpr: Int) -> UIImage {
         let cs = CGColorSpaceCreateDeviceRGB()

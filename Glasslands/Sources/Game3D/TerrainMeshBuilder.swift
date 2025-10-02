@@ -8,9 +8,8 @@
 //  Returns TerrainChunkData and includes edge “skirts” to seal gaps.
 //
 
-// Glasslands/Sources/Game3D/TerrainMeshBuilder.swift
-
 import simd
+import Dispatch   // FIX: for DispatchSemaphore
 
 enum TerrainMeshBuilder {
     static func makeData(
@@ -23,10 +22,9 @@ enum TerrainMeshBuilder {
         noise: NoiseFields,
         recipe: BiomeRecipe
     ) -> TerrainChunkData {
-        // Thin wrapper calling the same maths as the background actor so centre warmup matches neighbours.
         let actor = ChunkMeshBuilder(tilesX: tilesX, tilesZ: tilesZ, tileSize: tileSize, heightScale: heightScale, recipe: recipe)
-        // Note: quick synchronous hop to the actor. This builds on the current thread.
-        let sem = DispatchSemaphore(value: 0)
+        let sem = DispatchSemaphore(value: 1)
+        sem.wait()
         var out: TerrainChunkData?
         Task {
             out = await actor.build(originChunkX: originChunkX, originChunkY: originChunkY)

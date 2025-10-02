@@ -23,11 +23,8 @@ final class FirstPersonEngine: NSObject {
         let playerRadius: Float = 0.34
         let maxDescentRate: Float = 8.0
         let skyDistance: Float = 4600
-
-        // Swipe look (degrees per UIKit point of finger travel)
         let swipeYawDegPerPt: Float = 0.22
         let swipePitchDegPerPt: Float = 0.18
-
         var tilesX: Int { chunkTiles.x }
         var tilesZ: Int { chunkTiles.y }
     }
@@ -47,7 +44,7 @@ final class FirstPersonEngine: NSObject {
 
     private var moveInput = SIMD2<Float>(repeating: 0)
 
-    // New: swipe-based look (accumulate touch deltas; no inertia)
+    // Accumulate swipe deltas (UIKit points) — no inertia
     private var pendingLookDeltaPts = SIMD2<Float>(repeating: 0)
 
     private var yaw: Float = 0
@@ -89,12 +86,11 @@ final class FirstPersonEngine: NSObject {
 
     func setMoveInput(_ v: SIMD2<Float>) { moveInput = v }
 
-    // Backwards-compat shim (not used anymore)
-    func setLookRate(_ _: SIMD2<Float>) { /* no-op with swipe controls */ }
+    func setLookRate(_ _: SIMD2<Float>) { }
 
-    // New entry point used by LookPadView: accumulate UIKit-point deltas
+    // FIX: use += (not &+=) for floats
     func applyLookDelta(points: SIMD2<Float>) {
-        pendingLookDeltaPts &+= points
+        pendingLookDeltaPts += points
     }
 
     func apply(recipe: BiomeRecipe, force: Bool = false) {
@@ -114,11 +110,9 @@ final class FirstPersonEngine: NSObject {
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
-        // 1) Apply one-shot swipe deltas (no inertia)
         if pendingLookDeltaPts != .zero {
             let yawRadPerPt   = cfg.swipeYawDegPerPt   * (.pi / 180)
             let pitchRadPerPt = cfg.swipePitchDegPerPt * (.pi / 180)
-            // Right swipe → look right; up swipe → look up
             yaw   -= pendingLookDeltaPts.x * yawRadPerPt
             pitch -= pendingLookDeltaPts.y * pitchRadPerPt
             pendingLookDeltaPts = .zero
@@ -127,13 +121,11 @@ final class FirstPersonEngine: NSObject {
 
         updateRig()
 
-        // 2) Movement
         let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
         let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
         let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
         var next = yawNode.simdPosition + attemptedDelta
 
-        // Ground clamp
         let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
         let targetY = groundY + cfg.eyeHeight
 
@@ -146,18 +138,14 @@ final class FirstPersonEngine: NSObject {
             next.y = max(targetY, next.y - maxDrop)
         }
 
-        // Simple radial obstacle collisions
         next = resolveObstacleCollisions(position: next)
 
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
 
-        // Stream/update world each frame (no artificial warm-up delay)
         chunker.updateVisible(center: next)
         collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
     }
-
-    // MARK: - World
 
     private func resetWorld() {
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
@@ -184,7 +172,6 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(yawNode)
         scnView?.pointOfView = camNode
 
-        // Streamer: immediate, with a synchronous centre warmup so there’s never a hole underfoot.
         chunker = ChunkStreamer3D(
             cfg: cfg,
             noise: noise,
@@ -202,14 +189,11 @@ final class FirstPersonEngine: NSObject {
             }
         )
 
-        // Build centre chunk immediately
         chunker.warmupCenter(at: yawNode.simdPosition)
 
         score = 0
         DispatchQueue.main.async { [score, onScore] in onScore(score) }
     }
-
-    // MARK: - Visuals
 
     private func buildLighting() {
         let amb = SCNLight()
