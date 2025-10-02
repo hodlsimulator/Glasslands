@@ -30,7 +30,7 @@ final class FirstPersonEngine: NSObject {
         let chunkTiles = IVec2(64, 64)
 
         // Streaming
-        let preloadRadius: Int = 3
+        let preloadRadius: Int = 2
 
         // Player & camera
         let moveSpeed: Float = 6.0
@@ -98,13 +98,11 @@ final class FirstPersonEngine: NSObject {
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
-        view.antialiasingMode = .multisampling4X
+        view.antialiasingMode = .none          // A/B: MSAA off
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
         view.backgroundColor = .black
-
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
-
         buildLighting()
         buildSky()
         apply(recipe: recipe, force: true)
@@ -216,7 +214,7 @@ final class FirstPersonEngine: NSObject {
         )
 
         // <-- This is the line you asked about.
-        chunker.tasksPerFrame = 2   // try 1–3; start with 2
+        chunker.tasksPerFrame = 1   // try 1–3; start with 2
 
         chunker.buildAround(yawNode.simdPosition)
 
@@ -228,7 +226,6 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func buildLighting() {
-        // Ambient
         let amb = SCNLight()
         amb.type = .ambient
         amb.intensity = 450
@@ -236,18 +233,19 @@ final class FirstPersonEngine: NSObject {
         let ambNode = SCNNode(); ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
-        // Sun (directional)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1350
-        sun.castsShadow = true
-        sun.shadowMode = .deferred
-        sun.shadowRadius = 4
-        sun.shadowColor = UIColor.black.withAlphaComponent(0.33)
+        sun.castsShadow = false                 // A/B: shadows off for this run
+        // If you turn shadows back on later, keep them cheap:
+        // sun.shadowMode = .deferred
+        // sun.shadowSampleCount = 1
+        // sun.shadowRadius = 2
+        // sun.maximumShadowDistance = 60
+        // sun.shadowMapSize = CGSize(width: 1024, height: 1024)
+        // sun.orthographicScale = 80
 
-        let sunNode = SCNNode()
-        sunNode.light = sun
-        // Elevation ~75° up, azimuth ~45°
+        let sunNode = SCNNode(); sunNode.light = sun
         sunNode.eulerAngles = SCNVector3(-1.31, .pi/4, 0)
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
