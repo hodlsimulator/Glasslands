@@ -4,8 +4,9 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  Places trees with per‑tree variation.
-//  NOTE: No SceneKit physics bodies here — collision is handled by FirstPersonEngine via obstacleSink.
+//  Places trees with per-tree variation.
+//  No physics bodies — collision uses obstacleSink + hitRadius.
+//  LOD uses far-only cull (no near geometry) to avoid SceneKit duplicate-tracking asserts.
 //
 
 import SceneKit
@@ -30,7 +31,6 @@ struct VegetationPlacer3D {
 
         var nodes: [SCNNode] = []
 
-        // Sample every 4th tile → far fewer candidates.
         let step = 4
         for tz in stride(from: 0, to: cfg.tilesZ, by: step) {
             for tx in stride(from: 0, to: cfg.tilesX, by: step) {
@@ -49,7 +49,6 @@ struct VegetationPlacer3D {
 
                 let isForest = (h < 0.66) && (m > 0.52) && (slope < 0.12)
 
-                // Lower spawn chance.
                 let baseChance: Double = isForest ? 0.35 : 0.12
                 if Double.random(in: 0...1, using: &ra) > baseChance { continue }
 
@@ -60,17 +59,14 @@ struct VegetationPlacer3D {
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
 
-                let (tree, hitRadius, treeHeight) = makeTreeNode(
+                let (tree, hitRadius, _) = makeTreeNode(
                     palette: AppColours.uiColors(from: recipe.paletteHex),
                     rng: rng
                 )
 
                 tree.position = SCNVector3(wx, wy, wz)
-
-                // No physics body. We still set hitRadius for the obstacle list.
                 tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
 
-                // LOD to cull far trees completely.
                 applyLOD(to: tree)
 
                 nodes.append(tree)
@@ -79,7 +75,7 @@ struct VegetationPlacer3D {
         return nodes
     }
 
-    // MARK: - Varied low‑poly tree
+    // MARK: - Varied low-poly tree
 
     private static func makeTreeNode(palette: [UIColor],
                                      rng: GKMersenneTwisterRandomSource) -> (SCNNode, Float, CGFloat) {
@@ -139,16 +135,12 @@ struct VegetationPlacer3D {
         return (node, hitRadius, treeHeight)
     }
 
-    // Cull geometry beyond ~120 m from the camera.
+    // Far-only culling avoids duplicate tracking of the same geometry.
     private static func applyLOD(to tree: SCNNode) {
-        func lod(_ g: SCNGeometry) -> [SCNLevelOfDetail] {
-            let near = SCNLevelOfDetail(geometry: g, worldSpaceDistance: 80)
-            let far  = SCNLevelOfDetail(geometry: nil, worldSpaceDistance: 120)
-            return [near, far]
-        }
+        let far: CGFloat = 120
         for child in tree.childNodes {
             if let g = child.geometry {
-                g.levelsOfDetail = lod(g)
+                g.levelsOfDetail = [SCNLevelOfDetail(geometry: nil, worldSpaceDistance: far)]
             }
         }
     }
