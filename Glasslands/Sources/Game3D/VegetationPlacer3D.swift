@@ -4,8 +4,8 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  Places LOTS of trees with per-tree variation and static physics.
-//  Each tree reports a "hitRadius" via KVC for collision.
+//  Places trees with per‑tree variation.
+//  NOTE: No SceneKit physics bodies here — collision is handled by FirstPersonEngine via obstacleSink.
 //
 
 import SceneKit
@@ -13,25 +13,28 @@ import GameplayKit
 import UIKit
 
 struct VegetationPlacer3D {
+
     static func place(inChunk ci: IVec2,
                       cfg: FirstPersonEngine.Config,
                       noise: NoiseFields,
                       recipe: BiomeRecipe) -> [SCNNode] {
+
         let originTile = IVec2(ci.x * cfg.tilesX, ci.y * cfg.tilesZ)
 
         let ux = UInt64(bitPattern: Int64(ci.x))
         let uy = UInt64(bitPattern: Int64(ci.y))
         let seed = recipe.seed64 ^ (ux &* 0x9E3779B97F4A7C15) ^ (uy &* 0xBF58476D1CE4E5B9)
+
         let rng = GKMersenneTwisterRandomSource(seed: seed)
-        var ra  = RandomAdaptor(rng)
+        var ra = RandomAdaptor(rng)
 
         var nodes: [SCNNode] = []
 
-        // ↓↓↓ Big reduction: sample every 4th tile (was 2) → ~4× fewer candidates.
+        // Sample every 4th tile → far fewer candidates.
         let step = 4
-
         for tz in stride(from: 0, to: cfg.tilesZ, by: step) {
             for tx in stride(from: 0, to: cfg.tilesX, by: step) {
+
                 let tileX = originTile.x + tx
                 let tileZ = originTile.y + tz
 
@@ -46,12 +49,13 @@ struct VegetationPlacer3D {
 
                 let isForest = (h < 0.66) && (m > 0.52) && (slope < 0.12)
 
-                // ↓↓↓ Big reduction: much lower spawn chance.
+                // Lower spawn chance.
                 let baseChance: Double = isForest ? 0.35 : 0.12
                 if Double.random(in: 0...1, using: &ra) > baseChance { continue }
 
                 let jx = (rng.nextUniform() - 0.5) * 0.9
                 let jz = (rng.nextUniform() - 0.5) * 0.9
+
                 let wx = (Float(tileX) + Float(jx)) * cfg.tileSize
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
@@ -60,36 +64,29 @@ struct VegetationPlacer3D {
                     palette: AppColours.uiColors(from: recipe.paletteHex),
                     rng: rng
                 )
+
                 tree.position = SCNVector3(wx, wy, wz)
 
-                // Static collider
-                let shape = SCNPhysicsShape(geometry: SCNCapsule(capRadius: CGFloat(hitRadius), height: treeHeight),
-                                            options: nil)
-                let body = SCNPhysicsBody.static()
-                body.physicsShape = shape
-                tree.physicsBody = body
+                // No physics body. We still set hitRadius for the obstacle list.
                 tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
 
-                // ↓↓↓ No per-object shadows (light shadows can still be toggled separately).
-                tree.castsShadow = false
-
-                // ↓↓↓ Per-node LOD to cull far trees completely.
+                // LOD to cull far trees completely.
                 applyLOD(to: tree)
 
                 nodes.append(tree)
             }
         }
-
         return nodes
     }
 
-    // MARK: - Varied low-poly tree
+    // MARK: - Varied low‑poly tree
 
     private static func makeTreeNode(palette: [UIColor],
                                      rng: GKMersenneTwisterRandomSource) -> (SCNNode, Float, CGFloat) {
         var r = RandomAdaptor(rng)
 
         let tall = rng.nextUniform() > 0.35
+
         let trunkH: CGFloat = tall ? CGFloat.random(in: 0.9...1.4, using: &r) : CGFloat.random(in: 0.6...1.0, using: &r)
         let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r) : CGFloat.random(in: 0.05...0.08, using: &r)
         let canopyH: CGFloat = tall ? CGFloat.random(in: 1.4...2.1, using: &r) : CGFloat.random(in: 1.1...1.6, using: &r)
@@ -97,6 +94,7 @@ struct VegetationPlacer3D {
 
         let barkBase = palette.indices.contains(4) ? palette[4] : .brown
         let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
+
         let bark = barkBase.adjustingHue(by: CGFloat.random(in: -0.02...0.02, using: &r),
                                          satBy: CGFloat.random(in: -0.08...0.08, using: &r),
                                          briBy: CGFloat.random(in: -0.05...0.05, using: &r))
@@ -112,8 +110,7 @@ struct VegetationPlacer3D {
 
         let canopyGeom: SCNGeometry
         if rng.nextBool() {
-            let cone = SCNCone(topRadius: 0.0, bottomRadius: canopyR, height: canopyH)
-            canopyGeom = cone
+            canopyGeom = SCNCone(topRadius: 0.0, bottomRadius: canopyR, height: canopyH)
         } else {
             let sphere = SCNSphere(radius: canopyR * 0.88)
             sphere.segmentCount = 10
@@ -127,6 +124,7 @@ struct VegetationPlacer3D {
         let node = SCNNode()
         let trunkNode = SCNNode(geometry: trunk)
         trunkNode.position = SCNVector3(0, Float(trunkH/2), 0)
+
         let canopyNode = SCNNode(geometry: canopyGeom)
         canopyNode.position = SCNVector3(0, Float(trunkH + canopyH*0.5 - 0.05), 0)
 
@@ -144,12 +142,14 @@ struct VegetationPlacer3D {
     // Cull geometry beyond ~120 m from the camera.
     private static func applyLOD(to tree: SCNNode) {
         func lod(_ g: SCNGeometry) -> [SCNLevelOfDetail] {
-            let near = SCNLevelOfDetail(geometry: g,   worldSpaceDistance: 80)   // draw near
-            let far  = SCNLevelOfDetail(geometry: nil, worldSpaceDistance: 120)  // culled far
+            let near = SCNLevelOfDetail(geometry: g, worldSpaceDistance: 80)
+            let far  = SCNLevelOfDetail(geometry: nil, worldSpaceDistance: 120)
             return [near, far]
         }
         for child in tree.childNodes {
-            if let g = child.geometry { g.levelsOfDetail = lod(g) }
+            if let g = child.geometry {
+                g.levelsOfDetail = lod(g)
+            }
         }
     }
 }

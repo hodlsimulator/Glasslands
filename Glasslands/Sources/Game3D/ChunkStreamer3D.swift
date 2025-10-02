@@ -10,7 +10,6 @@
 
 @preconcurrency import SceneKit
 @preconcurrency import GameplayKit
-import GameplayKit
 import simd
 
 @MainActor
@@ -18,14 +17,15 @@ final class ChunkStreamer3D {
 
     private let cfg: FirstPersonEngine.Config
     private let recipe: BiomeRecipe
+    private let noise: NoiseFields               // <-- keep ONE shared NoiseFields
 
     private weak var root: SCNNode?
     private let renderer: SCNSceneRenderer
 
-    // Background builder does NOT capture cfg/noise/types tied to MainActor.
+    // Background builder does pure math and returns TerrainChunkData.
     private let builder: ChunkMeshBuilder
 
-    // Live scene state (main-actor only).
+    // Live scene state (main-actor only)
     private var loaded: [IVec2: SCNNode] = [:]
     private var desired: Set<IVec2> = []
     private var pending: Set<IVec2> = []
@@ -39,7 +39,7 @@ final class ChunkStreamer3D {
 
     init(
         cfg: FirstPersonEngine.Config,
-        noise: NoiseFields,                         // kept for warmup only
+        noise: NoiseFields,
         recipe: BiomeRecipe,
         root: SCNNode,
         renderer: SCNSceneRenderer,
@@ -49,13 +49,14 @@ final class ChunkStreamer3D {
     ) {
         self.cfg = cfg
         self.recipe = recipe
+        self.noise = noise                              // <-- store shared noise
         self.root = root
         self.renderer = renderer
         self.beaconSink = beaconSink
         self.obstacleSink = obstacleSink
         self.onChunkRemoved = onChunkRemoved
 
-        // Pass ONLY primitives/value types into the actor.
+        // Pass only primitives to the actor.
         self.builder = ChunkMeshBuilder(
             tilesX: cfg.tilesX,
             tilesZ: cfg.tilesZ,
@@ -63,12 +64,9 @@ final class ChunkStreamer3D {
             heightScale: cfg.heightScale,
             recipe: recipe
         )
-
-        // We keep `noise` only to build the single warmup node on main below.
-        _ = noise
     }
 
-    /// Build just the centre chunk immediately so the renderer has real geometry.
+    /// Build the centre chunk immediately so the renderer has real geometry.
     func warmupCenter(at center: simd_float3) {
         guard let root else { return }
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
@@ -76,8 +74,7 @@ final class ChunkStreamer3D {
         guard loaded[key] == nil else { return }
 
         let sp = Signposts.begin("BuildChunk")
-        // Warmup path uses synchronous main-actor construction for one chunk.
-        let node = TerrainChunkNode.makeNode(originChunk: key, cfg: cfg, noise: NoiseFields(recipe: recipe), recipe: recipe)
+        let node = TerrainChunkNode.makeNode(originChunk: key, cfg: cfg, noise: noise, recipe: recipe)
         root.addChildNode(node)
         loaded[key] = node
         Signposts.end("BuildChunk", sp)
@@ -130,7 +127,6 @@ final class ChunkStreamer3D {
     // MARK: - Private
 
     private func enqueueBuild(_ k: IVec2) {
-        // Snapshot coords so no main-actor types cross to the actor.
         let ox = k.x, oy = k.y
 
         Task { [weak self] in
@@ -139,26 +135,33 @@ final class ChunkStreamer3D {
             // Heavy work off the main thread inside the actor.
             let data = await self.builder.build(originChunkX: ox, originChunkY: oy)
 
-            // Back on main: proceed only if still desired.
+            // Back on main: still desired?
             guard let root = self.root else { self.pending.remove(k); return }
             let key = IVec2(ox, oy)
             guard self.desired.contains(key) else { self.pending.remove(key); return }
 
-            let node = TerrainChunkNode.node(from: data)
-            await self.prepareAsync([node])
+            // Create the SCNNode for terrain.
+            let terrainNode = TerrainChunkNode.node(from: data)
 
+            // Build beacons/vegetation ON MAIN but DO NOT attach yet.
+            // (Critically, use the shared `noise` — no per-chunk NoiseFields init.)
+            let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let veg     = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+
+            // Prewarm everything together so first render doesn't compile pipelines.
+            await self.prepareAsync([terrainNode] + beacons + veg)
+
+            // Re-check desire after prepare.
             guard self.desired.contains(key) else { self.pending.remove(key); return }
 
-            root.addChildNode(node)
-            self.loaded[key] = node
+            // Attach to the scene.
+            root.addChildNode(terrainNode)
+            beacons.forEach { terrainNode.addChildNode($0) }
+            veg.forEach     { terrainNode.addChildNode($0) }
+            self.loaded[key] = terrainNode
 
-            // Populate beacons/vegetation on main (they return SCNNodes).
-            let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: NoiseFields(recipe: self.recipe), recipe: self.recipe)
-            beacons.forEach { node.addChildNode($0) }
+            // Report to gameplay systems.
             self.beaconSink(beacons)
-
-            let veg = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: NoiseFields(recipe: self.recipe), recipe: self.recipe)
-            veg.forEach { node.addChildNode($0) }
             self.obstacleSink(key, veg + beacons)
 
             self.pending.remove(key)
@@ -189,8 +192,7 @@ final class ChunkStreamer3D {
     }
 }
 
-// MARK: - Background mesh builder (actor)
-// Pure math only. No SceneKit, no TerrainMath, no NoiseFields, no FirstPersonEngine.Config.
+// MARK: - Background mesh builder (actor) — pure math only.
 
 actor ChunkMeshBuilder {
     private let tilesX: Int
@@ -199,7 +201,6 @@ actor ChunkMeshBuilder {
     private let heightScale: Float
     private let recipe: BiomeRecipe
 
-    // Local GKNoise sampler that lives entirely inside the actor.
     private let sampler: NoiseSampler
 
     init(tilesX: Int, tilesZ: Int, tileSize: Float, heightScale: Float, recipe: BiomeRecipe) {
@@ -214,12 +215,10 @@ actor ChunkMeshBuilder {
     func build(originChunkX: Int, originChunkY: Int) -> TerrainChunkData {
         let vertsX = tilesX + 1
         let vertsZ = tilesZ + 1
-
         let originTileX = originChunkX * tilesX
         let originTileZ = originChunkY * tilesZ
 
-        @inline(__always)
-        func vi(_ x: Int, _ z: Int) -> Int { z * vertsX + x }
+        @inline(__always) func vi(_ x: Int, _ z: Int) -> Int { z * vertsX + x }
 
         var positions = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
         var normals   = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
@@ -235,20 +234,20 @@ actor ChunkMeshBuilder {
 
                 let wX = Float(tx) * tileSize
                 let wZ = Float(tz) * tileSize
-                let hT = sampler.sampleHeight(Double(tx), Double(tz))        // 0..ampH in tile coords
+                let hT = sampler.sampleHeight(Double(tx), Double(tz))        // 0..ampH
                 let wY = Float(hT) * heightScale
 
                 let idx = vi(x, z)
                 positions[idx] = SIMD3(wX, wY, wZ)
 
-                // Smooth normal from central differences (tile coords → world Y via heightScale)
+                // Central differences → normal (tile coords -> world Y via heightScale)
                 let hL = sampler.sampleHeight(Double(tx - 1), Double(tz))
                 let hR = sampler.sampleHeight(Double(tx + 1), Double(tz))
                 let hD = sampler.sampleHeight(Double(tx), Double(tz - 1))
                 let hU = sampler.sampleHeight(Double(tx), Double(tz + 1))
-                let tX = SIMD3<Float>(tileSize, Float(hR - hL) * heightScale, 0)
-                let tZ = SIMD3<Float>(0,        Float(hU - hD) * heightScale, tileSize)
-                normals[idx] = simd_normalize(simd_cross(tZ, tX))
+                let tXv = SIMD3<Float>(tileSize, Float(hR - hL) * heightScale, 0)
+                let tZv = SIMD3<Float>(0,        Float(hU - hD) * heightScale, tileSize)
+                normals[idx] = simd_normalize(simd_cross(tZv, tXv))
 
                 // Colour classification inputs
                 let hN   = Float(sampler.heightNorm(Double(tx), Double(tz), ampH: recipe.height.amplitude))
@@ -257,7 +256,6 @@ actor ChunkMeshBuilder {
                 let moist = Float(sampler.sampleMoisture(Double(tx), Double(tz)) / max(0.0001, recipe.moisture.amplitude))
                 colors[idx] = palette.color(yNorm: hN, slope: slope, riverMask: river, moisture01: moist)
 
-                // Simple world-space UVs for small detail texture
                 let detailScale: Float = 1.0 / (tileSize * 2.0)
                 uvs[idx] = SIMD2(wX * detailScale, wZ * detailScale)
             }
@@ -289,22 +287,14 @@ actor ChunkMeshBuilder {
         )
     }
 
-    // MARK: - Private helpers inside the actor
-
     private struct HeightClassifier {
         let deep  = SIMD4<Float>(0.18, 0.42, 0.58, 1.0)
         let shore = SIMD4<Float>(0.55, 0.80, 0.88, 1.0)
         let grass = SIMD4<Float>(0.32, 0.62, 0.34, 1.0)
         let sand  = SIMD4<Float>(0.92, 0.87, 0.68, 1.0)
         let rock  = SIMD4<Float>(0.90, 0.92, 0.95, 1.0)
-
-        let deepCut: Float = 0.22
-        let shoreCut: Float = 0.30
-        let sandCut:  Float = 0.33
-        let snowCut:  Float = 0.88
-
+        let deepCut: Float = 0.22, shoreCut: Float = 0.30, sandCut: Float = 0.33, snowCut: Float = 0.88
         let recipe: BiomeRecipe
-
         func color(yNorm y: Float, slope s: Float, riverMask r: Float, moisture01 m: Float) -> SIMD4<Float> {
             if y < deepCut { return deep }
             if y < shoreCut || r > 0.60 { return shore }
@@ -313,9 +303,7 @@ actor ChunkMeshBuilder {
             let t = max(0, min(1, m * 0.65 + r * 0.20))
             return mix(grass, SIMD4<Float>(0.40, 0.75, 0.38, 1.0), t)
         }
-
-        @inline(__always)
-        private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
+        @inline(__always) private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
     }
 
     // GKNoise-based sampler living wholly inside the actor.
@@ -336,7 +324,6 @@ actor ChunkMeshBuilder {
 
         init(recipe: BiomeRecipe) {
             let baseSeed32: Int32 = Int32(truncatingIfNeeded: recipe.seed64)
-
             func makeSource(_ p: NoiseParams, seed salt: Int32 = 0) -> GKNoiseSource {
                 let s = baseSeed32 &+ salt
                 switch p.base.lowercased() {
@@ -345,7 +332,6 @@ actor ChunkMeshBuilder {
                 default:       return GKPerlinNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), persistence: 0.55, lacunarity: 2.2, seed: s)
                 }
             }
-
             self.height   = GKNoise(makeSource(recipe.height))
             self.moisture = GKNoise(makeSource(recipe.moisture, seed: 101))
             self.riverBase = GKNoise(GKRidgedNoiseSource(frequency: 1.0, octaveCount: 5, lacunarity: 2.0, seed: baseSeed32 &+ 202))
@@ -354,7 +340,6 @@ actor ChunkMeshBuilder {
 
             self.ampH = recipe.height.amplitude
             self.ampM = recipe.moisture.amplitude
-            // Match the broader world scales used in NoiseFields.swift
             self.scaleH = max(20.0, recipe.height.scale * 12.0)
             self.scaleM = max(10.0, recipe.moisture.scale * 8.0)
             self.scaleR = max(12.0, scaleH * 0.85)
@@ -370,7 +355,6 @@ actor ChunkMeshBuilder {
             return (x + wx * warpAmp, y + wy * warpAmp)
         }
 
-        // Smoothed height sample in 0..ampH (tile coordinates)
         func sampleHeight(_ x: Double, _ y: Double) -> Double {
             let (u, v) = warp(x, y)
             let v0 = Double(height.value(atPosition: vector_float2(Float(u/scaleH), Float(v/scaleH))))
@@ -382,14 +366,12 @@ actor ChunkMeshBuilder {
             return h * ampH
         }
 
-        // Moisture sample in 0..ampM
         func sampleMoisture(_ x: Double, _ y: Double) -> Double {
             let (u, v) = warp(x, y)
             let m = Double(moisture.value(atPosition: vector_float2(Float(u/scaleM), Float(v/scaleM))))
             return n01(m) * ampM
         }
 
-        // 0..1 river mask (1 = river core)
         func riverMask(_ x: Double, _ y: Double) -> Double {
             let (u, v) = warp(x, y)
             let r = Double(riverBase.value(atPosition: vector_float2(Float(u/scaleR), Float(v/scaleR))))
@@ -398,7 +380,6 @@ actor ChunkMeshBuilder {
             return pow(t, 2.2)
         }
 
-        // Approximate slope magnitude (height-units per tile)
         func slope(_ x: Double, _ y: Double) -> Double {
             let s = 0.75
             let c = sampleHeight(x, y)
@@ -407,7 +388,6 @@ actor ChunkMeshBuilder {
             return sqrt(dx*dx + dy*dy)
         }
 
-        // Normalised height 0..1 after river carve (divide by ampH)
         func heightNorm(_ x: Double, _ y: Double, ampH: Double) -> Double {
             var h = sampleHeight(x, y)
             let r = riverMask(x, y)
