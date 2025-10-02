@@ -5,7 +5,7 @@
 //  Created by . . on 10/2/25.
 //
 //  Pure, Sendable terrain mesh data builder (no SceneKit/UIKit).
-//  Uses the existing `TerrainChunkData` declared in TerrainChunkNode.swift.
+//  Returns TerrainChunkData and includes edge “skirts” to seal gaps.
 //
 
 import simd
@@ -19,6 +19,7 @@ enum TerrainMeshBuilder {
         noise: NoiseFields,
         recipe: BiomeRecipe
     ) -> TerrainChunkData {
+
         let tilesX = cfg.tilesX
         let tilesZ = cfg.tilesZ
         let vertsX = tilesX + 1
@@ -28,8 +29,7 @@ enum TerrainMeshBuilder {
         let originTileX = originChunkX * tilesX
         let originTileZ = originChunkY * tilesZ
 
-        @inline(__always)
-        func vi(_ x: Int, _ z: Int) -> Int { z * vertsX + x }
+        @inline(__always) func vi(_ x: Int, _ z: Int) -> Int { z * vertsX + x }
 
         var positions = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
         var normals   = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
@@ -46,19 +46,20 @@ enum TerrainMeshBuilder {
                 let wZ = Float(tz) * tileSize
                 let wY = TerrainMath.heightWorld(x: wX, z: wZ, cfg: cfg, noise: noise)
 
-                positions[vi(x, z)] = SIMD3(wX, wY, wZ)
+                let idx = vi(x, z)
+                positions[idx] = SIMD3<Float>(wX, wY, wZ)
 
                 let n = TerrainMath.normal(tx: Double(tx), tz: Double(tz), cfg: cfg, noise: noise)
-                normals[vi(x, z)] = n
+                normals[idx] = n
 
-                let hN   = Float(noiseHeightN(tx: Double(tx), tz: Double(tz), noise: noise, recipe: recipe))
+                let hN   = Float(noise.sampleHeight(Double(tx), Double(tz)) / max(0.0001, recipe.height.amplitude))
                 let slope = Float(noise.slope(Double(tx), Double(tz)))
                 let river = Float(noise.riverMask(Double(tx), Double(tz)))
-                let moist = Float(noise.sampleMoisture(Double(tx), Double(tz))) / Float(max(0.0001, recipe.moisture.amplitude))
-                colors[vi(x, z)] = palette.color(yNorm: hN, slope: slope, riverMask: river, moisture01: moist)
+                let moist = Float(noise.sampleMoisture(Double(tx), Double(tz)) / max(0.0001, recipe.moisture.amplitude))
+                colors[idx] = palette.color(yNorm: hN, slope: slope, riverMask: river, moisture01: moist)
 
                 let detailScale: Float = 1.0 / (tileSize * 2.0)
-                uvs[vi(x, z)] = SIMD2(wX * detailScale, wZ * detailScale)
+                uvs[idx] = SIMD2<Float>(wX * detailScale, wZ * detailScale)
             }
         }
 
@@ -73,6 +74,68 @@ enum TerrainMeshBuilder {
                 indices.append(contentsOf: [a, b, c, b, d, c])
             }
         }
+
+        // --- Skirts to seal edges ---
+        let skirtDepth: Float = max(tileSize, cfg.heightScale * 1.2)
+
+        var bottomIndex = [Int: Int]()
+        @inline(__always)
+        func dupBottom(_ x: Int, _ z: Int, normalHint: SIMD3<Float>) -> Int {
+            let top = vi(x, z)
+            if let id = bottomIndex[top] { return id }
+            let p = positions[top]
+            positions.append(SIMD3<Float>(p.x, p.y - skirtDepth, p.z))
+            normals.append(normalHint)
+            colors.append(colors[top])
+            uvs.append(uvs[top])
+            let id = positions.count - 1
+            bottomIndex[top] = id
+            return id
+        }
+
+        // North edge (z = 0) → outward -Z
+        if vertsZ > 1 {
+            let n = SIMD3<Float>(0, 0, -1)
+            for x in 0..<tilesX {
+                let tl = vi(x, 0), tr = vi(x + 1, 0)
+                let bl = dupBottom(x, 0, normalHint: n), br = dupBottom(x + 1, 0, normalHint: n)
+                indices.append(contentsOf: [UInt32(tl), UInt32(tr), UInt32(bl),
+                                            UInt32(tr), UInt32(br), UInt32(bl)])
+            }
+        }
+        // South edge (z = vertsZ - 1) → outward +Z
+        if vertsZ > 1 {
+            let n = SIMD3<Float>(0, 0, 1)
+            let z = vertsZ - 1
+            for x in 0..<tilesX {
+                let tl = vi(x, z), tr = vi(x + 1, z)
+                let bl = dupBottom(x, z, normalHint: n), br = dupBottom(x + 1, z, normalHint: n)
+                indices.append(contentsOf: [UInt32(tr), UInt32(tl), UInt32(br),
+                                            UInt32(tl), UInt32(bl), UInt32(br)])
+            }
+        }
+        // West edge (x = 0) → outward -X
+        if vertsX > 1 {
+            let n = SIMD3<Float>(-1, 0, 0)
+            for z in 0..<tilesZ {
+                let tt = vi(0, z), tb = vi(0, z + 1)
+                let bt = dupBottom(0, z, normalHint: n), bb = dupBottom(0, z + 1, normalHint: n)
+                indices.append(contentsOf: [UInt32(tt), UInt32(bt), UInt32(tb),
+                                            UInt32(tb), UInt32(bt), UInt32(bb)])
+            }
+        }
+        // East edge (x = vertsX - 1) → outward +X
+        if vertsX > 1 {
+            let n = SIMD3<Float>(1, 0, 0)
+            let x = vertsX - 1
+            for z in 0..<tilesZ {
+                let tt = vi(x, z), tb = vi(x, z + 1)
+                let bt = dupBottom(x, z, normalHint: n), bb = dupBottom(x, z + 1, normalHint: n)
+                indices.append(contentsOf: [UInt32(tb), UInt32(bt), UInt32(tt),
+                                            UInt32(tb), UInt32(bb), UInt32(bt)])
+            }
+        }
+        // --- end skirts ---
 
         return TerrainChunkData(
             originChunkX: originChunkX,
@@ -113,16 +176,5 @@ enum TerrainMeshBuilder {
 
         @inline(__always)
         private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
-    }
-
-    @inline(__always)
-    private static func noiseHeightN(tx: Double, tz: Double, noise: NoiseFields, recipe: BiomeRecipe) -> Double {
-        var h = noise.sampleHeight(tx, tz)
-        let r = noise.riverMask(tx, tz)
-        if r > 0.55 {
-            let t = min(1.0, (r - 0.55) / 0.45)
-            h *= (1.0 - 0.35 * t)
-        }
-        return h / max(0.0001, recipe.height.amplitude)
     }
 }

@@ -81,11 +81,9 @@ final class ChunkStreamer3D {
 
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
 
-        // Build radius (what we want to ensure is loaded)
-        var keep = Set<IVec2>()
-        // Unload radius (hysteresis): keep an extra ring so we never reveal holes
+        var keep = Set<IVec2>()                 // build radius
         let unloadRadius = cfg.preloadRadius + 1
-        var keepWithMargin = Set<IVec2>()
+        var keepWithMargin = Set<IVec2>()       // unload hysteresis
 
         var toStage: [IVec2] = []
 
@@ -104,7 +102,6 @@ final class ChunkStreamer3D {
             }
         }
 
-        // Defer unloading until chunks are well outside view
         for (k, n) in loaded where !keepWithMargin.contains(k) {
             n.removeAllActions()
             n.removeFromParentNode()
@@ -190,7 +187,7 @@ final class ChunkStreamer3D {
     }
 }
 
-// MARK: - Background mesh builder (actor) — pure math only, now with SKIRTS.
+// MARK: - Background mesh builder (actor) — pure math only, with skirts.
 
 actor ChunkMeshBuilder {
     private let tilesX: Int
@@ -232,12 +229,13 @@ actor ChunkMeshBuilder {
 
                 let wX = Float(tx) * tileSize
                 let wZ = Float(tz) * tileSize
-                let hT = sampler.sampleHeight(Double(tx), Double(tz))
+                let hT = sampler.sampleHeight(Double(tx), Double(tz))        // 0..ampH
                 let wY = Float(hT) * heightScale
 
                 let idx = vi(x, z)
                 positions[idx] = SIMD3<Float>(wX, wY, wZ)
 
+                // Central differences → normal
                 let hL = sampler.sampleHeight(Double(tx - 1), Double(tz))
                 let hR = sampler.sampleHeight(Double(tx + 1), Double(tz))
                 let hD = sampler.sampleHeight(Double(tx), Double(tz - 1))
@@ -246,6 +244,7 @@ actor ChunkMeshBuilder {
                 let tZv = SIMD3<Float>(0,        Float(hU - hD) * heightScale, tileSize)
                 normals[idx] = simd_normalize(simd_cross(tZv, tXv))
 
+                // Colour inputs
                 let hN   = Float(sampler.heightNorm(Double(tx), Double(tz), ampH: recipe.height.amplitude))
                 let slope = Float(sampler.slope(Double(tx), Double(tz)))
                 let river = Float(sampler.riverMask(Double(tx), Double(tz)))
@@ -259,7 +258,6 @@ actor ChunkMeshBuilder {
 
         var indices: [UInt32] = []
         indices.reserveCapacity(tilesX * tilesZ * 6)
-
         for z in 0..<tilesZ {
             for x in 0..<tilesX {
                 let a = UInt32(vi(x,     z))
@@ -270,7 +268,7 @@ actor ChunkMeshBuilder {
             }
         }
 
-        // --- Skirts (vertical side walls) ---
+        // Skirts
         let skirtDepth: Float = max(tileSize, heightScale * 1.2)
 
         var bottomIndex = [Int: Int]()
@@ -280,7 +278,6 @@ actor ChunkMeshBuilder {
             if let id = bottomIndex[top] { return id }
             let p = positions[top]
             positions.append(SIMD3<Float>(p.x, p.y - skirtDepth, p.z))
-            // Simple normal: use hint for side lighting; colours/uvs from top
             normals.append(normalHint)
             colors.append(colors[top])
             uvs.append(uvs[top])
@@ -294,7 +291,7 @@ actor ChunkMeshBuilder {
             let n = SIMD3<Float>(0, 0, -1)
             for x in 0..<tilesX {
                 let tl = vi(x, 0), tr = vi(x + 1, 0)
-                let bl = dupBottom(x, 0, n), br = dupBottom(x + 1, 0, n)
+                let bl = dupBottom(x, 0, normalHint: n), br = dupBottom(x + 1, 0, normalHint: n)
                 indices.append(contentsOf: [UInt32(tl), UInt32(tr), UInt32(bl),
                                             UInt32(tr), UInt32(br), UInt32(bl)])
             }
@@ -305,7 +302,7 @@ actor ChunkMeshBuilder {
             let z = vertsZ - 1
             for x in 0..<tilesX {
                 let tl = vi(x, z), tr = vi(x + 1, z)
-                let bl = dupBottom(x, z, n), br = dupBottom(x + 1, z, n)
+                let bl = dupBottom(x, z, normalHint: n), br = dupBottom(x + 1, z, normalHint: n)
                 indices.append(contentsOf: [UInt32(tr), UInt32(tl), UInt32(br),
                                             UInt32(tl), UInt32(bl), UInt32(br)])
             }
@@ -315,7 +312,7 @@ actor ChunkMeshBuilder {
             let n = SIMD3<Float>(-1, 0, 0)
             for z in 0..<tilesZ {
                 let tt = vi(0, z), tb = vi(0, z + 1)
-                let bt = dupBottom(0, z, n), bb = dupBottom(0, z + 1, n)
+                let bt = dupBottom(0, z, normalHint: n), bb = dupBottom(0, z + 1, normalHint: n)
                 indices.append(contentsOf: [UInt32(tt), UInt32(bt), UInt32(tb),
                                             UInt32(tb), UInt32(bt), UInt32(bb)])
             }
@@ -326,12 +323,11 @@ actor ChunkMeshBuilder {
             let x = vertsX - 1
             for z in 0..<tilesZ {
                 let tt = vi(x, z), tb = vi(x, z + 1)
-                let bt = dupBottom(x, z, n), bb = dupBottom(x, z + 1, n)
+                let bt = dupBottom(x, z, normalHint: n), bb = dupBottom(x, z + 1, normalHint: n)
                 indices.append(contentsOf: [UInt32(tb), UInt32(bt), UInt32(tt),
                                             UInt32(tb), UInt32(bb), UInt32(bt)])
             }
         }
-        // --- end skirts ---
 
         return TerrainChunkData(
             originChunkX: originChunkX,
@@ -355,6 +351,8 @@ actor ChunkMeshBuilder {
         let rock  = SIMD4<Float>(0.90, 0.92, 0.95, 1.0)
         let deepCut: Float = 0.22, shoreCut: Float = 0.30, sandCut: Float = 0.33, snowCut: Float = 0.88
         let recipe: BiomeRecipe
+        @inline(__always)
+        private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
         func color(yNorm y: Float, slope s: Float, riverMask r: Float, moisture01 m: Float) -> SIMD4<Float> {
             if y < deepCut { return deep }
             if y < shoreCut || r > 0.60 { return shore }
@@ -363,7 +361,6 @@ actor ChunkMeshBuilder {
             let t = max(0, min(1, m * 0.65 + r * 0.20))
             return mix(grass, SIMD4<Float>(0.40, 0.75, 0.38, 1.0), t)
         }
-        @inline(__always) private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
     }
 
     // GKNoise-based sampler living wholly inside the actor.
@@ -384,6 +381,7 @@ actor ChunkMeshBuilder {
 
         init(recipe: BiomeRecipe) {
             let baseSeed32: Int32 = Int32(truncatingIfNeeded: recipe.seed64)
+
             func makeSource(_ p: NoiseParams, seed salt: Int32 = 0) -> GKNoiseSource {
                 let s = baseSeed32 &+ salt
                 switch p.base.lowercased() {
@@ -392,6 +390,7 @@ actor ChunkMeshBuilder {
                 default:       return GKPerlinNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), persistence: 0.55, lacunarity: 2.2, seed: s)
                 }
             }
+
             self.height   = GKNoise(makeSource(recipe.height))
             self.moisture = GKNoise(makeSource(recipe.moisture, seed: 101))
             self.riverBase = GKNoise(GKRidgedNoiseSource(frequency: 1.0, octaveCount: 5, lacunarity: 2.0, seed: baseSeed32 &+ 202))
