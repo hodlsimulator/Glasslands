@@ -224,12 +224,14 @@ final class FirstPersonEngine: NSObject {
 
     private func buildSky() {
         skyboxTask?.cancel()
+
+        // Recreate sky anchor cleanly
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Seamless vertical gradient as a single image — no seams.
+        // Seamless vertical gradient background
         let size = CGSize(width: 2, height: 512)
         UIGraphicsBeginImageContextWithOptions(size, true, 1)
         let ctx = UIGraphicsGetCurrentContext()!
@@ -248,7 +250,7 @@ final class FirstPersonEngine: NSObject {
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0.0
 
-        // Sun billboard (matches your light direction).
+        // Sun billboard (matches your directional light)
         if let sunLightNode {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
@@ -258,22 +260,23 @@ final class FirstPersonEngine: NSObject {
             mat.emission.contents = SceneKitHelpers.sunImage(diameter: Int(discSize))
             mat.blendMode = .add
             mat.writesToDepthBuffer = false
-            mat.readsFromDepthBuffer = true
+            mat.readsFromDepthBuffer = false
             plane.firstMaterial = mat
 
             let node = SCNNode(geometry: plane)
             node.constraints = [SCNBillboardConstraint()]
             let dirToSun = -sunLightNode.presentation.simdWorldFront
             node.simdPosition = simd_normalize(dirToSun) * (cfg.skyDistance - 180)
+            node.renderingOrder = -990                   // just after clouds
             skyAnchor.addChildNode(node)
             self.sunDiscNode = node
 
-            // Clouds: seam-free skydome using direction-space FBM
+            // Clouds: skydome that never interferes with terrain
             let (cloudNode, cloudMat) = CloudDome.make(radius: CGFloat(cfg.skyDistance - 2))
             cloudMat.setValue(SCNVector3(dirToSun.x, dirToSun.y, dirToSun.z), forKey: "sunDir")
             skyAnchor.addChildNode(cloudNode)
         } else {
-            // No sun light present; still add clouds.
+            // No sun light present; still add clouds safely
             let (cloudNode, _) = CloudDome.make(radius: CGFloat(cfg.skyDistance - 2))
             skyAnchor.addChildNode(cloudNode)
         }
