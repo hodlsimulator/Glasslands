@@ -391,11 +391,11 @@ actor ChunkMeshBuilder {
                 }
             }
 
-            self.height   = GKNoise(makeSource(recipe.height))
-            self.moisture = GKNoise(makeSource(recipe.moisture, seed: 101))
+            self.height    = GKNoise(makeSource(recipe.height))
+            self.moisture  = GKNoise(makeSource(recipe.moisture, seed: 101))
             self.riverBase = GKNoise(GKRidgedNoiseSource(frequency: 1.0, octaveCount: 5, lacunarity: 2.0, seed: baseSeed32 &+ 202))
-            self.warpX    = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 303))
-            self.warpY    = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 404))
+            self.warpX     = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 303))
+            self.warpY     = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 404))
 
             self.ampH = recipe.height.amplitude
             self.ampM = recipe.moisture.amplitude

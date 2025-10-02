@@ -12,6 +12,7 @@ import simd
 
 enum TerrainMeshBuilder {
 
+    // Convenience that matches existing call sites.
     static func makeData(
         originChunkX: Int,
         originChunkY: Int,
@@ -19,13 +20,32 @@ enum TerrainMeshBuilder {
         noise: NoiseFields,
         recipe: BiomeRecipe
     ) -> TerrainChunkData {
+        return makeData(
+            originChunkX: originChunkX,
+            originChunkY: originChunkY,
+            tilesX: cfg.tilesX,
+            tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize,
+            heightScale: cfg.heightScale,
+            noise: noise,
+            recipe: recipe
+        )
+    }
 
-        let tilesX = cfg.tilesX
-        let tilesZ = cfg.tilesZ
+    // Core builder (no dependency on Config so we can use it from a background actor)
+    static func makeData(
+        originChunkX: Int,
+        originChunkY: Int,
+        tilesX: Int,
+        tilesZ: Int,
+        tileSize: Float,
+        heightScale: Float,
+        noise: NoiseFields,
+        recipe: BiomeRecipe
+    ) -> TerrainChunkData {
+
         let vertsX = tilesX + 1
         let vertsZ = tilesZ + 1
-        let tileSize = cfg.tileSize
-
         let originTileX = originChunkX * tilesX
         let originTileZ = originChunkY * tilesZ
 
@@ -42,27 +62,37 @@ enum TerrainMeshBuilder {
             for x in 0..<vertsX {
                 let tx = originTileX + x
                 let tz = originTileZ + z
+
+                // World position
                 let wX = Float(tx) * tileSize
                 let wZ = Float(tz) * tileSize
-                let wY = TerrainMath.heightWorld(x: wX, z: wZ, cfg: cfg, noise: noise)
+                let hN = Float(TerrainMath.heightN(tx: Double(tx), tz: Double(tz), noise: noise))
+                let wY = hN * heightScale
 
                 let idx = vi(x, z)
-                positions[idx] = SIMD3<Float>(wX, wY, wZ)
+                positions[idx] = SIMD3(wX, wY, wZ)
 
-                let n = TerrainMath.normal(tx: Double(tx), tz: Double(tz), cfg: cfg, noise: noise)
-                normals[idx] = n
+                // Normal via central differences (same math as TerrainMath.normal, inlined)
+                let hL = Float(TerrainMath.heightN(tx: Double(tx - 1), tz: Double(tz),     noise: noise))
+                let hR = Float(TerrainMath.heightN(tx: Double(tx + 1), tz: Double(tz),     noise: noise))
+                let hD = Float(TerrainMath.heightN(tx: Double(tx),     tz: Double(tz - 1), noise: noise))
+                let hU = Float(TerrainMath.heightN(tx: Double(tx),     tz: Double(tz + 1), noise: noise))
+                let tXv = SIMD3<Float>(tileSize, (hR - hL) * heightScale, 0)
+                let tZv = SIMD3<Float>(0,        (hU - hD) * heightScale, tileSize)
+                normals[idx] = simd_normalize(simd_cross(tZv, tXv))
 
-                let hN   = Float(noise.sampleHeight(Double(tx), Double(tz)) / max(0.0001, recipe.height.amplitude))
+                // Colour classification inputs
                 let slope = Float(noise.slope(Double(tx), Double(tz)))
                 let river = Float(noise.riverMask(Double(tx), Double(tz)))
                 let moist = Float(noise.sampleMoisture(Double(tx), Double(tz)) / max(0.0001, recipe.moisture.amplitude))
                 colors[idx] = palette.color(yNorm: hN, slope: slope, riverMask: river, moisture01: moist)
 
                 let detailScale: Float = 1.0 / (tileSize * 2.0)
-                uvs[idx] = SIMD2<Float>(wX * detailScale, wZ * detailScale)
+                uvs[idx] = SIMD2(wX * detailScale, wZ * detailScale)
             }
         }
 
+        // Top surface indices
         var indices: [UInt32] = []
         indices.reserveCapacity(tilesX * tilesZ * 6)
         for z in 0..<tilesZ {
@@ -75,8 +105,8 @@ enum TerrainMeshBuilder {
             }
         }
 
-        // --- Skirts to seal edges ---
-        let skirtDepth: Float = max(tileSize, cfg.heightScale * 1.2)
+        // Skirts to seal edges
+        let skirtDepth: Float = max(tileSize, heightScale * 1.2)
 
         var bottomIndex = [Int: Int]()
         @inline(__always)
@@ -135,7 +165,6 @@ enum TerrainMeshBuilder {
                                             UInt32(tb), UInt32(bb), UInt32(bt)])
             }
         }
-        // --- end skirts ---
 
         return TerrainChunkData(
             originChunkX: originChunkX,
@@ -165,6 +194,9 @@ enum TerrainMeshBuilder {
 
         let recipe: BiomeRecipe
 
+        @inline(__always)
+        private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
+
         func color(yNorm y: Float, slope s: Float, riverMask r: Float, moisture01 m: Float) -> SIMD4<Float> {
             if y < deepCut { return deep }
             if y < shoreCut || r > 0.60 { return shore }
@@ -173,8 +205,5 @@ enum TerrainMeshBuilder {
             let t = max(0, min(1, m * 0.65 + r * 0.20))
             return mix(grass, SIMD4<Float>(0.40, 0.75, 0.38, 1.0), t)
         }
-
-        @inline(__always)
-        private func mix(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> { a + (b - a) * t }
     }
 }
