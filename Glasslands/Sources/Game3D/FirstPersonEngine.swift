@@ -224,54 +224,38 @@ final class FirstPersonEngine: NSObject {
 
     private func buildSky() {
         skyboxTask?.cancel()
-
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Clear any previous background/env so only the skydome draws.
-        scene.background.contents = UIColor.clear
+        // Seamless vertical gradient as a single image — no seams.
+        let size = CGSize(width: 2, height: 512) // tiny, stretches fine
+        UIGraphicsBeginImageContextWithOptions(size, true, 1)
+        let ctx = UIGraphicsGetCurrentContext()!
+
+        let top = UIColor(red: 0.50, green: 0.74, blue: 0.92, alpha: 1.0).cgColor
+        let mid = UIColor(red: 0.70, green: 0.86, blue: 0.95, alpha: 1.0).cgColor
+        let bot = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0).cgColor
+
+        let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                              colors: [top, mid, bot] as CFArray,
+                              locations: [0.0, 0.55, 1.0])!
+        ctx.drawLinearGradient(grad, start: CGPoint(x: 1, y: 0), end: CGPoint(x: 1, y: size.height), options: [])
+        let img = UIGraphicsGetImageFromCurrentImageContext()!
+        UIGraphicsEndImageContext()
+
+        scene.background.contents = img
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0.0
 
-        // Skydome (no seams). Render the inside of a huge sphere with a vertical gradient.
-        let sphere = SCNSphere(radius: CGFloat(cfg.skyDistance))
-        sphere.segmentCount = 64
-
-        let skyMat = SCNMaterial()
-        skyMat.lightingModel = .constant
-        skyMat.isDoubleSided = false
-        skyMat.cullMode = .front          // render inside surface
-        skyMat.writesToDepthBuffer = false
-        skyMat.readsFromDepthBuffer = false
-        skyMat.blendMode = .alpha
-
-        let surfaceMod = """
-        #pragma body
-        // Up-facing normals get the zenith colour; down-facing the horizon.
-        float3 zenith  = float3(0.50, 0.74, 0.92);
-        float3 horizon = float3(0.86, 0.93, 0.98);
-        float t = clamp((_surface.normal.y + 1.0) * 0.5, 0.0, 1.0);
-        float3 col = mix(horizon, zenith, t);
-        _surface.emission.rgb = col;
-        _surface.transparent = 1.0;
-        """
-        skyMat.shaderModifiers = [.surface: surfaceMod]
-        sphere.firstMaterial = skyMat
-
-        let dome = SCNNode(geometry: sphere)
-        dome.name = "Skydome"
-        skyAnchor.addChildNode(dome)
-
-        // Sun disc (soft, billboarded)
+        // Optional soft sun disc (billboard)
         if let sunLightNode {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
             plane.cornerRadius = discSize * 0.5
             let mat = SCNMaterial()
             mat.lightingModel = .constant
-            mat.isDoubleSided = true
             mat.emission.contents = SceneKitHelpers.sunImage(diameter: Int(discSize))
             mat.blendMode = .add
             mat.writesToDepthBuffer = false
@@ -279,8 +263,6 @@ final class FirstPersonEngine: NSObject {
             plane.firstMaterial = mat
 
             let node = SCNNode(geometry: plane)
-            node.name = "sunDisc"
-            node.renderingOrder = -15
             node.constraints = [SCNBillboardConstraint()]
             let dirToSun = -sunLightNode.presentation.simdWorldFront
             node.simdPosition = simd_normalize(dirToSun) * (cfg.skyDistance - 180)
