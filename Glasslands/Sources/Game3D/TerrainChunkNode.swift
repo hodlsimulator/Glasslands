@@ -19,7 +19,7 @@ struct TerrainChunkData: Sendable {
     let tileSize: Float
     let positions: [SIMD3<Float>]
     let normals:   [SIMD3<Float>]
-    let colors:    [SIMD4<Float>]   // RGBA 0…1
+    let colors:    [SIMD4<Float>]   // RGBA 0…1 (not relied upon here)
     let uvs:       [SIMD2<Float>]
     let indices:   [UInt32]
 }
@@ -47,7 +47,7 @@ enum TerrainChunkNode {
 
     @MainActor
     static func node(from data: TerrainChunkData) -> SCNNode {
-        return node(from: data, cfg: FirstPersonEngine.Config())
+        node(from: data, cfg: FirstPersonEngine.Config())
     }
 
     @MainActor
@@ -95,20 +95,20 @@ enum TerrainChunkNode {
 
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, colSrc, uvSrc], elements: [element])
 
-        // Material: vertex colours drive base colour. No textures → no accidental tints.
+        // Ground material (no external textures; no chance of magenta)
         let mat = SCNMaterial()
         mat.lightingModel = .physicallyBased
         mat.isDoubleSided = false
-        mat.diffuse.contents = UIColor.white
         mat.metalness.contents = 0.0
         mat.roughness.contents = 0.94
 
-        // Ensure nothing can tint it purple.
+        // Force a sane base green; ignore any vertex-colour/albedo path.
+        mat.diffuse.contents = UIColor(red: 0.32, green: 0.62, blue: 0.34, alpha: 1.0)
         mat.multiply.contents = nil
         mat.normal.contents = nil
         mat.emission.contents = nil
 
-        // Procedural detail + shoreline wetness (texture-free).
+        // Procedural micro-detail + shoreline wetness (texture-free).
         let surfaceMod = """
         #pragma arguments
         float u_heightScale;
@@ -133,13 +133,13 @@ enum TerrainChunkNode {
         #pragma body
         float hN = clamp(_worldPosition.y / max(0.0001, u_heightScale), 0.0, 1.0);
 
-        // Vertex colours already in _surface.diffuse. Add tiny grass variation.
+        // Small colour jitter so it isn't carpet-flat.
         float n1 = noise2(_worldPosition.xz * u_detailFreq);
         float n2 = noise2(_worldPosition.xz * (u_detailFreq*1.87) + 17.0);
         float jitter = (n1 * 0.65 + n2 * 0.35) * 2.0 - 1.0;
         _surface.diffuse.rgb *= (1.0 + u_grassIntensity * jitter * 0.035);
 
-        // Fake normal perturbation from noise gradient (small, stable).
+        // Subtle fake normal perturbation from noise gradient.
         float e = 0.006;
         float h = noise2(_worldPosition.xz * u_detailFreq);
         float hx = noise2((_worldPosition.xz + float2(e,0.0)) * u_detailFreq) - h;
@@ -147,7 +147,7 @@ enum TerrainChunkNode {
         float3 n = normalize(_surface.normal + float3(-hx * u_normalStrength, 0.0, -hz * u_normalStrength));
         _surface.normal = n;
 
-        // Wet edge near rivers/sea
+        // Wet edge near water; slight foam.
         float wet  = smoothstep(u_waterLevelN + 0.030, u_waterLevelN - 0.060, hN);
         float foam = smoothstep(u_waterLevelN + 0.004, u_waterLevelN - 0.010, hN)
                    - smoothstep(u_waterLevelN - 0.012, u_waterLevelN - 0.030, hN);
@@ -162,8 +162,8 @@ enum TerrainChunkNode {
         mat.setValue(0.30 as CGFloat,          forKey: "u_waterLevelN")
         mat.setValue(0.85 as CGFloat,          forKey: "u_grassIntensity")
         mat.setValue(0.55 as CGFloat,          forKey: "u_waterBlue")
-        mat.setValue(0.35 as CGFloat,          forKey: "u_detailFreq")      // world-space frequency
-        mat.setValue(1.5  as CGFloat,          forKey: "u_normalStrength")  // subtle bump
+        mat.setValue(0.35 as CGFloat,          forKey: "u_detailFreq")
+        mat.setValue(1.5  as CGFloat,          forKey: "u_normalStrength")
 
         geom.materials = [mat]
         node.geometry = geom
