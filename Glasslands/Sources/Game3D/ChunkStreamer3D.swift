@@ -189,6 +189,44 @@ final class ChunkStreamer3D {
             renderer.prepare(objects) { _ in cont.resume() }
         }
     }
+    
+    @MainActor
+    func warmupInitial(at center: simd_float3, radius: Int = 1) {
+        guard let root else { return }
+
+        let ci = chunkIndex(forWorldX: center.x, z: center.z)
+
+        for dy in -radius...radius {
+            for dx in -radius...radius {
+                let key = IVec2(ci.x + dx, ci.y + dy)
+                guard loaded[key] == nil else { continue }
+
+                // Build terrain synchronously so there’s no visible void
+                let data = TerrainMeshBuilder.makeData(
+                    originChunkX: key.x,
+                    originChunkY: key.y,
+                    tilesX: cfg.tilesX,
+                    tilesZ: cfg.tilesZ,
+                    tileSize: cfg.tileSize,
+                    heightScale: cfg.heightScale,
+                    noise: noise,
+                    recipe: recipe
+                )
+                let terrainNode = TerrainChunkNode.node(from: data)
+                root.addChildNode(terrainNode)
+                loaded[key] = terrainNode
+
+                // Place set-pieces and vegetation so centre area feels complete
+                let beacons = BeaconPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+                let veg = VegetationPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+                beacons.forEach { terrainNode.addChildNode($0) }
+                veg.forEach { terrainNode.addChildNode($0) }
+
+                beaconSink(beacons)
+                obstacleSink(key, veg + beacons)
+            }
+        }
+    }
 }
 
 // MARK: - Background mesh builder (actor) — pure math only, with skirts and stitched UVs.

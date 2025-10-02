@@ -9,10 +9,8 @@ import SwiftUI
 import simd
 
 // MARK: - Move stick (returns normalised vec2: [-1,1] x [-1,1])
-
 struct MoveStickView: View {
     var onChange: (SIMD2<Float>) -> Void
-
     @State private var dragOffset: CGSize = .zero
     private let radius: CGFloat = 54
 
@@ -36,7 +34,8 @@ struct MoveStickView: View {
                     dragOffset = v.translation.clamped(to: radius)
                     let nx = Float(dragOffset.width / radius)
                     let ny = Float(dragOffset.height / radius)
-                    onChange(SIMD2(nx, -ny))    // x = strafe, y = forward
+                    // x = strafe, y = forward (thumb up = forward)
+                    onChange(SIMD2<Float>(nx, -ny))
                 }
                 .onEnded { _ in
                     dragOffset = .zero
@@ -59,10 +58,10 @@ private extension CGSize {
 }
 
 // MARK: - Look pad (SWIPE-TO-LOOK: sends incremental deltas in UIKit points, no inertia)
-
 struct LookPadView: View {
     /// Called with incremental deltas (UIKit points) since the previous event.
-    /// x > 0 = swipe right (turn right), y > 0 = swipe down.
+    /// x > 0 = swipe right (turn right), y > 0 = swipe DOWN (UIKit coordinates).
+    /// We invert Y so: thumb up => positive pitch (look up), thumb down => look down.
     var onDelta: (SIMD2<Float>) -> Void
 
     @State private var lastLocation: CGPoint?
@@ -83,8 +82,8 @@ struct LookPadView: View {
                         if let last = lastLocation {
                             let dx = Float(v.location.x - last.x)
                             let dy = Float(v.location.y - last.y)
-                            // Up swipe should look up → invert Y before passing to engine
-                            onDelta(SIMD2(dx, -dy))
+                            // Invert vertical: thumb up (dy < 0) -> -dy > 0 -> look up
+                            onDelta(SIMD2<Float>(dx, -dy))
                         }
                         lastLocation = v.location
                     }

@@ -182,7 +182,7 @@ final class FirstPersonEngine: NSObject {
         )
 
         // Immediate centre so there’s no void
-        chunker.warmupCenter(at: yawNode.simdPosition)
+        chunker.warmupInitial(at: yawNode.simdPosition, radius: 1) // builds a 3×3 immediately
 
         score = 0
         DispatchQueue.main.async { [score, onScore] in onScore(score) }
