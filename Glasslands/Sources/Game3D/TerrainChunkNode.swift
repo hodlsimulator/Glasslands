@@ -7,7 +7,7 @@
 //  Builds terrain either as pure mesh data (Sendable) or as an SCNNode (main actor).
 //
 
-@preconcurrency import SceneKit
+import SceneKit
 import simd
 import UIKit
 
@@ -18,13 +18,14 @@ struct TerrainChunkData: Sendable {
     let tilesZ: Int
     let tileSize: Float
     let positions: [SIMD3<Float>]
-    let normals: [SIMD3<Float>]
-    let colors: [SIMD4<Float>]   // RGBA 0…1
-    let uvs: [SIMD2<Float>]
-    let indices: [UInt32]
+    let normals:   [SIMD3<Float>]
+    let colors:    [SIMD4<Float>]   // RGBA 0…1 (A unused for draw; we compute wetness in shader)
+    let uvs:       [SIMD2<Float>]
+    let indices:   [UInt32]
 }
 
 enum TerrainChunkNode {
+
     static func makeNode(
         originChunk: IVec2,
         cfg: FirstPersonEngine.Config,
@@ -41,14 +42,21 @@ enum TerrainChunkNode {
             noise: noise,
             recipe: recipe
         )
-        return node(from: data)
+        return node(from: data, cfg: cfg)
     }
 
     @MainActor
     static func node(from data: TerrainChunkData) -> SCNNode {
+        // Backwards-compatible path (cfg unknown): assume defaults
+        return node(from: data, cfg: FirstPersonEngine.Config())
+    }
+
+    @MainActor
+    static func node(from data: TerrainChunkData, cfg: FirstPersonEngine.Config) -> SCNNode {
         let node = SCNNode()
         node.name = "chunk_\(data.originChunkX)_\(data.originChunkY)"
 
+        // Geometry sources
         let posData = data.positions.withUnsafeBytes { Data($0) }
         let nrmData = data.normals.withUnsafeBytes { Data($0) }
         let colData = data.colors.withUnsafeBytes { Data($0) }
@@ -65,7 +73,6 @@ enum TerrainChunkNode {
             dataOffset: 0,
             dataStride: MemoryLayout<SIMD3<Float>>.stride
         )
-
         let nrmSrc = SCNGeometrySource(
             data: nrmData,
             semantic: .normal,
@@ -76,7 +83,6 @@ enum TerrainChunkNode {
             dataOffset: 0,
             dataStride: MemoryLayout<SIMD3<Float>>.stride
         )
-
         let colSrc = SCNGeometrySource(
             data: colData,
             semantic: .color,
@@ -87,7 +93,6 @@ enum TerrainChunkNode {
             dataOffset: 0,
             dataStride: MemoryLayout<SIMD4<Float>>.stride
         )
-
         let uvSrc = SCNGeometrySource(
             data: uvData,
             semantic: .texcoord,
@@ -108,17 +113,68 @@ enum TerrainChunkNode {
 
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, colSrc, uvSrc], elements: [element])
 
+        // PBR ground with detail + normal map
         let mat = SCNMaterial()
-        mat.lightingModel = .lambert
+        mat.lightingModel = .physicallyBased
         mat.isDoubleSided = true
-        mat.diffuse.contents = SceneKitHelpers.groundDetailTexture(size: 256) // higher-res, less obvious tiling
+
+        let repeatTiling: CGFloat = 10.0 // tighter tiling to avoid “carpet”
+        mat.diffuse.contents = SceneKitHelpers.groundDetailTexture(size: 512)
         mat.diffuse.wrapS = .repeat
         mat.diffuse.wrapT = .repeat
-        mat.roughness.contents = 1.0
-        geom.materials = [mat]
+        mat.diffuse.contentsTransform = SCNMatrix4MakeScale(Float(repeatTiling), Float(repeatTiling), 1)
 
+        mat.normal.contents = SceneKitHelpers.groundDetailNormalTexture(size: 512, strength: 2.0)
+        mat.normal.wrapS = .repeat
+        mat.normal.wrapT = .repeat
+        mat.normal.contentsTransform = SCNMatrix4MakeScale(Float(repeatTiling), Float(repeatTiling), 1)
+
+        mat.roughness.contents = 0.92
+        mat.metalness.contents = 0.0
+
+        // Rivers & “wet” look: compute from world Y (normalized by heightScale)
+        // Also add subtle grass micro-variation to break flatness.
+        let surfaceMod = """
+        #pragma arguments
+        float u_heightScale;
+        float u_waterLevelN;     // ~0.30 shoreline
+        float u_grassIntensity;  // 0..1 micro tint jitter
+        float u_waterBlue;       // 0..1 extra blue tint
+        #pragma body
+        // Normalised world height 0..1
+        float hN = clamp(_worldPosition.y / max(0.0001, u_heightScale), 0.0, 1.0);
+
+        // Grass micro variation (tiny oscillation by world XZ)
+        float n1 = fract(sin(dot(_worldPosition.xz, float2(12.9898, 78.233))) * 43758.5453);
+        float n2 = fract(sin(dot(_worldPosition.xz, float2(3.9812, 17.719))) * 15731.7431);
+        float jitter = (n1 * 0.6 + n2 * 0.4) * 2.0 - 1.0;
+        float tint = 1.0 + u_grassIntensity * jitter * 0.04;
+        _surface.diffuse.rgb *= tint;
+
+        // Wetness band around water level
+        float wet  = smoothstep(u_waterLevelN + 0.030, u_waterLevelN - 0.060, hN);
+        float foam = smoothstep(u_waterLevelN + 0.004, u_waterLevelN - 0.010, hN)
+                   - smoothstep(u_waterLevelN - 0.012, u_waterLevelN - 0.030, hN);
+
+        // Make wet ground darker, glossier, slightly blue-green
+        float3 waterTint = float3(0.58, 0.76, 0.90);
+        _surface.diffuse.rgb = mix(_surface.diffuse.rgb, waterTint, wet * u_waterBlue);
+        _surface.roughness   = mix(_surface.roughness, 0.18, wet);
+        _surface.emission.rgb += foam * float3(0.08, 0.09, 0.10);
+        """
+
+        mat.shaderModifiers = [.surface: surfaceMod]
+
+        // Push uniforms for shader
+        mat.setValue(CGFloat(cfg.heightScale), forKey: "u_heightScale")
+        mat.setValue(0.30 as CGFloat,          forKey: "u_waterLevelN")
+        mat.setValue(0.55 as CGFloat,          forKey: "u_waterBlue")
+        mat.setValue(0.85 as CGFloat,          forKey: "u_grassIntensity")
+
+        geom.materials = [mat]
         node.geometry = geom
-        node.castsShadow = false
+
+        node.castsShadow = true
         return node
     }
 }

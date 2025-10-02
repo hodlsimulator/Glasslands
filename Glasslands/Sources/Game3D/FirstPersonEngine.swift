@@ -187,21 +187,37 @@ final class FirstPersonEngine: NSObject {
         score = 0
         DispatchQueue.main.async { [score, onScore] in onScore(score) }
     }
-
+    
     private func buildLighting() {
+        // Clear any previous lights
+        scene.rootNode.childNodes.filter { $0.light != nil }.forEach { $0.removeFromParentNode() }
+
         let amb = SCNLight()
         amb.type = .ambient
-        amb.intensity = 450
-        amb.color = UIColor(white: 0.94, alpha: 1)
+        amb.intensity = 350
+        amb.color = UIColor(white: 0.96, alpha: 1.0)
         let ambNode = SCNNode(); ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
+        // Directional “sun” with soft shadows
         let sun = SCNLight()
         sun.type = .directional
-        sun.intensity = 1350
-        sun.castsShadow = false
-        let sunNode = SCNNode(); sunNode.light = sun
-        sunNode.eulerAngles = SCNVector3(-1.31, .pi/4, 0)
+        sun.intensity = 1500
+        sun.color = UIColor(white: 1.0, alpha: 1.0)
+
+        sun.castsShadow = true
+        sun.shadowMode = .deferred
+        sun.automaticallyAdjustsShadowProjection = true
+        sun.maximumShadowDistance = 600
+        sun.shadowMapSize = CGSize(width: 2048, height: 2048)
+        sun.shadowRadius = 4.0                   // softness
+        sun.shadowSampleCount = 8                // denoise (iOS 15+)
+        sun.shadowBias = 2.0 / 2048.0            // reduce acne without peter-panning
+
+        let sunNode = SCNNode()
+        sunNode.light = sun
+        // Late-afternoon angle feels nice; tweak to taste
+        sunNode.eulerAngles = SCNVector3(-1.2, .pi / 4, 0)
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
     }

@@ -19,7 +19,6 @@ struct VegetationPlacer3D {
                       cfg: FirstPersonEngine.Config,
                       noise: NoiseFields,
                       recipe: BiomeRecipe) -> [SCNNode] {
-
         let originTile = IVec2(ci.x * cfg.tilesX, ci.y * cfg.tilesZ)
 
         let ux = UInt64(bitPattern: Int64(ci.x))
@@ -30,11 +29,10 @@ struct VegetationPlacer3D {
         var ra = RandomAdaptor(rng)
 
         var nodes: [SCNNode] = []
-
         let step = 4
+
         for tz in stride(from: 0, to: cfg.tilesZ, by: step) {
             for tx in stride(from: 0, to: cfg.tilesX, by: step) {
-
                 let tileX = originTile.x + tx
                 let tileZ = originTile.y + tz
 
@@ -48,8 +46,7 @@ struct VegetationPlacer3D {
                 if r > 0.50 { continue }
 
                 let isForest = (h < 0.66) && (m > 0.52) && (slope < 0.12)
-
-                let baseChance: Double = isForest ? 0.35 : 0.12
+                let baseChance: Double = isForest ? 0.34 : 0.12
                 if Double.random(in: 0...1, using: &ra) > baseChance { continue }
 
                 let jx = (rng.nextUniform() - 0.5) * 0.9
@@ -66,76 +63,102 @@ struct VegetationPlacer3D {
 
                 tree.position = SCNVector3(wx, wy, wz)
                 tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
-
+                tree.castsShadow = true
                 applyLOD(to: tree)
-
                 nodes.append(tree)
             }
         }
         return nodes
     }
 
-    // MARK: - Varied low-poly tree
+    // MARK: - Varied low-poly conifer (no round spheres)
 
     private static func makeTreeNode(palette: [UIColor],
                                      rng: GKMersenneTwisterRandomSource) -> (SCNNode, Float, CGFloat) {
         var r = RandomAdaptor(rng)
 
+        // Keep shapes related (subtle changes), avoid drastic silhouette changes
         let tall = rng.nextUniform() > 0.35
-
-        let trunkH: CGFloat = tall ? CGFloat.random(in: 0.9...1.4, using: &r) : CGFloat.random(in: 0.6...1.0, using: &r)
+        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r) : CGFloat.random(in: 0.75...1.15, using: &r)
         let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r) : CGFloat.random(in: 0.05...0.08, using: &r)
-        let canopyH: CGFloat = tall ? CGFloat.random(in: 1.4...2.1, using: &r) : CGFloat.random(in: 1.1...1.6, using: &r)
-        let canopyR: CGFloat = tall ? CGFloat.random(in: 0.55...0.85, using: &r) : CGFloat.random(in: 0.45...0.70, using: &r)
+
+        // Canopy as truncated cone; optionally stacked two-piece variant for variety
+        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r) : CGFloat.random(in: 1.10...1.60, using: &r)
+        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r) : CGFloat.random(in: 0.45...0.70, using: &r)
+        let canopyTopR1: CGFloat = CGFloat.random(in: 0.06...0.16, using: &r)
+
+        let twoStage = rng.nextUniform() > 0.55
+        let canopyH2: CGFloat = twoStage ? canopyH1 * CGFloat.random(in: 0.55...0.75, using: &r) : 0
+        let canopyR2: CGFloat = twoStage ? canopyR1 * CGFloat.random(in: 0.75...0.95, using: &r) : 0
+        let canopyTopR2: CGFloat = twoStage ? canopyTopR1 * CGFloat.random(in: 0.55...0.85, using: &r) : 0
 
         let barkBase = palette.indices.contains(4) ? palette[4] : .brown
         let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
 
-        let bark = barkBase.adjustingHue(by: CGFloat.random(in: -0.02...0.02, using: &r),
-                                         satBy: CGFloat.random(in: -0.08...0.08, using: &r),
-                                         briBy: CGFloat.random(in: -0.05...0.05, using: &r))
-        let leaf = leafBase.adjustingHue(by: CGFloat.random(in: -0.03...0.03, using: &r),
-                                         satBy: CGFloat.random(in: -0.10...0.10, using: &r),
-                                         briBy: CGFloat.random(in: -0.06...0.06, using: &r))
+        let bark = barkBase
+            .adjustingHue(by: CGFloat.random(in: -0.02...0.02, using: &r),
+                          satBy: CGFloat.random(in: -0.08...0.08, using: &r),
+                          briBy: CGFloat.random(in: -0.05...0.05, using: &r))
 
+        let leaf = leafBase
+            .adjustingHue(by: CGFloat.random(in: -0.03...0.03, using: &r),
+                          satBy: CGFloat.random(in: -0.10...0.10, using: &r),
+                          briBy: CGFloat.random(in: -0.06...0.06, using: &r))
+
+        // Trunk
         let trunk = SCNCylinder(radius: trunkR, height: trunkH)
         let trunkMat = SCNMaterial()
+        trunkMat.lightingModel = .physicallyBased
         trunkMat.diffuse.contents = bark
-        trunkMat.roughness.contents = 1.0
+        trunkMat.roughness.contents = 0.95
+        trunkMat.metalness.contents = 0.0
         trunk.materials = [trunkMat]
 
-        let canopyGeom: SCNGeometry
-        if rng.nextBool() {
-            canopyGeom = SCNCone(topRadius: 0.0, bottomRadius: canopyR, height: canopyH)
-        } else {
-            let sphere = SCNSphere(radius: canopyR * 0.88)
-            sphere.segmentCount = 10
-            canopyGeom = sphere
-        }
+        // Canopy piece 1
+        let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
+        canopy1.radialSegmentCount = 12
         let leafMat = SCNMaterial()
+        leafMat.lightingModel = .physicallyBased
         leafMat.diffuse.contents = leaf
-        leafMat.roughness.contents = 0.85
-        canopyGeom.materials = [leafMat]
+        leafMat.roughness.contents = 0.75
+        leafMat.metalness.contents = 0.0
+        canopy1.materials = [leafMat]
 
+        // Optional canopy piece 2
+        let canopy2: SCNGeometry? = twoStage ? {
+            let g = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
+            g.radialSegmentCount = 10
+            g.materials = [leafMat]
+            return g
+        }() : nil
+
+        // Build node
         let node = SCNNode()
-        let trunkNode = SCNNode(geometry: trunk)
-        trunkNode.position = SCNVector3(0, Float(trunkH/2), 0)
 
-        let canopyNode = SCNNode(geometry: canopyGeom)
-        canopyNode.position = SCNVector3(0, Float(trunkH + canopyH*0.5 - 0.05), 0)
+        let trunkNode = SCNNode(geometry: trunk)
+        trunkNode.position = SCNVector3(0, trunkH / 2.0, 0)
+
+        let canopyNode1 = SCNNode(geometry: canopy1)
+        canopyNode1.position = SCNVector3(0, trunkH + canopyH1 * 0.5 - 0.02, 0)
 
         node.addChildNode(trunkNode)
-        node.addChildNode(canopyNode)
+        node.addChildNode(canopyNode1)
 
+        if let g2 = canopy2 {
+            let cn2 = SCNNode(geometry: g2)
+            cn2.position = SCNVector3(0, trunkH + canopyH1 + canopyH2 * 0.45, 0)
+            node.addChildNode(cn2)
+        }
+
+        // Gentle natural imperfections
         node.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &r)
-        node.eulerAngles.z = Float.random(in: -0.05...0.05, using: &r)
+        node.eulerAngles.z = Float.random(in: -0.04...0.04, using: &r)
 
-        let treeHeight = trunkH + canopyH
-        let hitRadius = Float(max(canopyR * 0.65, trunkR * 1.6))
+        let treeHeight = trunkH + canopyH1 + canopyH2
+        let hitRadius = Float(max(canopyR1 * 0.65, trunkR * 1.6))
         return (node, hitRadius, treeHeight)
     }
 
-    // Far-only culling avoids duplicate tracking of the same geometry.
     private static func applyLOD(to tree: SCNNode) {
         let far: CGFloat = 120
         for child in tree.childNodes {
