@@ -9,31 +9,34 @@
 
 import SwiftUI
 import SceneKit
+import MetalKit
 
 struct Scene3DView: UIViewRepresentable {
     let recipe: BiomeRecipe
-    var isPaused: Bool
-    var onScore: (Int) -> Void
-    var onReady: (FirstPersonEngine) -> Void
-
-    final class Coordinator {
-        var engine: FirstPersonEngine?
-        var proxy: RendererProxy?
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    let isPaused: Bool
+    let onScore: (Int) -> Void
+    let onReady: (FirstPersonEngine) -> Void
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
-        view.antialiasingMode = .none          // A/B: MSAA off
+        view.preferredRenderingAPI = .metal
+        view.antialiasingMode = .none
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
         view.backgroundColor = .black
         view.isUserInteractionEnabled = false
 
+        // Start with composited presentation (disables Direct-to-Display)
+        view.isOpaque = false
+
+        if let metal = view.layer as? CAMetalLayer {
+            metal.wantsExtendedDynamicRangeContent = false
+            metal.pixelFormat = .bgra8Unorm
+            metal.maximumDrawableCount = 3
+        }
+
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
-
         engine.attach(to: view, recipe: recipe)
 
         let proxy = RendererProxy(engine: engine)
@@ -46,9 +49,11 @@ struct Scene3DView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: SCNView, context: Context) {
-        guard let engine = context.coordinator.engine else { return }
-        engine.setPaused(isPaused)
-        engine.apply(recipe: recipe) // no-op if unchanged
+    func updateUIView(_ uiView: SCNView, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        var engine: FirstPersonEngine?
+        var proxy: RendererProxy?
     }
 }

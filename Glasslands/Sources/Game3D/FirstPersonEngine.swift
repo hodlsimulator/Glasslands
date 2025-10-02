@@ -165,23 +165,34 @@ final class FirstPersonEngine: NSObject {
             noise: noise,
             recipe: recipe,
             root: scene.rootNode,
-            beaconSink: { [weak self] arr in arr.forEach { self?.beacons.insert($0) } },
-            obstacleSink: { [weak self] chunk, nodes in self?.registerObstacles(for: chunk, from: nodes) },
-            onChunkRemoved: { [weak self] chunk in self?.obstaclesByChunk.removeValue(forKey: chunk) }
+            beaconSink: { [weak self] beacons in
+                beacons.forEach { self?.beacons.insert($0) }
+            },
+            obstacleSink: { [weak self] chunk, nodes in
+                self?.registerObstacles(for: chunk, from: nodes)
+            },
+            onChunkRemoved: { [weak self] chunk in
+                self?.obstaclesByChunk.removeValue(forKey: chunk)
+            }
         )
 
-        // 1) Build ONE centre chunk now…
+        // Build just the centre chunk so the renderer sees real geometry.
         chunker.warmupCenter(at: yawNode.simdPosition)
 
-        // 2) …draw a few frames on the *real SCNView* to warm pipelines & the CAMetalLayer drawable
+        // Pre-warm a couple of frames and keep streaming off initially.
         warmupFramesRemaining = 6
-        prewarmOnscreen()
-
-        // 3) Start streaming gently after a short delay
-        chunker.tasksPerFrame = 1
         allowStreaming = false
+        _ = scnView?.prepare(scene.rootNode, shouldAbortBlock: nil)
+        _ = scnView?.snapshot()
+
+        // After 1s, allow streaming and (optionally) switch back to opaque,
+        // which lets iOS re-enter Direct-to-Display without the visible stall.
+        chunker.tasksPerFrame = 1
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.allowStreaming = true
+            guard let self else { return }
+            self.scnView?.isOpaque = true      // comment this line to keep D2D disabled permanently
+            self.allowStreaming = true
+            Signposts.event("WarmStart.Done")
         }
 
         score = 0
