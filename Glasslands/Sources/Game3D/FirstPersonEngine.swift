@@ -79,6 +79,9 @@ final class FirstPersonEngine: NSObject {
     private var beacons = Set<SCNNode>()
     private var score = 0
     private var onScore: (Int) -> Void
+    
+    // Gate early workload
+    private var startTime: TimeInterval = 0
 
     // Obstacles (by chunk)
     private struct Obstacle { weak var node: SCNNode?; let position: SIMD2<Float>; let radius: Float }
@@ -132,6 +135,9 @@ final class FirstPersonEngine: NSObject {
 
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
+        
+        if startTime == 0 { startTime = t }
+        let warmup = (t - startTime) < 2.0
 
         yaw   -= lookRate.x * (cfg.yawSpeedDegPerSec   * (.pi/180)) * dt
         pitch += lookRate.y * (cfg.pitchSpeedDegPerSec * (.pi/180)) * dt
@@ -158,8 +164,12 @@ final class FirstPersonEngine: NSObject {
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
 
-        chunker.updateVisible(center: next)
-        collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
+        if warmup {
+            // No new chunk work in the first 2s; just draw what we have.
+        } else {
+            chunker.updateVisible(center: next)
+            collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
+        }
     }
 
     // MARK: - World build/reset
@@ -205,10 +215,11 @@ final class FirstPersonEngine: NSObject {
         )
 
         chunker.tasksPerFrame = 1
-        chunker.buildAround(yawNode.simdPosition)
-
-        // NEW: pre-warm SceneKit so the first interactive seconds don’t hitch.
-        prewarmRenderer()
+        prewarmRenderer()                     // warm GPU first
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            self.chunker.buildAround(self.yawNode.simdPosition)  // begin streaming after warmup
+        }
 
         // Score reset
         score = 0
@@ -218,11 +229,24 @@ final class FirstPersonEngine: NSObject {
     // Prepares materials/textures/pipelines up-front (moves the one-time cost off the first real frame).
     private func prewarmRenderer() {
         guard let v = scnView else { return }
+
+        v.isPlaying = false
+
         _ = v.prepare(scene.rootNode, shouldAbortBlock: nil)
         _ = v.prepare(scene,        shouldAbortBlock: nil)
-        _ = v.prepare(sunDiscNode as Any, shouldAbortBlock: nil)
-        // Force a tiny offscreen draw to make sure the GPU warms up now.
-        _ = v.snapshot()
+
+        let renderer = SCNRenderer(device: v.device, options: nil)
+        renderer.scene = scene
+        renderer.pointOfView = camNode
+
+        for i in 0..<6 {
+            let t = TimeInterval(i) / 60.0
+            renderer.update(atTime: t)
+            renderer.render(atTime: t)
+        }
+
+        _ = v.snapshot()  // allocates the CAMetalLayer drawable
+        v.isPlaying = true
     }
 
     private func buildLighting() {
@@ -236,7 +260,7 @@ final class FirstPersonEngine: NSObject {
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1350
-        sun.castsShadow = false   // keep off while diagnosing the hitch
+        sun.castsShadow = false                 // A/B: shadows off
 
         let sunNode = SCNNode(); sunNode.light = sun
         sunNode.eulerAngles = SCNVector3(-1.31, .pi/4, 0)

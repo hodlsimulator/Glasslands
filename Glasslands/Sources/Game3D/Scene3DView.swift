@@ -25,32 +25,24 @@ struct Scene3DView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
-        view.antialiasingMode = .multisampling4X
+        view.antialiasingMode = .none          // A/B: MSAA off
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
         view.backgroundColor = .black
-
-        // Ensure SwiftUI overlay (virtual sticks) always receives touches.
         view.isUserInteractionEnabled = false
 
-        // Engine
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
 
-        // Attach scene (engine no longer sets itself as delegate).
         engine.attach(to: view, recipe: recipe)
 
-        // Install the proxy as the SCNView delegate and keep a strong reference.
         let proxy = RendererProxy(engine: engine)
         context.coordinator.proxy = proxy
         view.delegate = proxy
 
-        // Start/stop rendering
         engine.setPaused(isPaused)
 
-        // Hand engine to SwiftUI
         DispatchQueue.main.async { onReady(engine) }
-
         return view
     }
 
