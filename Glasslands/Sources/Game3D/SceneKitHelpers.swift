@@ -10,6 +10,7 @@
 import SceneKit
 import UIKit
 import GameplayKit
+import CoreGraphics
 
 extension SCNVector3 {
     static var zero: SCNVector3 { SCNVector3(0, 0, 0) }
@@ -40,7 +41,6 @@ func geometrySourceForVertexColors(_ colors: [UIColor]) -> SCNGeometrySource {
 }
 
 enum SceneKitHelpers {
-    // Cache the ground detail so each chunk reuses it
     private static var _groundDetail: UIImage?
     static func groundDetailTexture(size: Int = 256) -> UIImage {
         if let img = _groundDetail { return img }
@@ -49,7 +49,8 @@ enum SceneKitHelpers {
         return img
     }
 
-    static func skyboxImages(size: Int) -> [UIImage] {
+    // Background-friendly: compute CGImage faces off-main without touching UIKit.
+    static func skyboxImagesCG(size: Int) -> [CGImage] {
         let W = max(64, size), H = max(64, size)
 
         let zenith  = SIMD3<Double>(0.50, 0.74, 0.92)
@@ -71,7 +72,7 @@ enum SceneKitHelpers {
             }
         }
 
-        func makeFace(_ face: Int) -> UIImage {
+        func makeFaceCG(_ face: Int) -> CGImage {
             var bytes = [UInt8](repeating: 0, count: W * H * 4)
             let bpr = W * 4
             for y in 0..<H {
@@ -81,17 +82,23 @@ enum SceneKitHelpers {
                     let d = simd_normalize(dir(forFace: face, u: u, v: v))
                     let t = smooth((d.y + 1.0) * 0.5)
                     let c = horizon * (1.0 - t) + zenith * t
-                    let r = UInt8(max(0, min(255, Int(c.x * 255.0))))
-                    let g = UInt8(max(0, min(255, Int(c.y * 255.0))))
-                    let b = UInt8(max(0, min(255, Int(c.z * 255.0))))
+                    let r = UInt8(max(0, min(255, Int(c.x * 255.0)))))
+                    let g = UInt8(max(0, min(255, Int(c.y * 255.0)))))
+                    let b = UInt8(max(0, min(255, Int(c.z * 255.0)))))
                     let i = (y * W + x) * 4
                     bytes[i+0] = r; bytes[i+1] = g; bytes[i+2] = b; bytes[i+3] = 255
                 }
             }
-            return CGImageHelper.makeImage(width: W, height: H, bytes: &bytes, bpr: bpr)
+            return CGImageHelper.makeCGImage(width: W, height: H, bytes: &bytes, bpr: bpr)!
         }
 
-        return [0, 1, 2, 3, 4, 5].map { makeFace($0) }
+        return [0, 1, 2, 3, 4, 5].map { makeFaceCG($0) }
+    }
+
+    // UIKit version (main-actor) kept for any synchronous callers.
+    @MainActor
+    static func skyboxImages(size: Int) -> [UIImage] {
+        skyboxImagesCG(size: size).map { UIImage(cgImage: $0) }
     }
 
     static func sunImage(diameter: Int) -> UIImage {
@@ -154,7 +161,7 @@ enum SceneKitHelpers {
 }
 
 enum CGImageHelper {
-    static func makeImage(width W: Int, height H: Int, bytes: inout [UInt8], bpr: Int) -> UIImage {
+    static func makeCGImage(width W: Int, height H: Int, bytes: inout [UInt8], bpr: Int) -> CGImage? {
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
         return bytes.withUnsafeMutableBytes { raw in
@@ -166,10 +173,13 @@ enum CGImageHelper {
                 bytesPerRow: bpr,
                 space: cs,
                 bitmapInfo: bitmapInfo.rawValue
-            ), let cg = ctx.makeImage() else {
-                return UIImage()
-            }
-            return UIImage(cgImage: cg, scale: 1, orientation: .up)
+            ) else { return nil }
+            return ctx.makeImage()
         }
+    }
+
+    static func makeImage(width W: Int, height H: Int, bytes: inout [UInt8], bpr: Int) -> UIImage {
+        guard let cg = makeCGImage(width: W, height: H, bytes: &bytes, bpr: bpr) else { return UIImage() }
+        return UIImage(cgImage: cg, scale: 1, orientation: .up)
     }
 }

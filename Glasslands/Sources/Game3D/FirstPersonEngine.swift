@@ -7,6 +7,8 @@
 //  Updated: stream chunks off-thread + prewarm before attach.
 //
 
+// Glasslands/Sources/Game3D/FirstPersonEngine.swift
+
 import SceneKit
 import GameplayKit
 import simd
@@ -51,7 +53,7 @@ final class FirstPersonEngine: NSObject {
     private let skyAnchor = SCNNode()
     private var sunDiscNode: SCNNode?
     private var sunLightNode: SCNNode?
-    private var skyboxTask: Task<Void, Never>?    // async sky build
+    private var skyboxTask: Task<Void, Never>?
 
     private var lastTime: TimeInterval = 0
     private var beacons = Set<SCNNode>()
@@ -179,7 +181,6 @@ final class FirstPersonEngine: NSObject {
             onChunkRemoved: { [weak self] chunk in self?.obstaclesByChunk.removeValue(forKey: chunk) }
         )
 
-        // Immediate centre so there’s no void; the work is light enough now the sky is async.
         chunker.warmupCenter(at: yawNode.simdPosition)
 
         score = 0
@@ -212,7 +213,6 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Fast: solid gradient-ish colour first (no heavy loops on main).
         scene.background.contents = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0)
 
         if let sunLightNode {
@@ -244,12 +244,13 @@ final class FirstPersonEngine: NSObject {
             self.sunDiscNode = sunDisc
         }
 
-        // Build the real skybox off-thread at a modest resolution; swap in when ready.
+        // Build CGImage faces off-main; wrap as UIImage on main.
         skyboxTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let imgs = SceneKitHelpers.skyboxImages(size: 256)
+            let facesCG = SceneKitHelpers.skyboxImagesCG(size: 256)
             await MainActor.run {
                 guard let self else { return }
-                self.scene.background.contents = imgs
+                let facesUI = facesCG.map { UIImage(cgImage: $0) }
+                self.scene.background.contents = facesUI
             }
         }
     }
