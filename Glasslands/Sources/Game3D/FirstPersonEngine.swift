@@ -136,25 +136,23 @@ final class FirstPersonEngine: NSObject {
 
     // MARK: - Frame step
 
-    @MainActor
-    func stepUpdateMain(at t: TimeInterval) {
+    @MainActor func stepUpdateMain(at t: TimeInterval) {
+        let sp = Signposts.begin("Frame")
+        defer { Signposts.end("Frame", sp) }
+
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
-        // ✅ Fix yaw direction: thumb right → look right
-        yaw   -= lookRate.x * (cfg.yawSpeedDegPerSec   * (.pi/180)) * dt
+        yaw -= lookRate.x * (cfg.yawSpeedDegPerSec * (.pi/180)) * dt
         pitch += lookRate.y * (cfg.pitchSpeedDegPerSec * (.pi/180)) * dt
-
         clampAngles()
         updateRig()
 
-        // Move along ground plane
         let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
         let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
         let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
         var next = yawNode.simdPosition + attemptedDelta
 
-        // Ground clamp
         let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
         let targetY = groundY + cfg.eyeHeight
         if !targetY.isFinite {
@@ -166,14 +164,10 @@ final class FirstPersonEngine: NSObject {
             next.y = max(targetY, next.y - maxDrop)
         }
 
-        // Obstacle push-out
         next = resolveObstacleCollisions(position: next)
         yawNode.simdPosition = next
-
-        // Keep sun billboard anchored
         skyAnchor.simdPosition = next
 
-        // Stream chunks + check beacons
         chunker.updateVisible(center: next)
         collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
     }
@@ -189,16 +183,16 @@ final class FirstPersonEngine: NSObject {
         buildSky()
 
         // Camera
-        yaw = 0; pitch = -0.08
+        yaw = 0
+        pitch = -0.08
         yawNode.position = spawn()
         updateRig()
 
         let camera = SCNCamera()
         camera.zNear = 0.02
-        camera.zFar  = 20_000
+        camera.zFar = 20_000
         camera.fieldOfView = 70
         camNode.camera = camera
-
         pitchNode.addChildNode(camNode)
         yawNode.addChildNode(pitchNode)
         scene.rootNode.addChildNode(yawNode)
@@ -210,15 +204,27 @@ final class FirstPersonEngine: NSObject {
             noise: noise,
             recipe: recipe,
             root: scene.rootNode,
-            beaconSink: { [weak self] beacons in beacons.forEach { self?.beacons.insert($0) } },
-            obstacleSink: { [weak self] (chunk, nodes) in self?.registerObstacles(for: chunk, from: nodes) },
-            onChunkRemoved: { [weak self] chunk in self?.obstaclesByChunk.removeValue(forKey: chunk) }
+            beaconSink: { [weak self] beacons in
+                beacons.forEach { self?.beacons.insert($0) }
+            },
+            obstacleSink: { [weak self] chunk, nodes in
+                self?.registerObstacles(for: chunk, from: nodes)
+            },
+            onChunkRemoved: { [weak self] chunk in
+                self?.obstaclesByChunk.removeValue(forKey: chunk)
+            }
         )
+
+        // <-- This is the line you asked about.
+        chunker.tasksPerFrame = 2   // try 1–3; start with 2
+
         chunker.buildAround(yawNode.simdPosition)
 
         // Score reset
         score = 0
-        DispatchQueue.main.async { [score, onScore] in onScore(score) }
+        DispatchQueue.main.async { [score, onScore] in
+            onScore(score)
+        }
     }
 
     private func buildLighting() {
