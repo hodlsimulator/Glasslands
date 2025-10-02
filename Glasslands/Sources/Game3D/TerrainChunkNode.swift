@@ -19,7 +19,7 @@ struct TerrainChunkData: Sendable {
     let tileSize: Float
     let positions: [SIMD3<Float>]
     let normals:   [SIMD3<Float>]
-    let colors:    [SIMD4<Float>]   // RGBA 0…1 (A unused for draw; we compute wetness in shader)
+    let colors:    [SIMD4<Float>]   // RGBA 0…1
     let uvs:       [SIMD2<Float>]
     let indices:   [UInt32]
 }
@@ -47,7 +47,6 @@ enum TerrainChunkNode {
 
     @MainActor
     static func node(from data: TerrainChunkData) -> SCNNode {
-        // Backwards-compatible path (cfg unknown): assume defaults
         return node(from: data, cfg: FirstPersonEngine.Config())
     }
 
@@ -56,58 +55,99 @@ enum TerrainChunkNode {
         let node = SCNNode()
         node.name = "chunk_\(data.originChunkX)_\(data.originChunkY)"
 
+        // Geometry
         let posData = data.positions.withUnsafeBytes { Data($0) }
         let nrmData = data.normals.withUnsafeBytes { Data($0) }
         let colData = data.colors.withUnsafeBytes { Data($0) }
         let uvData  = data.uvs.withUnsafeBytes { Data($0) }
         let idxData = data.indices.withUnsafeBytes { Data($0) }
 
-        let posSrc = SCNGeometrySource(data: posData, semantic: .vertex,  vectorCount: data.positions.count, usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride)
-        let nrmSrc = SCNGeometrySource(data: nrmData, semantic: .normal,  vectorCount: data.normals.count,   usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride)
-        let colSrc = SCNGeometrySource(data: colData, semantic: .color,   vectorCount: data.colors.count,    usesFloatComponents: true, componentsPerVector: 4, bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: MemoryLayout<SIMD4<Float>>.stride)
-        let uvSrc  = SCNGeometrySource(data: uvData,  semantic: .texcoord,vectorCount: data.uvs.count,       usesFloatComponents: true, componentsPerVector: 2, bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: MemoryLayout<SIMD2<Float>>.stride)
+        let posSrc = SCNGeometrySource(
+            data: posData, semantic: .vertex, vectorCount: data.positions.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD3<Float>>.stride
+        )
+        let nrmSrc = SCNGeometrySource(
+            data: nrmData, semantic: .normal, vectorCount: data.normals.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD3<Float>>.stride
+        )
+        let colSrc = SCNGeometrySource(
+            data: colData, semantic: .color, vectorCount: data.colors.count,
+            usesFloatComponents: true, componentsPerVector: 4,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD4<Float>>.stride
+        )
+        let uvSrc = SCNGeometrySource(
+            data: uvData, semantic: .texcoord, vectorCount: data.uvs.count,
+            usesFloatComponents: true, componentsPerVector: 2,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD2<Float>>.stride
+        )
 
-        let element = SCNGeometryElement(data: idxData, primitiveType: .triangles, primitiveCount: data.indices.count / 3, bytesPerIndex: MemoryLayout<UInt32>.size)
+        let element = SCNGeometryElement(
+            data: idxData, primitiveType: .triangles,
+            primitiveCount: data.indices.count / 3,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
+
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, colSrc, uvSrc], elements: [element])
 
+        // Material: vertex colours drive base colour. No textures → no accidental tints.
         let mat = SCNMaterial()
         mat.lightingModel = .physicallyBased
         mat.isDoubleSided = false
-
-        // Base colour from vertex colours; keep albedo neutral
         mat.diffuse.contents = UIColor.white
-
-        // Subtle micro-detail via multiply (safe even with vertex colours)
-        let repeatTiling: CGFloat = 10.0
-        mat.multiply.contents = SceneKitHelpers.groundDetailTexture(size: 512)
-        mat.multiply.wrapS = .repeat
-        mat.multiply.wrapT = .repeat
-        mat.multiply.contentsTransform = SCNMatrix4MakeScale(Float(repeatTiling), Float(repeatTiling), 1)
-
-        // Keep normal map but reduce strength visually by raising roughness
-        mat.normal.contents = SceneKitHelpers.groundDetailNormalTexture(size: 512, strength: 1.2)
-        mat.normal.wrapS = .repeat
-        mat.normal.wrapT = .repeat
-        mat.normal.contentsTransform = SCNMatrix4MakeScale(Float(repeatTiling), Float(repeatTiling), 1)
-
-        mat.roughness.contents = 0.95
         mat.metalness.contents = 0.0
+        mat.roughness.contents = 0.94
 
-        // Shore wetness + foam band
+        // Ensure nothing can tint it purple.
+        mat.multiply.contents = nil
+        mat.normal.contents = nil
+        mat.emission.contents = nil
+
+        // Procedural detail + shoreline wetness (texture-free).
         let surfaceMod = """
         #pragma arguments
         float u_heightScale;
         float u_waterLevelN;
         float u_grassIntensity;
         float u_waterBlue;
+        float u_detailFreq;
+        float u_normalStrength;
+
+        float hash2(float2 p){ return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123); }
+        float noise2(float2 p){
+            float2 i = floor(p);
+            float2 f = fract(p);
+            float a = hash2(i);
+            float b = hash2(i + float2(1.0,0.0));
+            float c = hash2(i + float2(0.0,1.0));
+            float d = hash2(i + float2(1.0,1.0));
+            float2 u = f*f*(3.0-2.0*f);
+            return mix(a,b,u.x) + (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
+        }
+
         #pragma body
         float hN = clamp(_worldPosition.y / max(0.0001, u_heightScale), 0.0, 1.0);
-        float n1 = fract(sin(dot(_worldPosition.xz, float2(12.9898, 78.233))) * 43758.5453);
-        float n2 = fract(sin(dot(_worldPosition.xz, float2(3.9812, 17.719))) * 15731.7431);
-        float jitter = (n1 * 0.6 + n2 * 0.4) * 2.0 - 1.0;
-        float tint = 1.0 + u_grassIntensity * jitter * 0.03;
-        _surface.diffuse.rgb *= tint;
 
+        // Vertex colours already in _surface.diffuse. Add tiny grass variation.
+        float n1 = noise2(_worldPosition.xz * u_detailFreq);
+        float n2 = noise2(_worldPosition.xz * (u_detailFreq*1.87) + 17.0);
+        float jitter = (n1 * 0.65 + n2 * 0.35) * 2.0 - 1.0;
+        _surface.diffuse.rgb *= (1.0 + u_grassIntensity * jitter * 0.035);
+
+        // Fake normal perturbation from noise gradient (small, stable).
+        float e = 0.006;
+        float h = noise2(_worldPosition.xz * u_detailFreq);
+        float hx = noise2((_worldPosition.xz + float2(e,0.0)) * u_detailFreq) - h;
+        float hz = noise2((_worldPosition.xz + float2(0.0,e)) * u_detailFreq) - h;
+        float3 n = normalize(_surface.normal + float3(-hx * u_normalStrength, 0.0, -hz * u_normalStrength));
+        _surface.normal = n;
+
+        // Wet edge near rivers/sea
         float wet  = smoothstep(u_waterLevelN + 0.030, u_waterLevelN - 0.060, hN);
         float foam = smoothstep(u_waterLevelN + 0.004, u_waterLevelN - 0.010, hN)
                    - smoothstep(u_waterLevelN - 0.012, u_waterLevelN - 0.030, hN);
@@ -116,11 +156,14 @@ enum TerrainChunkNode {
         _surface.roughness   = mix(_surface.roughness, 0.18, wet);
         _surface.emission.rgb += foam * float3(0.08, 0.09, 0.10);
         """
+
         mat.shaderModifiers = [.surface: surfaceMod]
         mat.setValue(CGFloat(cfg.heightScale), forKey: "u_heightScale")
         mat.setValue(0.30 as CGFloat,          forKey: "u_waterLevelN")
-        mat.setValue(0.55 as CGFloat,          forKey: "u_waterBlue")
         mat.setValue(0.85 as CGFloat,          forKey: "u_grassIntensity")
+        mat.setValue(0.55 as CGFloat,          forKey: "u_waterBlue")
+        mat.setValue(0.35 as CGFloat,          forKey: "u_detailFreq")      // world-space frequency
+        mat.setValue(1.5  as CGFloat,          forKey: "u_normalStrength")  // subtle bump
 
         geom.materials = [mat]
         node.geometry = geom
