@@ -73,6 +73,7 @@ final class FirstPersonEngine: NSObject {
         view.antialiasingMode = .none
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
+        view.isPlaying = true                  // start the renderer immediately
         view.backgroundColor = .black
 
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
@@ -180,6 +181,7 @@ final class FirstPersonEngine: NSObject {
             onChunkRemoved: { [weak self] chunk in self?.obstaclesByChunk.removeValue(forKey: chunk) }
         )
 
+        // Immediate centre so there’s no void
         chunker.warmupCenter(at: yawNode.simdPosition)
 
         score = 0

@@ -11,6 +11,7 @@ import SwiftUI
 import SceneKit
 import QuartzCore
 
+/// UIViewRepresentable wrapper. Input comes from VirtualSticks.
 struct Scene3DView: UIViewRepresentable {
     let recipe: BiomeRecipe
     let isPaused: Bool
@@ -22,33 +23,17 @@ struct Scene3DView: UIViewRepresentable {
         view.antialiasingMode = .none
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
-
-        // Force CA compositing: any non-zero corner radius + clipping disables Direct-to-Display.
-        view.isOpaque = false
-        view.backgroundColor = UIColor(white: 0, alpha: 0.001)
-        view.layer.cornerRadius = 0.5
-        view.layer.masksToBounds = true
+        view.isPlaying = true                         // ensure the render loop runs
+        view.isOpaque = true                          // avoid compositing path quirks
+        view.backgroundColor = .black
 
         if let metal = view.layer as? CAMetalLayer {
-            metal.isOpaque = false
+            metal.isOpaque = true
             metal.wantsExtendedDynamicRangeContent = false
             metal.pixelFormat = .bgra8Unorm
             metal.maximumDrawableCount = 3
-            metal.presentsWithTransaction = true
+            // do NOT set presentsWithTransaction; it can yield a black view until a CATransaction commits
         }
-
-        // Transparent overlay keeps the compositing path bullet-proof.
-        let overlay = UIView()
-        overlay.isUserInteractionEnabled = false
-        overlay.backgroundColor = UIColor(white: 0, alpha: 0.001)
-        overlay.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(overlay)
-        NSLayoutConstraint.activate([
-            overlay.topAnchor.constraint(equalTo: view.topAnchor),
-            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-        ])
 
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
@@ -63,9 +48,12 @@ struct Scene3DView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: SCNView, context: Context) {}
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        context.coordinator.engine?.setPaused(isPaused)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
+
     final class Coordinator {
         var engine: FirstPersonEngine?
         var proxy: RendererProxy?
