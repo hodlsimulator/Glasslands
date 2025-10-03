@@ -24,7 +24,7 @@ enum CloudDome {
         m.emission.magnificationFilter = .linear
         m.emission.mipFilter = .linear
 
-        // Robust inside-out: flip geometry, keep normal culling.
+        // Inside-out dome
         m.isDoubleSided = true
         m.cullMode = .back
         m.writesToDepthBuffer = false
@@ -37,12 +37,11 @@ enum CloudDome {
         node.name = "CloudDome"
         node.renderingOrder = -10_000
         node.castsShadow = false
-
-        // Flip the sphere so its faces point inward.
-        node.scale = SCNVector3(-1, 1, 1)
+        node.scale = SCNVector3(-1, 1, 1) // flip faces inward
         return node
     }
 
+    /// Convenience: if coverage == 0, use a solid blue *colour* instead of an image.
     static func make(
         radius: CGFloat,
         coverage: Float,
@@ -53,16 +52,45 @@ enum CloudDome {
         sunAzimuthDeg: Float = 40,
         sunElevationDeg: Float = 65
     ) -> SCNNode {
-        let img = SkyGen.skyWithCloudsImage(
-            width: width,
-            height: height,
-            coverage: coverage,
-            thickness: thickness,
-            seed: seed,
-            sunAzimuthDeg: sunAzimuthDeg,
-            sunElevationDeg: sunElevationDeg
-        )
-        return make(radius: radius, skyImage: img)
+        let sphere = SCNSphere(radius: radius)
+        sphere.isGeodesic = true
+        sphere.segmentCount = 64
+
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.diffuse.contents = nil
+        m.isDoubleSided = true
+        m.cullMode = .back
+        m.writesToDepthBuffer = false
+        m.readsFromDepthBuffer = false
+        m.emission.minificationFilter = .linear
+        m.emission.magnificationFilter = .linear
+        m.emission.mipFilter = .linear
+
+        if coverage <= 0 {
+            // Solid, unmistakably blue sky (fastest path; no image sampling).
+            m.emission.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
+        } else {
+            let img = SkyGen.skyWithCloudsImage(
+                width: width,
+                height: height,
+                coverage: coverage,
+                thickness: thickness,
+                seed: seed,
+                sunAzimuthDeg: sunAzimuthDeg,
+                sunElevationDeg: sunElevationDeg
+            )
+            m.emission.contents = img
+        }
+
+        sphere.firstMaterial = m
+
+        let node = SCNNode(geometry: sphere)
+        node.name = "CloudDome"
+        node.renderingOrder = -10_000
+        node.castsShadow = false
+        node.scale = SCNVector3(-1, 1, 1)
+        return node
     }
 
     static func update(_ node: SCNNode, skyImage: UIImage) {
@@ -81,6 +109,12 @@ enum CloudDome {
         sunAzimuthDeg: Float = 40,
         sunElevationDeg: Float = 65
     ) {
+        if coverage <= 0 {
+            guard let sphere = node.geometry as? SCNSphere,
+                  let m = sphere.firstMaterial else { return }
+            m.emission.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
+            return
+        }
         let img = SkyGen.skyWithCloudsImage(
             width: width,
             height: height,

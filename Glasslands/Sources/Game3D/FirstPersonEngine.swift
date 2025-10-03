@@ -253,25 +253,15 @@ final class FirstPersonEngine: NSObject {
 
         sunDiscNode = nil
 
-        // Ensure the dome is the background.
-        scene.background.contents = SkyGen.skyWithCloudsImage(width: 1024, height: 512, coverage: 0.0)
+        // No background image; let the dome be the background.
+        scene.background.contents = nil
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Blue sky only (no clouds). Later, bump coverage to ~0.15–0.20.
-        let img = SkyGen.skyWithCloudsImage(
-            width: 2048,
-            height: 1024,
-            coverage: 0.0,          // keep 0.0 to disable clouds
-            thickness: 0.12,
-            seed: 424242,
-            sunAzimuthDeg: 40,
-            sunElevationDeg: 65
-        )
-
+        // Solid blue dome (clouds fully disabled)
         let dome = CloudDome.make(
             radius: CGFloat(cfg.skyDistance),
-            skyImage: img
+            coverage: 0.0
         )
         skyAnchor.addChildNode(dome)
     }
