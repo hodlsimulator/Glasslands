@@ -8,24 +8,24 @@
 import Foundation
 import simd
 
-struct CumulusPixels {
+struct CumulusPixels: Sendable {
     let width: Int
     let height: Int
     let rgba: [UInt8]
 }
 
-@inline(__always) private func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float { x.isFinite ? min(hi, max(lo, x)) : lo }
-@inline(__always) private func smooth01(_ x: Float) -> Float { let t = clampf(x, 0, 1); return t * t * (3 - 2 * t) }
-@inline(__always) private func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float { let d = e1 - e0; return d == 0 ? (x < e0 ? 0 : 1) : smooth01((x - e0) / d) }
-@inline(__always) private func mix3(_ a: simd_float3, _ b: simd_float3, _ t: Float) -> simd_float3 { a + (b - a) * t }
-@inline(__always) private func toByte(_ f: Float) -> UInt8 { UInt8(clampf(f, 0, 1) * 255.0 + 0.5) }
-@inline(__always) private func safeFloorInt(_ x: Float) -> Int { let y = floorf(x); return y >= Float(Int.max) ? Int.max : (y <= Float(Int.min) ? Int.min : Int(y)) }
-@inline(__always) private func safeIndex(_ i: Int, _ lo: Int, _ hi: Int) -> Int { (i < lo) ? lo : (i > hi ? hi : i) }
-@inline(__always) private func wrapIndex(_ i: Int, _ n: Int) -> Int { let m = i % n; return m < 0 ? m + n : m }
+enum CumulusCompute {
+    @inline(__always) private static func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float { x.isFinite ? min(hi, max(lo, x)) : lo }
+    @inline(__always) private static func smooth01(_ x: Float) -> Float { let t = clampf(x, 0, 1); return t * t * (3 - 2 * t) }
+    @inline(__always) private static func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float { let d = e1 - e0; return d == 0 ? (x < e0 ? 0 : 1) : smooth01((x - e0) / d) }
+    @inline(__always) private static func mix3(_ a: simd_float3, _ b: simd_float3, _ t: Float) -> simd_float3 { a + (b - a) * t }
+    @inline(__always) private static func toByte(_ f: Float) -> UInt8 { UInt8(clampf(f, 0, 1) * 255.0 + 0.5) }
+    @inline(__always) private static func safeFloorInt(_ x: Float) -> Int { let y = floorf(x); return y >= Float(Int.max) ? Int.max : (y <= Float(Int.min) ? Int.min : Int(y)) }
+    @inline(__always) private static func safeIndex(_ i: Int, _ lo: Int, _ hi: Int) -> Int { (i < lo) ? lo : (i > hi ? hi : i) }
+    @inline(__always) private static func wrapIndex(_ i: Int, _ n: Int) -> Int { let m = i % n; return m < 0 ? m + n : m }
 
-enum CumulusBuilder {
-    /// Pure compute: returns RGBA8 pixels; no UIKit/CoreGraphics; safe to run off the main actor.
-    static func buildPixels(
+    /// Pure compute returning RGBA8 pixels; safe to call from any thread (no UIKit/CoreGraphics).
+    static func renderPixels(
         width: Int = 1536,
         height: Int = 768,
         coverage: Float = 0.34,
@@ -37,7 +37,6 @@ enum CumulusBuilder {
         let W = max(256, width)
         let H = max(128, height)
 
-        // Internal density map grid used for cloud puffs.
         let FW = max(256, W / 2)
         let FH = max(128, H / 2)
 

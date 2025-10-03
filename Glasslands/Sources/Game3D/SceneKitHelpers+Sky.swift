@@ -22,7 +22,7 @@ enum SkyGen {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) -> UIImage {
-        let px = CumulusBuilder.buildPixels(
+        let px = CumulusCompute.renderPixels(
             width: width,
             height: height,
             coverage: coverage,
@@ -31,11 +31,6 @@ enum SkyGen {
             sunAzimuthDeg: sunAzimuthDeg,
             sunElevationDeg: sunElevationDeg
         )
-        return uiImage(from: px)
-    }
-
-    @MainActor
-    private static func uiImage(from px: CumulusPixels) -> UIImage {
         let bpr = px.width * 4
         let data = CFDataCreate(nil, px.rgba, px.rgba.count)!
         let provider = CGDataProvider(data: data)!
@@ -56,3 +51,4 @@ enum SkyGen {
         return UIImage(cgImage: cg)
     }
 }
+

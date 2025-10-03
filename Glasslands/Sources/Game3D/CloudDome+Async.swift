@@ -19,11 +19,11 @@ extension CloudDome {
         height: Int = 640,
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63,
-        completion: @MainActor @escaping (SCNNode) -> Void
+        completion: @Sendable @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            // Pure, thread-safe builder (no UIKit/SceneKit here).
-            let px = CumulusBuilder.buildPixels(
+            // Pure compute off the main actor.
+            let px = CumulusCompute.renderPixels(
                 width: width,
                 height: height,
                 coverage: coverage,
