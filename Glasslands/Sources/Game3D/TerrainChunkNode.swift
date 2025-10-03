@@ -71,7 +71,7 @@ enum TerrainChunkNode {
             componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size,
             dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
         )
-        // Intentionally NO vertex-color source here (prevents accidental black)
+        // No vertex-color source here (prevents accidental black)
         let uvSrc = SCNGeometrySource(
             data: uvData, semantic: .texcoord,
             vectorCount: data.uvs.count, usesFloatComponents: true,
@@ -92,8 +92,6 @@ enum TerrainChunkNode {
         mat.emission.contents = green
         mat.diffuse.contents  = green
         mat.emission.intensity = 1.0
-
-        // Safety: no backface surprises
         mat.isDoubleSided = true
         mat.cullMode = .back
         mat.readsFromDepthBuffer = true
@@ -102,6 +100,10 @@ enum TerrainChunkNode {
         geom.materials = [mat]
         node.geometry = geom
         node.castsShadow = true
+
+        // Tag chunks so the engine can raycast them for ground height.
+        node.categoryBitMask = 0x00000400  // terrain mask = 1024
+
         return node
     }
 }

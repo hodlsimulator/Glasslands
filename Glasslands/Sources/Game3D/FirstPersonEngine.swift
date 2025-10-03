@@ -101,17 +101,15 @@ final class FirstPersonEngine: NSObject {
     @MainActor
     func snapshot() -> UIImage? { scnView?.snapshot() }
 
-    @MainActor
-    func stepUpdateMain(at t: TimeInterval) {
+    @MainActor func stepUpdateMain(at t: TimeInterval) {
         let sp = Signposts.begin("Frame"); defer { Signposts.end("Frame", sp) }
-
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
         if pendingLookDeltaPts != .zero {
-            let yawRadPerPt   = cfg.swipeYawDegPerPt   * (.pi / 180)
+            let yawRadPerPt = cfg.swipeYawDegPerPt * (.pi / 180)
             let pitchRadPerPt = cfg.swipePitchDegPerPt * (.pi / 180)
-            yaw   -= pendingLookDeltaPts.x * yawRadPerPt
+            yaw -= pendingLookDeltaPts.x * yawRadPerPt
             pitch -= pendingLookDeltaPts.y * pitchRadPerPt
             pendingLookDeltaPts = .zero
             clampAngles()
@@ -119,11 +117,13 @@ final class FirstPersonEngine: NSObject {
 
         updateRig()
 
-        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
+        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
         let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
+
         var next = yawNode.simdPosition + attemptedDelta
 
+        // Ground height from actual rendered terrain (raycast). Falls back to noise if no hit.
         let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
         let targetY = groundY + cfg.eyeHeight
 
@@ -140,9 +140,60 @@ final class FirstPersonEngine: NSObject {
 
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
-
         chunker.updateVisible(center: next)
         collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
+
+        // Keep the safety ground underfoot so there’s never a black void.
+        if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
+            sg.simdPosition = simd_float3(next.x, groundY - 0.02, next.z)
+        }
+    }
+    @MainActor func stepUpdateMain(at t: TimeInterval) {
+        let sp = Signposts.begin("Frame"); defer { Signposts.end("Frame", sp) }
+        let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
+        lastTime = t
+
+        if pendingLookDeltaPts != .zero {
+            let yawRadPerPt = cfg.swipeYawDegPerPt * (.pi / 180)
+            let pitchRadPerPt = cfg.swipePitchDegPerPt * (.pi / 180)
+            yaw -= pendingLookDeltaPts.x * yawRadPerPt
+            pitch -= pendingLookDeltaPts.y * pitchRadPerPt
+            pendingLookDeltaPts = .zero
+            clampAngles()
+        }
+
+        updateRig()
+
+        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
+        let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
+
+        var next = yawNode.simdPosition + attemptedDelta
+
+        // Ground height from actual rendered terrain (raycast). Falls back to noise if no hit.
+        let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
+        let targetY = groundY + cfg.eyeHeight
+
+        if !targetY.isFinite {
+            next = spawn().simd
+        } else if next.y <= targetY {
+            next.y = targetY
+        } else {
+            let maxDrop = cfg.maxDescentRate * dt
+            next.y = max(targetY, next.y - maxDrop)
+        }
+
+        next = resolveObstacleCollisions(position: next)
+
+        yawNode.simdPosition = next
+        skyAnchor.simdPosition = next
+        chunker.updateVisible(center: next)
+        collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
+
+        // Keep the safety ground underfoot so there’s never a black void.
+        if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
+            sg.simdPosition = simd_float3(next.x, groundY - 0.02, next.z)
+        }
     }
 
     private func resetWorld() {
@@ -261,10 +312,8 @@ final class FirstPersonEngine: NSObject {
         }
     }
 
-    // Big emissive plane underfoot so the ground can’t look black even if terrain
-    // chunks mis-materialise. It sits just below the terrain height at the player.
     private func addSafetyGround(at worldPos: simd_float3) {
-        let size: Float = cfg.tileSize * Float(cfg.tilesX * 6)
+        let size: Float = cfg.tileSize * Float(cfg.tilesX * 10)  // big enough footprint
         let plane = SCNPlane(width: CGFloat(size), height: CGFloat(size))
 
         let mat = SCNMaterial()
@@ -276,11 +325,14 @@ final class FirstPersonEngine: NSObject {
         plane.firstMaterial = mat
 
         let node = SCNNode(geometry: plane)
-        node.eulerAngles = SCNVector3(-Float.pi/2, 0, 0)   // explicit Float.pi
+        node.eulerAngles = SCNVector3(-Float.pi/2, 0, 0)
         let y = TerrainMath.heightWorld(x: worldPos.x, z: worldPos.z, cfg: cfg, noise: noise) - 0.02
         node.simdPosition = simd_float3(worldPos.x, y, worldPos.z)
         node.renderingOrder = -500
         node.name = "SafetyGround"
+
+        // Exclude from ground raycasts so we snap to the real mesh when present.
+        node.categoryBitMask = 0
 
         scene.rootNode.childNodes.filter { $0.name == "SafetyGround" }.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(node)
@@ -339,13 +391,30 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func groundHeightFootprint(worldX x: Float, z: Float) -> Float {
+        if let y = groundHeightRaycast(worldX: x, z: z) { return y }
+
         let r: Float = 0.35
-        let h0 = TerrainMath.heightWorld(x: x, z: z, cfg: cfg, noise: noise)
-        let h1 = TerrainMath.heightWorld(x: x - r, z: z - r, cfg: cfg, noise: noise)
-        let h2 = TerrainMath.heightWorld(x: x + r, z: z - r, cfg: cfg, noise: noise)
-        let h3 = TerrainMath.heightWorld(x: x - r, z: z + r, cfg: cfg, noise: noise)
-        let h4 = TerrainMath.heightWorld(x: x + r, z: z + r, cfg: cfg, noise: noise)
+        let h0 = TerrainMath.heightWorld(x: x,       z: z,       cfg: cfg, noise: noise)
+        let h1 = TerrainMath.heightWorld(x: x - r,   z: z - r,   cfg: cfg, noise: noise)
+        let h2 = TerrainMath.heightWorld(x: x + r,   z: z - r,   cfg: cfg, noise: noise)
+        let h3 = TerrainMath.heightWorld(x: x - r,   z: z + r,   cfg: cfg, noise: noise)
+        let h4 = TerrainMath.heightWorld(x: x + r,   z: z + r,   cfg: cfg, noise: noise)
         return max(h0, h1, h2, h3, h4)
+    }
+    
+    private func groundHeightRaycast(worldX x: Float, z: Float) -> Float? {
+        // Cast straight down through the world; only consider terrain chunks.
+        let from = SCNVector3(x, 10_000, z)
+        let to   = SCNVector3(x, -10_000, z)
+
+        let hits = scene.rootNode.hitTestWithSegment(from: from, to: to, options: [
+            .categoryBitMask: 0x00000400,                  // terrain mask (must match TerrainChunkNode)
+            .backFaceCulling: false,
+            .firstFoundOnly: true,
+            .searchMode: SCNHitTestSearchMode.closest.rawValue
+        ])
+
+        return hits.first?.worldCoordinates.y
     }
 
     private func registerObstacles(for chunk: IVec2, from nodes: [SCNNode]) {
