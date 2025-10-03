@@ -5,14 +5,20 @@
 //  Created by . . on 10/3/25.
 //
 
+//
+//  SceneKitHelpers+Sky.swift
+//  Glasslands
+//
+
 import Foundation
 import CoreGraphics
+import UIKit
 import simd
 
 enum SkyGen {
     static var defaultCoverage: Float = 0.34
 
-    // Main-actor wrapper that produces a UIImage if you ever need it directly.
+    // UIImage wrapper for anyone who wants a UI image on the main actor.
     @MainActor
     static func skyWithCloudsImage(
         width: Int = 1536,
@@ -35,7 +41,8 @@ enum SkyGen {
         return UIImage(cgImage: cg)
     }
 
-    // Non-isolated generator that returns a CGImage so it can run off the main actor.
+    // Non-isolated worker: safe to call from a detached Task.
+    nonisolated(unsafe)
     static func skyWithCloudsCGImage(
         width: Int = 1536,
         height: Int = 768,
@@ -48,7 +55,7 @@ enum SkyGen {
         let W = max(256, width)
         let H = max(128, height)
 
-        // Modest internal resolution; sampled with bilinear filtering.
+        // Low-ish internal density map; sampled with bilinear filtering.
         let FW = max(256, W / 2)
         let FH = max(128, H / 2)
 
@@ -70,7 +77,7 @@ enum SkyGen {
         }
         var rng = LCG(seed ^ 0xA51C_2C2D)
 
-        // Cluster distribution: smaller/denser near horizon, larger up high, always some at zenith.
+        // Cluster distribution: smaller/denser near horizon, larger up high, with some at zenith.
         let clusterCount = max(36, (FW * FH) / 24000)
         for _ in 0..<clusterCount {
             let u = rng.unit()
@@ -134,7 +141,7 @@ enum SkyGen {
         var maxVal: Float = 0
         for v in field where v.isFinite && v > maxVal { maxVal = v }
         let invMax = maxVal > 0 ? (1.0 / maxVal) : 1.0
-        for i in 0..<(FW*FH) {
+        for i in 0..<(FW * FH) {
             var t = field[i] * invMax
             t = max(0, t)
             t = t * (0.70 + 0.30 * t)
@@ -179,7 +186,7 @@ enum SkyGen {
         func gradField(u: Float, v: Float) -> (Float, Float) {
             let du: Float = 1.0 / Float(FW)
             let dv: Float = 1.0 / Float(FH)
-            let p = sampleField(u: u, v: v)
+            let p  = sampleField(u: u, v: v)
             let px = sampleField(u: u + du, v: v)
             let py = sampleField(u: u, v: v + dv)
             return (px - p, py - p)
@@ -209,8 +216,11 @@ enum SkyGen {
                 shade = max(0.86, min(1.0, shade * (1.0 - ao)))
 
                 let edgeAmt = 0.10 * smoothstep(0.35, 0.95, 1.0 - mask) * (0.6 + 0.4 * ndotl)
-                let cloud = simd_clamp(simd_float3(repeating: shade) + simd_float3(0.95, 0.97, 1.00) * edgeAmt,
-                                       simd_float3(repeating: 0), simd_float3(repeating: 1))
+                let cloud = simd_clamp(
+                    simd_float3(repeating: shade) + simd_float3(0.95, 0.97, 1.00) * edgeAmt,
+                    simd_float3(repeating: 0),
+                    simd_float3(repeating: 1)
+                )
 
                 let rgb = sky * (1.0 - mask) + cloud * mask
                 let idx = (j * W + i) * 4

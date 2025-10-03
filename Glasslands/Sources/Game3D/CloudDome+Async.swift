@@ -26,8 +26,8 @@ extension CloudDome {
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            // Build pixels/CGImage off the main actor (no UIKit/SceneKit here).
-            let cg = SkyGen.skyWithCloudsCGImage(
+            // Pure, thread-safe builder (no UIKit/SceneKit here).
+            let cg = buildCumulusCGImage(
                 width: width,
                 height: height,
                 coverage: coverage,
@@ -37,7 +37,7 @@ extension CloudDome {
                 sunElevationDeg: sunElevationDeg
             )
 
-            // Hop to the main actor for UIImage + SceneKit node creation.
+            // Hop to main actor for UIImage + SceneKit.
             await MainActor.run {
                 let img = UIImage(cgImage: cg)
                 let node = CloudDome.make(radius: radius, skyImage: img)
