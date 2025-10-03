@@ -19,12 +19,12 @@ enum CloudDome {
         let m = SCNMaterial()
         m.lightingModel = .constant
 
-        // Emission-only keeps it cheap; ensure clean sampling.
+        // Emission-only keeps it cheap; set filters on the *property*.
         m.emission.contents = skyImage
         m.diffuse.contents = nil
-        m.minificationFilter = .linear
-        m.magnificationFilter = .linear
-        m.mipFilter = .linear
+        m.emission.minificationFilter = .linear
+        m.emission.magnificationFilter = .linear
+        m.emission.mipFilter = .linear
 
         // Render inside of the sphere
         m.isDoubleSided = false
