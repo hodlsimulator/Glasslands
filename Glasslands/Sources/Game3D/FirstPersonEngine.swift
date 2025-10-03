@@ -266,6 +266,7 @@ final class FirstPersonEngine: NSObject {
     private func addSafetyGround(at worldPos: simd_float3) {
         let size: Float = cfg.tileSize * Float(cfg.tilesX * 6)
         let plane = SCNPlane(width: CGFloat(size), height: CGFloat(size))
+
         let mat = SCNMaterial()
         mat.lightingModel = .constant
         let green = UIColor(red: 0.32, green: 0.62, blue: 0.34, alpha: 1.0)
@@ -275,13 +276,12 @@ final class FirstPersonEngine: NSObject {
         plane.firstMaterial = mat
 
         let node = SCNNode(geometry: plane)
-        node.eulerAngles = SCNVector3(-.pi/2, 0, 0)
+        node.eulerAngles = SCNVector3(-Float.pi/2, 0, 0)   // explicit Float.pi
         let y = TerrainMath.heightWorld(x: worldPos.x, z: worldPos.z, cfg: cfg, noise: noise) - 0.02
         node.simdPosition = simd_float3(worldPos.x, y, worldPos.z)
-        node.renderingOrder = -500  // behind real terrain
+        node.renderingOrder = -500
         node.name = "SafetyGround"
 
-        // Remove any prior safety plane then add a fresh one.
         scene.rootNode.childNodes.filter { $0.name == "SafetyGround" }.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(node)
     }
