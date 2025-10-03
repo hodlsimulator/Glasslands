@@ -22,31 +22,30 @@ enum CloudDome {
 
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor.black
+        mat.diffuse.contents = UIColor.white          // visible even if shader fails
         mat.emission.contents = UIColor.white
         mat.emission.intensity = 1.0
         mat.blendMode = .alpha
         mat.transparencyMode = .aOne
-        mat.isDoubleSided = false
-        mat.cullMode = .front               // render inside faces only
-        mat.writesToDepthBuffer = false     // never occludes world
+        mat.isDoubleSided = true                      // no surprises on GPU front/back
+        mat.cullMode = .back
+        mat.writesToDepthBuffer = false
         mat.readsFromDepthBuffer = false
 
-        // Shader draws the blue sky + clouds together (no cubemap needed).
         mat.shaderModifiers = [.surface: surface]
 
-        // Tunables
-        mat.setValue(0.45,                      forKey: "coverage")
-        mat.setValue(0.24,                      forKey: "thickness")
-        mat.setValue(1.8,                       forKey: "detailScale")
+        // Cloud + sky uniforms
+        mat.setValue(0.45, forKey: "coverage")
+        mat.setValue(0.24, forKey: "thickness")
+        mat.setValue(1.8,  forKey: "detailScale")
         mat.setValue(SCNVector3(0.04, 0.0, 0.02), forKey: "windDir")
-        mat.setValue(0.005,                     forKey: "windSpeed")
-        mat.setValue(1.0,                       forKey: "brightness")
-        mat.setValue(Float(seed & 0xFFFF),      forKey: "seed")
-        mat.setValue(SCNVector3(0,  1, 0),      forKey: "sunDir")
-        mat.setValue(SCNVector3(0, -1, 0),      forKey: "gravityDir")
+        mat.setValue(0.005, forKey: "windSpeed")
+        mat.setValue(1.0,   forKey: "brightness")
+        mat.setValue(Float(seed & 0xFFFF), forKey: "seed")
+        mat.setValue(SCNVector3(0,  1, 0), forKey: "sunDir")
+        mat.setValue(SCNVector3(0, -1, 0), forKey: "gravityDir")
 
-        // Sky colours (top → mid → bottom)
+        // Sky gradient (top → mid → bottom)
         mat.setValue(SCNVector3(0.50, 0.74, 0.92), forKey: "skyTop")
         mat.setValue(SCNVector3(0.70, 0.86, 0.95), forKey: "skyMid")
         mat.setValue(SCNVector3(0.86, 0.93, 0.98), forKey: "skyBot")
@@ -57,12 +56,12 @@ enum CloudDome {
         return (node, mat)
     }
 
-    // World-anchored cumulus with gravity bias; also renders the blue sky.
     private static let surface = """
     #pragma arguments
     float coverage, thickness, detailScale, windSpeed, brightness, seed;
     float3 windDir, sunDir, gravityDir;
     float3 skyTop, skyMid, skyBot;
+    #pragma transparent
     #pragma body
 
     float fractf(float x){ return x - floor(x); }
@@ -89,18 +88,20 @@ enum CloudDome {
         return v;
     }
 
-    // On a skydome, the outward normal is the WORLD direction from the centre.
-    float3 dirWorld = normalize(_surface.normal);
+    // World direction for this fragment: convert view-space normal → world-space
+    float3 nView   = normalize(_surface.normal);
+    float3 dirWorld = normalize((u_inverseViewTransform * float4(nView, 0.0)).xyz);
 
-    // Base sky gradient (replaces cubemap, so no seams).
     float3 up = normalize(-gravityDir);
     float y = clamp(dot(dirWorld, up), -1.0, 1.0);
+
+    // Sky gradient (replaces cubemap; no seams)
     float t1 = clamp((y + 0.20) * 0.80, 0.0, 1.0);
     float t0 = clamp((y + 1.00) * 0.50, 0.0, 1.0);
     float3 skyCol = mix(skyBot, skyMid, t1);
     skyCol = mix(skyCol, skyTop, t0);
 
-    // WORLD-space cloud field (vertical squashing for “puff” feel)
+    // WORLD-space cloud field with vertical squash
     float t = windSpeed * u_time;
     float3 wind = (length(windDir)>0.0)? normalize(windDir) : float3(1,0,0);
     float s = max(0.25, detailScale);
@@ -132,7 +133,9 @@ enum CloudDome {
 
     float3 col = mix(skyCol, cloudCol, a);
 
-    _surface.emission.rgb = col;
-    _surface.opacity = 1.0; // fully opaque dome (depth writes are off)
+    // Write both diffuse and emission so it shows even with odd lighting paths.
+    _surface.diffuse  = col;
+    _surface.emission = col;
+    _surface.opacity  = 1.0;
     """
 }

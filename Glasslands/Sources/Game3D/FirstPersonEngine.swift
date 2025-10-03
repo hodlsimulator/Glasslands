@@ -109,7 +109,7 @@ final class FirstPersonEngine: NSObject {
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
         view.isPlaying = true                  // start the renderer immediately
-        view.backgroundColor = .black
+        view.backgroundColor = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0)
 
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
         buildLighting()
