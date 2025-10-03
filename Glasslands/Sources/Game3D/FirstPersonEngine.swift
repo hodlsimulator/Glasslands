@@ -248,7 +248,7 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func buildSky() {
-        // Sun params kept together so lighting and texture stay in sync.
+        // Sun params kept together so lighting and visual disc stay in sync.
         let sunAz: Float = 40
         let sunEl: Float = 65
 
@@ -257,39 +257,16 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Let the dome paint the background.
-        scene.background.contents = nil
+        // Pure gradient background; no clouds baked into the texture.
+        scene.background.contents = SceneKitHelpers.skyboxImages(size: 512)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Build the skydome asynchronously, then prewarm the resource.
-        CloudDome.makeAsync(
-            radius: CGFloat(cfg.skyDistance),
-            coverage: 0.34,
-            edgeSoftness: 0.20,
-            seed: 20251003,
-            width: 1536,
-            height: 768,
-            sunAzimuthDeg: sunAz,
-            sunElevationDeg: sunEl
-        ) { [weak self] dome in
-            guard let self else { return }
-            // Replace any previous dome instance by name.
-            self.skyAnchor.childNodes
-                .filter { $0.name == "CloudDome" }
-                .forEach { $0.removeFromParentNode() }
-
-            self.skyAnchor.addChildNode(dome)
-            if let view = self.scnView {
-                view.prepare([dome]) { _ in }
-            }
-        }
-
-        // Build the billboard cumulus layer (runs off-main; hops to main only for SceneKit).
+        // Build the billboard cumulus layer only (no CloudDome).
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.08,
-            clusterCount: 140,
+            clusterCount: 220,      // tweak to taste
             seed: 20251003
         ) { [weak self] layer in
             guard let self else { return }
@@ -297,14 +274,14 @@ final class FirstPersonEngine: NSObject {
             self.skyAnchor.childNodes
                 .filter { $0.name == "CumulusBillboardLayer" }
                 .forEach { $0.removeFromParentNode() }
-
             self.skyAnchor.addChildNode(layer)
+
             if let view = self.scnView {
                 view.prepare([layer]) { _ in }
             }
         }
 
-        // Optional: visible sun disc (simple emissive sprite).
+        // Visible sun disc (simple emissive sprite) as an anchor in the sky.
         let discSize: CGFloat = 48
         let disc = SCNPlane(width: discSize, height: discSize)
         let mat = SCNMaterial()
@@ -322,7 +299,7 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.addChildNode(discNode)
         self.sunDiscNode = discNode
 
-        // Aim light + disc to match the texture.
+        // Aim the light + disc to match.
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
     }
 
