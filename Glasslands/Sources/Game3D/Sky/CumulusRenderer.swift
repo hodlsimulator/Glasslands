@@ -4,20 +4,11 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Pure compute (no UIKit/SceneKit). Safe to call from any thread/actor.
-//
-
-//
-//  CumulusRenderer.swift
-//  Glasslands
-//
-//  Pure compute – no UIKit/SceneKit. Safe to call from any actor.
-//
 //  Algorithm (high level)
-//  1) Build a low‑res “puff” density field in lat‑long space + a zenith cap.
+//  1) Build a low-res “puff” density field in lat-long space + a zenith cap.
 //  2) For each pixel of an equirectangular image: sample density, do soft
 //     thresholding, estimate a normal from the field gradient, and shade
-//     with one‑bounce ambient/forward‑scattering. Blend over a blue sky
+//     with one-bounce ambient/forward-scattering. Blend over a blue sky
 //     gradient with horizon brightening. Simple integer dithering to avoid
 //     banding.
 //
@@ -36,6 +27,9 @@ struct CumulusRenderer {
     // MARK: - Public entry point
 
     /// Returns an RGBA8 equirectangular sky (2:1).
+    /// Marked `@MainActor(unsafe)` to avoid the compiler trying to isolate it.
+    /// The body is pure compute and does not touch UI frameworks.
+    @MainActor(unsafe)
     static func computePixels(
         width: Int = 1536,
         height: Int = 768,
@@ -49,7 +43,7 @@ struct CumulusRenderer {
         let W = max(256, width)
         let H = max(128, height)
 
-        // Low‑res fields (up‑sampled for shading).
+        // Low-res fields (up-sampled for shading).
         let FW = max(256, W / 2)
         let FH = max(128, H / 2)
 
@@ -87,7 +81,7 @@ struct CumulusRenderer {
 
         @inline(__always)
         func skyBase(_ v: Float) -> simd_float3 {
-            // V=0 top, 0.5 horizon, 1 bottom (nadir). Blend three-way with a mild S‑curve.
+            // V=0 top, 0.5 horizon, 1 bottom (nadir). Blend three-way with a mild S-curve.
             let t = SkyMath.smooth01(v)
             let midBlend = SkyMath.smoothstep(0.18, 0.82, t)
             let topBlend = SkyMath.smoothstep(0.00, 0.42, t)
@@ -128,8 +122,8 @@ struct CumulusRenderer {
         let invW = 1.0 / Float(W)
         let invH = 1.0 / Float(H)
 
-        // UV step vector that roughly follows the sun on the lat‑long map.
-        // This is only used for a cheap one‑bounce “self‑shadow” probe.
+        // UV step vector that roughly follows the sun on the lat-long map.
+        // This is only used for a cheap one-bounce “self-shadow” probe.
         let sunUV = simd_float2(
             sunDir.x * 0.035,     // x ~ azimuth
             -sunDir.y * 0.045     // y ~ elevation (v increases downward)
@@ -155,7 +149,7 @@ struct CumulusRenderer {
                 let wrap  = (ndotl + 0.25) / (1.0 + 0.25) // wrap diffuse
                 var shade = 0.55 + 0.65 * wrap
 
-                // One-bounce self‑shadow (very cheap, 3 taps).
+                // One-bounce self-shadow (very cheap, 3 taps).
                 var occl: Float = 0
                 var wSum: Float = 0
                 var step: Float = 1
@@ -177,7 +171,8 @@ struct CumulusRenderer {
 
                 // Base cloud albedo and subtle warm tint near sun.
                 let sunWarm = simd_float3(1.0, 0.98, 0.96)
-                let cloudWhite = simd_mix(simd_float3(repeating: 1.0), sunWarm, min(1.0, facing * 0.6))
+                let tWarm = min(1.0, facing * 0.6)
+                let cloudWhite = SkyMath.mix3(simd_float3(repeating: 1.0), sunWarm, tWarm)
                 var cloudRGB = cloudWhite * shade
 
                 // Slightly darker bottoms.
