@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates a tiny atlas of soft “puff” sprites with subtle variants,
-//  premultiplied alpha, strong transparent apron, and baked top-light shading.
+//  Generates a small atlas of soft “puff” sprites with subtle variants,
+//  premultiplied alpha, WIDE transparent apron, and baked top-light shading.
 //
 
 import UIKit
@@ -21,7 +21,7 @@ enum CloudSpriteTexture {
         count: Int = 4
     ) async -> Atlas {
         let n = max(1, min(8, count))
-        let s = max(128, size)
+        let s = max(256, size)
 
         let images: [UIImage] = await MainActor.run {
             var out: [UIImage] = []; out.reserveCapacity(n)
@@ -40,18 +40,19 @@ enum CloudSpriteTexture {
                 let bytesPerRow = W * 4
                 var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-                // Tiny deterministic LCG.
+                // Deterministic LCG.
                 var state = (seed == 0) ? 1 : seed
                 @inline(__always) func urand() -> Float {
                     state = 1664525 &* state &+ 1013904223
                     return Float(state >> 8) * (1.0 / 16_777_216.0)
                 }
 
+                // Irregular silhouette from overlapping soft discs.
                 struct Disc { var cx: Float; var cy: Float; var r: Float; var a: Float }
                 var discs: [Disc] = []
-                let discCount = 7 + Int(floorf(urand() * 3.0)) // 7..9
+                let discCount = 8 + Int(floorf(urand() * 3.0)) // 8..10
                 for _ in 0..<discCount {
-                    let rr   = 0.26 + 0.32 * urand()
+                    let rr   = 0.26 + 0.34 * urand()
                     let th   = 2 * Float.pi * urand()
                     let dist = 0.04 + 0.34 * urand()
                     let cx   = 0.5 + cosf(th) * dist
@@ -60,11 +61,11 @@ enum CloudSpriteTexture {
                     discs.append(Disc(cx: cx, cy: cy, r: rr, a: a))
                 }
 
-                // Wide transparent apron at edges to kill any rectangles when magnified.
-                let apronInner: Float = 0.10  // 10% fully transparent border start
-                let apronSoft:  Float = 0.18  // fade to fully opaque towards centre
+                // Very wide transparent apron so edges never show even when huge.
+                let apronInner: Float = 0.16  // start fully transparent 16% from edge
+                let apronSoft:  Float = 0.30  // become fully active by 30%
 
-                // Build density + apply apron.
+                // Density field with airy edges and apron.
                 var density = [Float](repeating: 0, count: W * H)
                 for y in 0..<H {
                     for x in 0..<W {
@@ -77,20 +78,18 @@ enum CloudSpriteTexture {
                             let dy = (fy - disc.cy) / disc.r
                             let q  = dx*dx + dy*dy
                             if q > 4 { continue }
-                            // Smooth profile with airy edge.
                             let k: Float = 1.6
                             d += disc.a * (1.0 / ((1.0 + k*q) * (1.0 + k*q)))
                         }
 
                         d = max(0, min(1, d))
-                        // Aperture mask from the edges towards centre.
-                        let edge = min(min(fx, 1 - fx), min(fy, 1 - fy)) // 0 at edge .. 0.5 at centre
-                        let m = smoothstep(apronInner, apronSoft, edge)   // 0 near edge → 1 near centre
+                        let edge = min(min(fx, 1 - fx), min(fy, 1 - fy))
+                        let m = smoothstep(apronInner, apronSoft, edge)
                         density[y * W + x] = d * (0.72 + 0.28 * d) * m
                     }
                 }
 
-                // Baked top-light grey shading, no colour tint.
+                // Baked top-light (grayscale).
                 let lightDir = simd_normalize(simd_float2(0.0, -1.0))
                 for y in 0..<H {
                     for x in 0..<W {
