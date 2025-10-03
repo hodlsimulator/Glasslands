@@ -253,49 +253,48 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // We will recreate the disc
+        // Recreate the disc
         sunDiscNode = nil
 
-        // Let the dome paint the background; no fallback colour that can wash things out.
+        // Let the dome paint the background; no SceneKit background image.
         scene.background.contents = nil
 
-        // No IBL while we stabilise clouds; cheapest path.
+        // Keep IBL off for now (cheapest).
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // --- Dome with LIGHTER sky + cumulus clouds (single static texture, cached) ---
-        // Coverage ~0.18–0.22 is a gentle, non-overcast look.
+        // Dome with the restored “soft blob” clouds and whiter blue gradient.
         let dome = CloudDome.make(
             radius: CGFloat(cfg.skyDistance),
-            coverage: 0.20,              // <— clouds ON, tuned “normal” day
-            thickness: 0.12,
+            coverage: 0.30,          // try 0.26…0.34
+            thickness: 0.44,         // softer edges
             seed: 424242,
-            width: 1024,                  // 1024x512 = fast to generate, looks clean
-            height: 512,
+            width: 1536,
+            height: 768,
             sunAzimuthDeg: 40,
             sunElevationDeg: 65
         )
         skyAnchor.addChildNode(dome)
 
-        // --- Visible sun disc (2D billboard plane with soft edges) ---
-        let discSize: CGFloat = 48        // ~0.6° apparent at your sky radius
+        // Visible sun disc (billboard). Keep your existing SunSprite helper.
+        let discSize: CGFloat = 48
         let disc = SCNPlane(width: discSize, height: discSize)
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = SunSprite.image // cached UIImage
+        mat.diffuse.contents = SunSprite.image
         mat.emission.contents = nil
         mat.isDoubleSided = true
-        mat.writesToDepthBuffer = false   // never writes depth; can be occluded by terrain
+        mat.writesToDepthBuffer = false
         disc.firstMaterial = mat
 
         let discNode = SCNNode(geometry: disc)
         discNode.name = "SunDisc"
-        discNode.renderingOrder = -9_900  // draws after dome (-10_000) but before foreground
-        discNode.constraints = [SCNBillboardConstraint()] // always faces camera
+        discNode.renderingOrder = -9_900
+        discNode.constraints = [SCNBillboardConstraint()]
         skyAnchor.addChildNode(discNode)
         self.sunDiscNode = discNode
 
-        // Position the light and disc together along the sun direction.
+        // Align the light + disc to the same sun direction.
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
@@ -465,11 +464,12 @@ final class FirstPersonEngine: NSObject {
         static let image: UIImage = {
             let N = 256
             let size = CGSize(width: N, height: N)
-            let scale = UIScreen.main.scale
-            UIGraphicsBeginImageContextWithOptions(size, false, scale)
+
+            // Use 0 so UIKit picks the correct scale from the current context/screen.
+            UIGraphicsBeginImageContextWithOptions(size, false, 0)
+
             guard let ctx = UIGraphicsGetCurrentContext() else { return UIImage() }
 
-            // Radial soft disc: white core → warm rim → transparent edge
             let colors = [
                 UIColor(white: 1.0, alpha: 1.00).cgColor,
                 UIColor(red: 1.0, green: 0.98, blue: 0.90, alpha: 0.75).cgColor,
