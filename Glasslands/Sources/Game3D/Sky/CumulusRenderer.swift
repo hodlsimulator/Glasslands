@@ -27,9 +27,7 @@ struct CumulusRenderer {
     // MARK: - Public entry point
 
     /// Returns an RGBA8 equirectangular sky (2:1).
-    /// Marked `@MainActor(unsafe)` to avoid the compiler trying to isolate it.
-    /// The body is pure compute and does not touch UI frameworks.
-    @MainActor(unsafe)
+    /// Pure compute; callable from any actor/thread.
     static func computePixels(
         width: Int = 1536,
         height: Int = 768,
@@ -171,7 +169,7 @@ struct CumulusRenderer {
 
                 // Base cloud albedo and subtle warm tint near sun.
                 let sunWarm = simd_float3(1.0, 0.98, 0.96)
-                let tWarm = min(1.0, facing * 0.6)
+                let tWarm: Float = min(1.0, facing * 0.6)
                 let cloudWhite = SkyMath.mix3(simd_float3(repeating: 1.0), sunWarm, tWarm)
                 var cloudRGB = cloudWhite * shade
 
