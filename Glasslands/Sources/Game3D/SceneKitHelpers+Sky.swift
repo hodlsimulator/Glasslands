@@ -4,11 +4,6 @@
 //
 //  Created by . . on 10/3/25.
 //
-
-//
-//  SceneKitHelpers+Sky.swift
-//  Glasslands
-//
 //  Convenience for producing a UIImage sky on the main actor.
 //
 
@@ -29,7 +24,7 @@ enum SkyGen {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) -> UIImage {
-        let px = CumulusRenderer.computePixels(
+        let px = computeCumulusPixels(
             width: width,
             height: height,
             coverage: coverage,
