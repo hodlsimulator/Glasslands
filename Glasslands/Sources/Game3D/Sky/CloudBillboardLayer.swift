@@ -21,21 +21,21 @@ enum CloudBillboardLayer {
         radius: CGFloat,
         minAltitudeY: Float = 0.08,
         clusterCount: Int = 120,
-        seed: UInt32 = 0x0C10D5,               // valid hex literal (was 0xC10UD5)
+        seed: UInt32 = 0x0C10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            // 1) Compute positions off‑main.
+            // 1) Compute positions off-main.
             let specs = buildSpecs(
                 clusterCount: clusterCount,
                 minAltitudeY: minAltitudeY,
                 seed: seed
             )
 
-            // 2) Create textures on main (function already hops to main internally).
+            // 2) Create textures (runs on main internally).
             let atlas = await CloudSpriteTexture.makeAtlas(size: 256, seed: seed, count: 4)
 
-            // 3) Hop to main to assemble SceneKit nodes.
+            // 3) Assemble SceneKit nodes on the main actor.
             let node = await MainActor.run {
                 assembleLayer(radius: radius, specs: specs, atlas: atlas)
             }
@@ -43,12 +43,12 @@ enum CloudBillboardLayer {
         }
     }
 
-    // MARK: - Spec generation (off‑main)
+    // MARK: - Spec generation (off-main)
 
     struct PuffSpec {
-        var dir: simd_float3    // unit vector on hemisphere
-        var size: Float         // metres
-        var roll: Float         // around view axis for variety
+        var dir: simd_float3
+        var size: Float
+        var roll: Float
         var atlasIndex: Int
     }
 
@@ -67,20 +67,25 @@ enum CloudBillboardLayer {
             s = 1664525 &* s &+ 1013904223
             return Float(s >> 8) * (1.0 / 16_777_216.0)
         }
+        @inline(__always) func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float {
+            min(hi, max(lo, x))
+        }
+
         var s = seed == 0 ? 1 : seed
 
         let minSepDeg: Float = 8.0
-        let minCos = cosf(minSepDeg * .pi / 180.0)
+        let minCos: Float = cosf(minSepDeg * Float.pi / Float(180.0))
 
         var centres: [simd_float3] = []
         var attempts = 0
         while centres.count < clusterCount && attempts < clusterCount * 200 {
             attempts += 1
-            // Sample direction over upper hemisphere with altitude bias towards mid‑sky.
-            let u1 = rand(&s), t = rand(&s)
-            let az = (u1 - 0.5 as Float) * (.pi * 2.0 as Float)
-            let el = (0.08 as Float + 0.84 as Float * t) * (.pi / 2.0 as Float)
-            let d = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
+            // Upper hemisphere with altitude bias towards mid-sky.
+            let u1 = rand(&s)
+            let t  = rand(&s)
+            let az = (u1 - Float(0.5)) * (Float(2.0) * Float.pi)
+            let el = (Float(0.08) + Float(0.84) * t) * (Float.pi / Float(2.0))
+            let d  = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
             if d.y < minAltitudeY { continue }
 
             var ok = true
@@ -96,37 +101,45 @@ enum CloudBillboardLayer {
 
         for centre in centres {
             var puffs: [PuffSpec] = []
-            let baseSize: Float = 110.0 + 45.0 * rand(&s) // tuned for ~2km dome
+            let baseSize: Float = 110.0 + 45.0 * rand(&s) // tuned for ~2 km dome
             let count = 4 + Int(rand(&s) * 5.0)          // 4–8 puffs per cluster
 
             // Tangent basis (east,north) on the sphere.
             let up = centre
-            var east = simd_cross(simd_float3(0,1,0), up)
-            if simd_length_squared(east) < 1e-6 { east = simd_float3(1,0,0) }
+            var east = simd_cross(simd_float3(0, 1, 0), up)
+            if simd_length_squared(east) < 1e-6 { east = simd_float3(1, 0, 0) }
             east = simd_normalize(east)
             let north = simd_normalize(simd_cross(up, east))
 
             for _ in 0..<count {
-                let r = (0.12 as Float + 0.42 as Float * rand(&s)) * baseSize
-                let a = rand(&s) * (.pi * 2.0 as Float)
-                let off = cosf(a) * (r * 0.012 as Float) * east + sinf(a) * (r * 0.010 as Float) * north
+                let r = (Float(0.12) + Float(0.42) * rand(&s)) * baseSize
+                let a = rand(&s) * (Float.pi * Float(2.0))
+                let off = east  * (cosf(a) * r * Float(0.012))
+                         + north * (sinf(a) * r * Float(0.010))
                 let d = simd_normalize(up + off)
 
-                // Perspective tweak: clusters lower in the sky get smaller puffs.
-                let zen = CloudMath.clampf((up.y - 0.08 as Float) / (0.92 as Float - 0.08 as Float), 0, 1)
-                let scale = 0.65 as Float + 0.60 as Float * (1.0 as Float - zen)
+                // Perspective tweak: smaller towards the horizon.
+                let zen = clampf((up.y - Float(0.08)) / (Float(0.92) - Float(0.08)), 0, 1)
+                let scale = Float(0.65) + Float(0.60) * (1.0 - zen)
 
-                let size = (0.65 as Float + 0.55 as Float * rand(&s)) * baseSize * scale
-                let roll = rand(&s) * (.pi * 2.0 as Float)
-                let atlasIndex = Int(rand(&s) * 3.999 as Float)
+                let size = (Float(0.65) + Float(0.55) * rand(&s)) * baseSize * scale
+                let roll = rand(&s) * (Float.pi * Float(2.0))
+                let atlasIndex = Int(rand(&s) * Float(4.0))
 
                 puffs.append(PuffSpec(dir: d, size: size, roll: roll, atlasIndex: atlasIndex))
             }
 
-            // A tiny cap on top.
-            if rand(&s) < 0.65 {
-                let dTop = simd_normalize(up + north * 0.003 as Float)
-                puffs.append(PuffSpec(dir: dTop, size: baseSize * 0.55 as Float, roll: rand(&s)*(.pi*2.0 as Float), atlasIndex: Int(rand(&s)*3.999 as Float)))
+            // Optional small cap on top.
+            if rand(&s) < Float(0.65) {
+                let dTop = simd_normalize(up + north * Float(0.003))
+                puffs.append(
+                    PuffSpec(
+                        dir: dTop,
+                        size: baseSize * Float(0.55),
+                        roll: rand(&s) * (Float.pi * Float(2.0)),
+                        atlasIndex: Int(rand(&s) * Float(4.0))
+                    )
+                )
             }
 
             clusters.append(Cluster(centre: centre, puffs: puffs))
@@ -175,7 +188,6 @@ enum CloudBillboardLayer {
 
                 let mat = materials[p.atlasIndex % materials.count].copy() as! SCNMaterial
                 mat.transparency = 0.985
-                // Gentle roll so baked highlight isn’t identical everywhere.
                 let rot = SCNMatrix4MakeRotation(p.roll, 0, 0, 1)
                 mat.diffuse.contentsTransform = rot
                 mat.emission.contentsTransform = rot
@@ -188,9 +200,4 @@ enum CloudBillboardLayer {
 
         return root
     }
-}
-
-// Non-actor math helper to avoid isolation warnings in buildSpecs.
-fileprivate enum CloudMath {
-    @inline(__always) static func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float { min(hi, max(lo, x)) }
 }
