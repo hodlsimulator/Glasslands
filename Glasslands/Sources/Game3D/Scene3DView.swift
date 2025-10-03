@@ -20,9 +20,9 @@ struct Scene3DView: UIViewRepresentable {
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
 
-        // Crank visual quality safely
-        view.antialiasingMode = .multisampling4X
-        view.isJitteringEnabled = true
+        // Performance-first defaults (especially when the sky fills the screen)
+        view.antialiasingMode = .none
+        view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
         view.isPlaying = true
@@ -31,7 +31,7 @@ struct Scene3DView: UIViewRepresentable {
 
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
-            metal.wantsExtendedDynamicRangeContent = true
+            metal.wantsExtendedDynamicRangeContent = false
             metal.pixelFormat = .bgra8Unorm
             metal.maximumDrawableCount = 3
         }
@@ -45,7 +45,6 @@ struct Scene3DView: UIViewRepresentable {
         view.delegate = proxy
 
         engine.setPaused(isPaused)
-
         DispatchQueue.main.async { onReady(engine) }
         return view
     }
