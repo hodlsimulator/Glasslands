@@ -250,25 +250,29 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
+
         sunDiscNode = nil
 
+        // Ensure the dome is the background.
         scene.background.contents = nil
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Force gradient-only for now (guarantees blue sky; zero clouds).
-        // Later, bump coverage to 0.10–0.20 for clouds.
+        // Blue sky only (no clouds). Later, bump coverage to ~0.15–0.20.
         let img = SkyGen.skyWithCloudsImage(
             width: 2048,
             height: 1024,
-            coverage: 0.0,            // <<< keep 0.0 to verify the pipeline
+            coverage: 0.0,          // keep 0.0 to disable clouds
             thickness: 0.12,
             seed: 424242,
             sunAzimuthDeg: 40,
             sunElevationDeg: 65
         )
 
-        let dome = CloudDome.make(radius: CGFloat(cfg.skyDistance), skyImage: img)
+        let dome = CloudDome.make(
+            radius: CGFloat(cfg.skyDistance),
+            skyImage: img
+        )
         skyAnchor.addChildNode(dome)
     }
 
