@@ -22,8 +22,8 @@ extension CloudDome {
         completion: @Sendable @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            // Pure compute off the main actor.
-            let px = CumulusCompute.renderPixels(
+            // Pure compute off the main actor (free function, no actor isolation).
+            let px = renderCumulusPixels(
                 width: width,
                 height: height,
                 coverage: coverage,
