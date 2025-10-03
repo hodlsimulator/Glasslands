@@ -4,7 +4,7 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  Updated: stream chunks off-thread + prewarm before attach.
+//  Updated: full engine restored; perf-safe view config; sky generator tuned for real gaps.
 //
 
 import SceneKit
@@ -51,8 +51,8 @@ final class FirstPersonEngine: NSObject {
     private let skyAnchor = SCNNode()
     private var sunDiscNode: SCNNode?
     private var sunLightNode: SCNNode?
-
     private var lastTime: TimeInterval = 0
+
     private var beacons = Set<SCNNode>()
     private var score = 0
     private var onScore: (Int) -> Void
@@ -100,12 +100,21 @@ final class FirstPersonEngine: NSObject {
         scnView = view
         view.scene = scene
 
+        // Perf-first: no MSAA, no jitter; continuous render
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
         view.isPlaying = true
+        view.isOpaque = true
         view.backgroundColor = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0)
+
+        if let metal = view.layer as? CAMetalLayer {
+            metal.isOpaque = true
+            metal.wantsExtendedDynamicRangeContent = false
+            metal.pixelFormat = .bgra8Unorm
+            metal.maximumDrawableCount = 3
+        }
 
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
 
@@ -147,8 +156,8 @@ final class FirstPersonEngine: NSObject {
 
         updateRig()
 
-        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
+        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
         let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
         var next = yawNode.simdPosition + attemptedDelta
 
@@ -250,15 +259,17 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
+        // Draw our own dome; no SceneKit background/env to keep fill-rate down
         scene.background.contents = nil
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
+        // Quantile-threshold sky (real gaps), emission-only for perf
         let img = SkyGen.skyWithCloudsImage(
             width: 2048,
             height: 1024,
-            coverage: 0.26,
-            thickness: 0.30,
+            coverage: 0.20,
+            thickness: 0.10,
             seed: 424242,
             sunAzimuthDeg: 40,
             sunElevationDeg: 65
@@ -267,6 +278,7 @@ final class FirstPersonEngine: NSObject {
         let dome = CloudDome.make(radius: CGFloat(cfg.skyDistance), skyImage: img)
         skyAnchor.addChildNode(dome)
 
+        // Subtle sun disc
         if sunLightNode != nil {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
