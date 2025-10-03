@@ -4,10 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates a tiny atlas of soft “puff” sprites with subtle shape variants.
-//  Premultiplied‑alpha is used to avoid dark fringes when blending.
-//
-//  UIKit/CoreGraphics work stays on the main actor to avoid concurrency issues.
+//  Generates a tiny atlas of soft “puff” sprites with subtle shape variants,
+//  using premultiplied alpha and baked lighting.
 //
 
 import UIKit
@@ -15,10 +13,7 @@ import CoreGraphics
 import simd
 
 enum CloudSpriteTexture {
-    struct Atlas {
-        let images: [UIImage]
-        let size: Int
-    }
+    struct Atlas { let images: [UIImage]; let size: Int }
 
     /// Builds a small set of reusable, premultiplied‑alpha puff textures.
     /// Kept on MainActor so UIImage/CoreGraphics never run off‑thread.
@@ -52,15 +47,20 @@ enum CloudSpriteTexture {
                 var discs: [Disc] = []
                 let discCount = 5 + Int(floorf(urand() * 3.0)) // 5..7
                 for _ in 0..<discCount {
-                    let rr   = 0.28 + 0.28 * urand()
+                    let rr   = 0.26 + 0.30 * urand()
                     let th   = 2 * Float.pi * urand()
                     let dist = 0.05 + 0.36 * urand()
                     let cx   = 0.5 + cosf(th) * dist
                     let cy   = 0.5 + sinf(th) * dist
-                    let a    = 0.45 + 0.55 * urand()
+                    let a    = 0.50 + 0.50 * urand()
                     discs.append(Disc(cx: cx, cy: cy, r: rr, a: a))
                 }
 
+                // Soft directional light from high‑left.
+                let lightDir = simd_normalize(simd_float2(-0.55, -0.85)) // screen space
+
+                // First pass: density.
+                var density = [Float](repeating: 0, count: W * H)
                 for y in 0..<H {
                     for x in 0..<W {
                         let fx = (Float(x) + 0.5) / Float(W)
@@ -77,16 +77,41 @@ enum CloudSpriteTexture {
                             d += disc.a * (1.0 / ((1.0 + k*q) * (1.0 + k*q)))
                         }
 
+                        // Gentle S‑curve + vignette to avoid square edges.
                         d = max(0, min(1, d))
-                        d = d * (0.70 + 0.30 * d) // gentle S‑curve
+                        let u = min(min(fx, 1 - fx), min(fy, 1 - fy)) // distance to edge
+                        let vignette = min(1.0, max(0.0, (u - 0.02) * 26.0))
+                        density[y * W + x] = d * (0.70 + 0.30 * d) * vignette
+                    }
+                }
 
-                        let a = UInt8(d * 255.0 + 0.5)
-                        let i = (y * W + x) * 4
-                        // Premultiplied white.
-                        buf[i + 0] = a
-                        buf[i + 1] = a
-                        buf[i + 2] = a
-                        buf[i + 3] = a
+                // Second pass: cheap normals for baked lighting.
+                for y in 0..<H {
+                    for x in 0..<W {
+                        let i = y * W + x
+                        let d = density[i]
+
+                        // Central differences in texture space.
+                        let xm = density[i + (x > 0     ? -1 : 0)]
+                        let xp = density[i + (x < W - 1 ?  1 : 0)]
+                        let ym = density[i + (y > 0     ? -W : 0)]
+                        let yp = density[i + (y < H - 1 ?  W : 0)]
+                        let nx = (xm - xp)
+                        let ny = (ym - yp)
+
+                        // Lighting term: brighter on top‑left.
+                        let ndotl = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 1.2 + 0.6))
+                        let shaded = d * ndotl
+
+                        let a = UInt8(max(0.0, min(1.0, d)) * 255.0 + 0.5)
+                        let c = UInt8(max(0.0, min(1.0, shaded)) * 255.0 + 0.5)
+
+                        // Premultiplied white with baked shade.
+                        let o = i * 4
+                        buf[o + 0] = c
+                        buf[o + 1] = c
+                        buf[o + 2] = c
+                        buf[o + 3] = a
                     }
                 }
 

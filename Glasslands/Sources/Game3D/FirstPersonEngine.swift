@@ -257,16 +257,16 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Pure gradient background; no clouds baked into the texture.
-        scene.background.contents = SceneKitHelpers.skyboxImages(size: 512)
+        // Seam‑free background: a single equirect gradient image (not a cube map).
+        scene.background.contents = SceneKitHelpers.equirectSkyGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Build the billboard cumulus layer only (no CloudDome).
+        // Billboard cumulus layer only (no CloudDome).
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
-            minAltitudeY: 0.08,
-            clusterCount: 220,      // tweak to taste
+            minAltitudeY: 0.18,
+            clusterCount: 140,
             seed: 20251003
         ) { [weak self] layer in
             guard let self else { return }
@@ -286,9 +286,10 @@ final class FirstPersonEngine: NSObject {
         let disc = SCNPlane(width: discSize, height: discSize)
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
-        mat.emission.contents = UIColor(white: 1.0, alpha: 1.0)
-        mat.isDoubleSided = true
+        mat.emission.contents = SunSprite.image
+        mat.diffuse.contents  = UIColor.clear
+        mat.isDoubleSided = false
+        mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = false
         disc.firstMaterial = mat
 

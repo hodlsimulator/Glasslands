@@ -17,34 +17,32 @@ enum CloudBillboardLayer {
     // One small puff within a cluster.
     private struct PuffSpec {
         var dir: simd_float3      // unit direction from origin to sphere
-        var size: Float           // world-space size of the quad (metres)
+        var size: Float           // world‑space quad size (metres)
         var roll: Float           // random sprite roll in radians
         var atlasIndex: Int       // which variant texture to use
     }
 
-    // A mini-group of puffs.
-    private struct Cluster {
-        var puffs: [PuffSpec]
-    }
+    // A mini‑group of puffs.
+    private struct Cluster { var puffs: [PuffSpec] }
 
     /// Asynchronously builds the billboard layer.
-    /// Heavy maths runs inside the detached task via a local helper (not main-actor-isolated).
+    /// Heavy maths runs inside the detached task via a local helper (not main‑actor‑isolated),
+    /// exactly like the CloudDome async wrapper pattern.
     nonisolated static func makeAsync(
         radius: CGFloat,
-        minAltitudeY: Float = 0.08,
-        clusterCount: Int = 160,
+        minAltitudeY: Float = 0.18,     // keep well above horizon
+        clusterCount: Int = 140,        // fewer nodes = less lag
         seed: UInt32 = 0x0C10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
 
-            // Local, pure-math builder — avoids global-actor inference (mirrors 67df024 pattern).
+            // Local, pure‑math builder — avoids global‑actor inference.
             func buildSpecs(
                 clusterCount: Int,
                 minAltitudeY: Float,
                 seed: UInt32
             ) -> [Cluster] {
-
                 @inline(__always)
                 func rand(_ s: inout UInt32) -> Float {
                     s = 1664525 &* s &+ 1013904223
@@ -53,34 +51,31 @@ enum CloudBillboardLayer {
 
                 var s = seed == 0 ? 1 : seed
 
-                // Poisson-like distribution of cluster centres across the upper hemisphere.
-                let minSepDeg: Float = 8.0
+                // Poisson‑like distribution of cluster centres across the upper hemisphere.
+                let minSepDeg: Float = 9.0
                 let minCos:    Float = cosf(minSepDeg * .pi / 180.0)
                 var centres: [simd_float3] = []
                 var attempts = 0
 
-                while centres.count < clusterCount && attempts < clusterCount * 200 {
+                while centres.count < clusterCount && attempts < clusterCount * 220 {
                     attempts += 1
 
-                    // Bias elevation towards mid-sky; keep above horizon.
+                    // Bias elevation towards mid‑sky; clamp above horizon.
                     let u1 = rand(&s)
                     let t  = rand(&s)
                     let az = (u1 - 0.5) * (2.0 * .pi)
-                    let el = (0.10 + 0.80 * t) * (.pi / 2.0)
+                    let el = (0.12 + 0.78 * t) * (.pi / 2.0)
 
-                    let d = simd_float3(
-                        sinf(az) * cosf(el),
-                        sinf(el),
-                        cosf(az) * cosf(el)
-                    )
-                    if d.y < minAltitudeY { continue }
+                    var d = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
+                    if d.y < minAltitudeY { d.y = minAltitudeY }
+                    d = simd_normalize(d)
 
                     var ok = true
                     for c in centres where simd_dot(c, d) > minCos { ok = false; break }
-                    if ok { centres.append(simd_normalize(d)) }
+                    if ok { centres.append(d) }
                 }
 
-                // For each centre, create 4–8 puffs scattered in the tangent plane.
+                // Create 3–6 puffs scattered in the tangent plane.
                 var clusters: [Cluster] = []
                 clusters.reserveCapacity(centres.count)
 
@@ -92,24 +87,30 @@ enum CloudBillboardLayer {
                     let north = simd_normalize(simd_cross(up, east))
 
                     var puffs: [PuffSpec] = []
-                    let baseSize: Float = 110.0 + 45.0 * rand(&s)  // tuned for ~4.6 km skydome
+                    let baseSize: Float = 120.0 + 35.0 * rand(&s)   // tuned for ~4.6 km sky distance
+                    let count = 3 + Int(rand(&s) * 4.0)             // 3..6
 
-                    let count = 4 + Int(rand(&s) * 5.0)            // 4–8 puffs per cluster
                     for _ in 0..<count {
-                        // Slightly squashed Gaussian in tangent plane for a cumulus clump shape.
-                        let r     = (0.15 + 0.45 * rand(&s))
+                        // Slightly squashed Gaussian in tangent plane => cumulus clump.
+                        let r     = (0.12 + 0.42 * rand(&s))
                         let theta = 2 * .pi * rand(&s)
                         let x     = r * cosf(theta)
-                        let y     = (0.5 * r) * sinf(theta)
+                        let y     = (0.55 * r) * sinf(theta)
 
-                        // Gentle vertical lift so clusters aren’t perfectly flat.
-                        let lift  = 0.06 * (rand(&s) - 0.5)
+                        // Always lift a touch so no puff dips below its centre.
+                        let lift  = 0.04 * rand(&s)   // >= 0
 
-                        let dir   = simd_normalize(up * (1.0 + lift) + east * x + north * y)
-                        let scale = 0.75 + 0.75 * rand(&s)
-                        let size  = baseSize * scale
+                        var dir   = simd_normalize(up * (1.0 + lift) + east * x + north * y)
+                        if dir.y < minAltitudeY {      // guard the horizon
+                            dir.y = minAltitudeY
+                            dir   = simd_normalize(dir)
+                        }
+
+                        // Smaller near the horizon to avoid intersecting the ground.
+                        let horizonScale = 0.65 + 0.70 * max(0, dir.y)  // y∈[0..1] -> [0.65..1.35]
+                        let size  = baseSize * (0.75 + 0.75 * rand(&s)) * horizonScale
                         let roll  = 2 * .pi * rand(&s)
-                        let aidx  = Int(rand(&s) * 1024)  // modulo against atlas count later
+                        let aidx  = Int(rand(&s) * 1024) // reduced with modulo later
 
                         puffs.append(PuffSpec(dir: dir, size: size, roll: roll, atlasIndex: aidx))
                     }
@@ -129,7 +130,7 @@ enum CloudBillboardLayer {
         }
     }
 
-    // Main-thread SceneKit
+    // Main‑thread SceneKit
     @MainActor
     private static func buildNode(
         radius: CGFloat,
@@ -140,20 +141,21 @@ enum CloudBillboardLayer {
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990  // drawn before world geometry
 
-        // Reusable premultiplied-alpha materials.
+        // Reusable premultiplied‑alpha materials.
         var materials: [SCNMaterial] = []
         materials.reserveCapacity(atlas.images.count)
 
         for img in atlas.images {
             let m = SCNMaterial()
             m.lightingModel = .constant
-            m.diffuse.contents  = img
-            m.emission.contents = img
-            m.isDoubleSided = true
+            m.emission.contents = img          // self‑lit puff
+            m.diffuse.contents  = UIColor.clear
+            m.isDoubleSided = false            // billboard always faces the camera
+            // Crucial: read depth so ground can occlude near the horizon.
+            m.readsFromDepthBuffer = true
             m.writesToDepthBuffer = false
-            m.readsFromDepthBuffer = false
             m.blendMode = .alpha
-            m.transparencyMode = .aOne   // premultiplied
+            m.transparencyMode = .aOne         // premultiplied
             m.diffuse.mipFilter  = .linear
             m.emission.mipFilter = .linear
             materials.append(m)
@@ -172,19 +174,18 @@ enum CloudBillboardLayer {
                     z: p.dir.z * Float(radius)
                 )
 
-                // Always face the camera.
+                // Face the camera but keep a vertical “up” (looks more like clouds,
+                // costs less than full XYZ billboarding).
                 let bb = SCNBillboardConstraint()
-                bb.freeAxes = .all
+                bb.freeAxes = .Y
                 n.constraints = [bb]
 
                 let mat = (materials[(p.atlasIndex % max(1, materials.count))]).copy() as! SCNMaterial
-                // Random sprite roll.
+                // Random sprite roll to break repetition.
                 let rot = SCNMatrix4MakeRotation(p.roll, 0, 0, 1)
-                mat.diffuse.contentsTransform  = rot
                 mat.emission.contentsTransform = rot
-                mat.transparency = 0.985
-
                 plane.firstMaterial = mat
+
                 n.castsShadow = false
                 clusterNode.addChildNode(n)
             }
