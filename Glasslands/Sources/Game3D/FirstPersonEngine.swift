@@ -285,6 +285,25 @@ final class FirstPersonEngine: NSObject {
             }
         }
 
+        // Build the billboard cumulus layer (runs off-main; hops to main only for SceneKit).
+        CloudBillboardLayer.makeAsync(
+            radius: CGFloat(cfg.skyDistance),
+            minAltitudeY: 0.08,
+            clusterCount: 140,
+            seed: 20251003
+        ) { [weak self] layer in
+            guard let self else { return }
+            // Replace any previous billboard layer by name.
+            self.skyAnchor.childNodes
+                .filter { $0.name == "CumulusBillboardLayer" }
+                .forEach { $0.removeFromParentNode() }
+
+            self.skyAnchor.addChildNode(layer)
+            if let view = self.scnView {
+                view.prepare([layer]) { _ in }
+            }
+        }
+
         // Optional: visible sun disc (simple emissive sprite).
         let discSize: CGFloat = 48
         let disc = SCNPlane(width: discSize, height: discSize)
