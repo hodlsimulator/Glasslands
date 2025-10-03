@@ -248,7 +248,7 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func buildSky() {
-        // Sun params kept together so lighting and visual disc stay in sync.
+        // Keep lighting + visual disc in sync.
         let sunAz: Float = 40
         let sunEl: Float = 65
 
@@ -257,17 +257,17 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Seam‑free background: a single equirect gradient image (not a cube map).
+        // Seam‑free background: a single equirect gradient (not a cube map).
         scene.background.contents = SceneKitHelpers.equirectSkyGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Billboard cumulus layer only (no CloudDome).
+        // Billboard cumulus layer (the fluffy clouds).
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.18,
             clusterCount: 140,
-            seed: 20251003
+            seed: 0x2025_1003
         ) { [weak self] layer in
             guard let self else { return }
             // Replace any previous billboard layer by name.
@@ -276,6 +276,7 @@ final class FirstPersonEngine: NSObject {
                 .forEach { $0.removeFromParentNode() }
             self.skyAnchor.addChildNode(layer)
 
+            // Pre‑warm the layer for first frame smoothness.
             if let view = self.scnView {
                 view.prepare([layer]) { _ in }
             }
@@ -286,8 +287,8 @@ final class FirstPersonEngine: NSObject {
         let disc = SCNPlane(width: discSize, height: discSize)
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.emission.contents = SunSprite.image
-        mat.diffuse.contents  = UIColor.clear
+        mat.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: Int(discSize))
+        mat.diffuse.contents = UIColor.clear
         mat.isDoubleSided = false
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = false
@@ -300,7 +301,7 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.addChildNode(discNode)
         self.sunDiscNode = discNode
 
-        // Aim the light + disc to match.
+        // Aim the directional light and disc to match.
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
     }
 
