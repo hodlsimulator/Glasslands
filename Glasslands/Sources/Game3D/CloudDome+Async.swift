@@ -4,7 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Off-main sky generation; only UIKit/SceneKit work runs on the main actor.
+//  Off-main orchestration; compute is routed through MainActor the same way
+//  we did in c77df77 to avoid the compiler’s global-actor inference traps.
 //
 
 @preconcurrency import SceneKit
@@ -13,7 +14,7 @@ import CoreGraphics
 
 extension CloudDome {
 
-    /// Callback style (compute off‑main; hop to main only to build UIKit/SceneKit objects).
+    // Callback style.
     nonisolated static func makeAsync(
         radius: CGFloat,
         coverage: Float = 0.34,
@@ -26,15 +27,18 @@ extension CloudDome {
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            let px = computeCumulusPixels(
-                width: width,
-                height: height,
-                coverage: coverage,
-                edgeSoftness: edgeSoftness,
-                seed: seed,
-                sunAzimuthDeg: sunAzimuthDeg,
-                sunElevationDeg: sunElevationDeg
-            )
+            // Important: run compute via MainActor (c77df77 workaround).
+            let px = await MainActor.run {
+                computeCumulusPixels(
+                    width: width,
+                    height: height,
+                    coverage: coverage,
+                    edgeSoftness: edgeSoftness,
+                    seed: seed,
+                    sunAzimuthDeg: sunAzimuthDeg,
+                    sunElevationDeg: sunElevationDeg
+                )
+            }
             await MainActor.run {
                 let node = buildDomeNode(radius: radius, pixels: px)
                 completion(node)
@@ -42,7 +46,7 @@ extension CloudDome {
         }
     }
 
-    /// Async/await variant.
+    // Async/await variant.
     nonisolated static func makeNode(
         radius: CGFloat,
         coverage: Float = 0.34,
@@ -53,7 +57,8 @@ extension CloudDome {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) async -> SCNNode {
-        let px = await Task.detached(priority: .userInitiated) {
+        // Same c77df77 pattern.
+        let px = await MainActor.run {
             computeCumulusPixels(
                 width: width,
                 height: height,
@@ -63,7 +68,7 @@ extension CloudDome {
                 sunAzimuthDeg: sunAzimuthDeg,
                 sunElevationDeg: sunElevationDeg
             )
-        }.value
+        }
         return await MainActor.run { buildDomeNode(radius: radius, pixels: px) }
     }
 
