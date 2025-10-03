@@ -26,8 +26,7 @@ enum CloudBillboardLayer {
     private struct Cluster { var puffs: [PuffSpec] }
 
     /// Asynchronously builds the billboard layer.
-    /// Heavy maths runs inside the detached task via a local helper (not main‑actor‑isolated),
-    /// exactly like the CloudDome async wrapper pattern.
+    /// Maths runs inside the detached task via a local helper (not main‑actor‑isolated).
     nonisolated static func makeAsync(
         radius: CGFloat,
         minAltitudeY: Float = 0.18,     // keep well above horizon
@@ -97,16 +96,16 @@ enum CloudBillboardLayer {
                         let x     = r * cosf(theta)
                         let y     = (0.55 * r) * sinf(theta)
 
-                        // Always lift a touch so no puff dips below its centre.
-                        let lift  = 0.04 * rand(&s)   // >= 0
+                        // Lift so no puff dips below its centre.
+                        let lift  = 0.04 * rand(&s)
 
                         var dir   = simd_normalize(up * (1.0 + lift) + east * x + north * y)
-                        if dir.y < minAltitudeY {      // guard the horizon
+                        if dir.y < minAltitudeY {
                             dir.y = minAltitudeY
                             dir   = simd_normalize(dir)
                         }
 
-                        // Smaller near the horizon to avoid intersecting the ground.
+                        // Smaller near the horizon to avoid ground intersections.
                         let horizonScale = 0.65 + 0.70 * max(0, dir.y)  // y∈[0..1] -> [0.65..1.35]
                         let size  = baseSize * (0.75 + 0.75 * rand(&s)) * horizonScale
                         let roll  = 2 * .pi * rand(&s)
@@ -141,17 +140,17 @@ enum CloudBillboardLayer {
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990  // drawn before world geometry
 
-        // Reusable premultiplied‑alpha materials.
+        // Premultiplied‑alpha materials: use BOTH diffuse + emission.
         var materials: [SCNMaterial] = []
         materials.reserveCapacity(atlas.images.count)
 
         for img in atlas.images {
             let m = SCNMaterial()
             m.lightingModel = .constant
-            m.emission.contents = img          // self‑lit puff
-            m.diffuse.contents  = UIColor.clear
-            m.isDoubleSided = false            // billboard always faces the camera
-            // Crucial: read depth so ground can occlude near the horizon.
+            m.diffuse.contents  = img
+            m.emission.contents = img
+            m.isDoubleSided = true
+            // Depth: read so terrain can occlude, don’t write (keeps alpha sorting simple).
             m.readsFromDepthBuffer = true
             m.writesToDepthBuffer = false
             m.blendMode = .alpha
@@ -174,8 +173,7 @@ enum CloudBillboardLayer {
                     z: p.dir.z * Float(radius)
                 )
 
-                // Face the camera but keep a vertical “up” (looks more like clouds,
-                // costs less than full XYZ billboarding).
+                // Face the camera but keep a vertical “up”.
                 let bb = SCNBillboardConstraint()
                 bb.freeAxes = .Y
                 n.constraints = [bb]
@@ -183,9 +181,10 @@ enum CloudBillboardLayer {
                 let mat = (materials[(p.atlasIndex % max(1, materials.count))]).copy() as! SCNMaterial
                 // Random sprite roll to break repetition.
                 let rot = SCNMatrix4MakeRotation(p.roll, 0, 0, 1)
+                mat.diffuse.contentsTransform  = rot
                 mat.emission.contentsTransform = rot
-                plane.firstMaterial = mat
 
+                plane.firstMaterial = mat
                 n.castsShadow = false
                 clusterNode.addChildNode(n)
             }
