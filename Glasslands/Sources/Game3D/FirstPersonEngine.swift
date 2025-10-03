@@ -254,7 +254,7 @@ final class FirstPersonEngine: NSObject {
         sunDiscNode = nil
 
         // Ensure the dome is the background.
-        scene.background.contents = nil
+        scene.background.contents = SkyGen.skyWithCloudsImage(width: 1024, height: 512, coverage: 0.0)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
