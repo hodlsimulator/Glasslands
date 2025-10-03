@@ -12,9 +12,15 @@
 //  Glasslands
 //
 
+//
+//  CloudDome.swift
+//  Glasslands
+//
+
 import SceneKit
 import UIKit
 
+@MainActor
 enum CloudDome {
     static func make(radius: CGFloat, skyImage: UIImage) -> SCNNode {
         let sphere = SCNSphere(radius: radius)
@@ -25,12 +31,14 @@ enum CloudDome {
         m.lightingModel = .constant
         m.diffuse.contents = skyImage
         m.emission.contents = skyImage
+
         m.diffuse.wrapS = .repeat
         m.diffuse.wrapT = .clamp
         m.emission.wrapS = .repeat
         m.emission.wrapT = .clamp
         m.diffuse.mipFilter = .linear
         m.emission.mipFilter = .linear
+
         m.isDoubleSided = false
         m.cullMode = .front
         m.writesToDepthBuffer = false
@@ -42,38 +50,10 @@ enum CloudDome {
         m.emission.contentsTransform = flip
 
         sphere.firstMaterial = m
+
         let node = SCNNode(geometry: sphere)
         node.name = "CloudDome"
         node.renderingOrder = -10_000
         return node
-    }
-
-    /// Async builder to avoid any chance of main-thread hitching.
-    static func makeAsync(
-        radius: CGFloat,
-        coverage: Float = SkyGen.defaultCoverage,
-        edgeSoftness: Float = 0.20,
-        seed: UInt32 = 424242,
-        width: Int = 1280,
-        height: Int = 640,
-        sunAzimuthDeg: Float = 35,
-        sunElevationDeg: Float = 63,
-        completion: @escaping (SCNNode) -> Void
-    ) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let img = SkyGen.skyWithCloudsImage(
-                width: width,
-                height: height,
-                coverage: coverage,
-                edgeSoftness: edgeSoftness,
-                seed: seed,
-                sunAzimuthDeg: sunAzimuthDeg,
-                sunElevationDeg: sunElevationDeg
-            )
-            let node = make(radius: radius, skyImage: img)
-            DispatchQueue.main.async {
-                completion(node)
-            }
-        }
     }
 }
