@@ -14,7 +14,7 @@ import CoreGraphics
 import simd
 
 enum SkyGen {
-    static var defaultCoverage: Float = 0.0  // 0 → blue sky only (clouds disabled by default)
+    static var defaultCoverage: Float = 0.0
 
     private struct Key: Hashable {
         let w: Int, h: Int
@@ -28,8 +28,8 @@ enum SkyGen {
     static func skyWithCloudsImage(
         width: Int = 2048,
         height: Int = 1024,
-        coverage: Float = defaultCoverage,   // 0.0–0.35 typical; 0 disables clouds
-        thickness: Float = 0.12,             // edge softness 0.05–0.25
+        coverage: Float = defaultCoverage,
+        thickness: Float = 0.12,
         seed: UInt32 = 424242,
         sunAzimuthDeg: Float = 40,
         sunElevationDeg: Float = 65
@@ -37,7 +37,6 @@ enum SkyGen {
         let W = max(64, width)
         let H = max(32, height)
 
-        // Quantise to stabilise cache keys.
         let key = Key(
             w: W, h: H,
             covQ: Int((coverage * 1000).rounded()),
@@ -48,7 +47,6 @@ enum SkyGen {
         )
         if let img = cache[key] { return img }
 
-        // Pixel buffer (RGBA8).
         var pixels = [UInt8](repeating: 0, count: W * H * 4)
 
         @inline(__always) func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float {
@@ -68,7 +66,6 @@ enum SkyGen {
             UInt8(clampf(f, 0, 1) * 255.0 + 0.5)
         }
 
-        // Sun vector (used subtly to lift the gradient).
         let deg: Float = .pi / 180
         let sunAz = sunAzimuthDeg * deg
         let sunEl = sunElevationDeg * deg
@@ -78,19 +75,16 @@ enum SkyGen {
             cosf(sunAz) * cosf(sunEl)
         ))
 
-        // Sky gradient colours (natural midday).
         let SKY_TOP = simd_float3(0.22, 0.50, 0.92)
         let SKY_MID = simd_float3(0.50, 0.73, 0.95)
         let SKY_BOT = simd_float3(0.86, 0.93, 0.98)
 
-        // ----- Gradient-only path (fast, no clouds) -----
         if coverage <= 0 {
             for j in 0..<H {
                 let v = Float(j) / Float(H - 1)
                 let tLow = smooth01(v * 1.1)
                 let midBlend = smoothstep(0.35, 0.75, v)
                 let base = mix3(mix3(SKY_BOT, SKY_MID, tLow), SKY_TOP, midBlend)
-
                 for i in 0..<W {
                     let idx = (j * W + i) * 4
                     pixels[idx + 0] = toByte(base.x)
@@ -104,7 +98,6 @@ enum SkyGen {
             return img
         }
 
-        // ----- Cloud field (deterministic, cheap FBM) -----
         @inline(__always) func h2(_ x: Int32, _ y: Int32, _ s: UInt32) -> UInt32 {
             var h = UInt32(bitPattern: x) &* 374761393
             h &+= UInt32(bitPattern: y) &* 668265263
@@ -149,22 +142,15 @@ enum SkyGen {
             let v = Float(j) / Float(H)
             for i in 0..<W {
                 let u = Float(i) / Float(W)
-
-                // Equirectangular to direction; bias more coverage near horizon.
                 let theta = (u - 0.5) * 2 * .pi
                 let phi = v * .pi
                 var dir = simd_float3(sinf(theta) * sinf(phi), cosf(phi), cosf(theta) * sinf(phi))
-
-                // Mild warp to split large masses.
                 let w = fbm(u * 2.0, v * 1.2, seed &+ 991)
                 dir.x += (w - 0.5) * 0.08
                 dir.z += (w - 0.5) * 0.05
-
-                // Project to 2D plane for sampling.
                 let px = (atan2f(dir.x, dir.z) / (2 * .pi) + 0.5) * scale * 3.0
                 let py = (acosf(clampf(dir.y, -1, 1)) / .pi) * scale * 1.6
-
-                var f = fbm(px, py, seed)
+                let f = fbm(px, py, seed)        // <- let (not var)
                 fmin = min(fmin, f)
                 fmax = max(fmax, f)
                 field[j * W + i] = f
@@ -176,19 +162,15 @@ enum SkyGen {
         let tEdge = clampf(thickness, 0.01, 0.5)
         let baseCut: Float = clampf(0.60 - coverage * 0.35, 0.25, 0.65)
 
-        // Zenith cap to prevent white-out near the very top.
         let capStart: Float = 0.975
         let capEnd:   Float = 0.992
 
         for j in 0..<H {
             let v = Float(j) / Float(H - 1)
-
-            // Vertical gradient.
             let tLow = smooth01(v * 1.1)
             let midBlend = smoothstep(0.35, 0.75, v)
             var base = mix3(mix3(SKY_BOT, SKY_MID, tLow), SKY_TOP, midBlend)
 
-            // Gentle brightening toward the sun.
             do {
                 let phi = v * .pi
                 let dir = simd_float3(0, cosf(phi), 0)
@@ -200,20 +182,15 @@ enum SkyGen {
             for i in 0..<W {
                 let idx = (j * W + i) * 4
                 var c = base
-
                 var f = field[j * W + i]
 
-                // Stronger attenuation near zenith to kill the “white cap”.
                 if v <= capEnd {
                     let cap = 1 - smoothstep(capStart, capEnd, v)
-                    // Avoid simd's generic mix overloads; just lerp to zero explicitly:
                     f *= (1 - cap)
                 }
 
-                // Soft thresholding for cloud alpha.
                 let a = smoothstep(baseCut, baseCut + tEdge, f) * coverage * 1.6
                 if a > 0 {
-                    // Slightly darker cloud cores.
                     let cloud = simd_float3(1, 1, 1) * (0.92 - (f * 0.15))
                     c = mix3(c, cloud, clampf(a, 0, 1))
                 }

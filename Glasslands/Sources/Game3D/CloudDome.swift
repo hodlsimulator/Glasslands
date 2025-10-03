@@ -23,11 +23,13 @@ enum CloudDome {
         m.emission.minificationFilter = .linear
         m.emission.magnificationFilter = .linear
         m.emission.mipFilter = .linear
-        m.isDoubleSided = false
-        m.cullMode = .front              // inside-out
+
+        // Robust inside-out: flip geometry, keep normal culling.
+        m.isDoubleSided = true
+        m.cullMode = .back
         m.writesToDepthBuffer = false
         m.readsFromDepthBuffer = false
-        m.emission.contentsTransform = SCNMatrix4MakeScale(-1, 1, 1) // mirror equirect
+        m.emission.contentsTransform = SCNMatrix4Identity
 
         sphere.firstMaterial = m
 
@@ -35,13 +37,15 @@ enum CloudDome {
         node.name = "CloudDome"
         node.renderingOrder = -10_000
         node.castsShadow = false
+
+        // Flip the sphere so its faces point inward.
+        node.scale = SCNVector3(-1, 1, 1)
         return node
     }
 
-    // Convenience overload: generate sky image in-place with a coverage knob.
     static func make(
         radius: CGFloat,
-        coverage: Float,                  // 0 → blue sky only
+        coverage: Float,
         thickness: Float = 0.12,
         seed: UInt32 = 424242,
         width: Int = 2048,
