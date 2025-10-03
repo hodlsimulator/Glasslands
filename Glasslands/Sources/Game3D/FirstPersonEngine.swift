@@ -248,7 +248,11 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func buildSky() {
-        // Reset container
+        // Sun params kept together so lighting and texture stay in sync.
+        let sunAz: Float = 40
+        let sunEl: Float = 65
+
+        // Reset container.
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
@@ -266,10 +270,15 @@ final class FirstPersonEngine: NSObject {
             seed: 20251003,
             width: 1536,
             height: 768,
-            sunAzimuthDeg: 40,
-            sunElevationDeg: 65
+            sunAzimuthDeg: sunAz,
+            sunElevationDeg: sunEl
         ) { [weak self] dome in
             guard let self else { return }
+            // Replace any previous dome instance by name.
+            self.skyAnchor.childNodes
+                .filter { $0.name == "CloudDome" }
+                .forEach { $0.removeFromParentNode() }
+
             self.skyAnchor.addChildNode(dome)
             if let view = self.scnView {
                 view.prepare([dome]) { _ in }
@@ -294,8 +303,8 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.addChildNode(discNode)
         self.sunDiscNode = discNode
 
-        // Aim light + disc.
-        applySunDirection(azimuthDeg: 40, elevationDeg: 65)
+        // Aim light + disc to match the texture.
+        applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {

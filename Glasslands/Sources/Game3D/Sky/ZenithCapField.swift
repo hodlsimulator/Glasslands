@@ -5,13 +5,19 @@
 //  Created by . . on 10/3/25.
 //
 
+//
+//  ZenithCapField.swift
+//  Glasslands
+//
+//  Orthographic overhead layer to avoid circular voids at the zenith.
+//  Sampled in a unit disc; returns 0 outside it.
+//
+
 import Foundation
 import simd
 
-/// Planar overhead cloud layer sampled in orthographic projection.
-/// Used to avoid circular artefacts/voids right at the zenith.
 struct ZenithCapField {
-    let size: Int     // square
+    let size: Int            // square
     private let data: [Float]
 
     static func build(size: Int, seed: UInt32, densityScale: Float) -> ZenithCapField {
@@ -20,49 +26,42 @@ struct ZenithCapField {
 
         struct LCG {
             private var s: UInt32
-            init(seed: UInt32) { self.s = seed &* 1664525 &+ 1013904223 }
+            init(seed: UInt32) { self.s = (seed == 0 ? 1 : seed) }
             mutating func next() -> UInt32 { s = 1664525 &* s &+ 1013904223; return s }
             mutating func unit() -> Float { Float(next() >> 8) * (1.0 / 16_777_216.0) }
             mutating func range(_ lo: Float, _ hi: Float) -> Float { lo + (hi - lo) * unit() }
         }
-        var rng = LCG(seed: (seed ^ 0xA51C_2C2D) &+ 1)
+        var rng = LCG(seed: (seed ^ 0xC0FF_EE01) &+ 1)
 
-        // Puff count roughly tracks area and a provided density scale.
+        // Puff count roughly tracks area and requested density.
         let baseCount = max(400, (cW * cW) / 14)
         let puffCount = Int(Float(baseCount) * max(0.2, densityScale))
 
         for _ in 0..<puffCount {
-            // Uniform disc distribution for centre‑weighted placement.
-            let r = sqrt(rng.unit())                    // 0..1, area‑uniform
-            let ang = rng.unit() * 2 * .pi
-            let px = r * cosf(ang)
-            let pz = r * sinf(ang)
+            // Unit disc distribution for centres to keep edges softer.
+            var rx: Float = 0, rz: Float = 0
+            while true {
+                rx = rng.range(-1, 1)
+                rz = rng.range(-1, 1)
+                if rx * rx + rz * rz <= 1 { break }
+            }
+            let cx = (rx * 0.5 + 0.5) * Float(cW)
+            let cy = (rz * 0.5 + 0.5) * Float(cW)
 
-            // Tangential orientation with small jitter to avoid radial rings.
-            let baseAngle = ang + .pi * 0.5 + (rng.unit() - 0.5) * (.pi * 0.15)
-            let ca = cosf(baseAngle), sa = sinf(baseAngle)
+            let sx = max(1.5, (0.9 + rng.unit() * 1.7) * Float(cW) * 0.02)
+            let sy = max(1.5, (0.9 + rng.unit() * 1.7) * Float(cW) * 0.02)
+            let theta = rng.range(-.pi, .pi)
+            let ca = cosf(theta), sa = sinf(theta)
 
-            // Anisotropy (wider tangentially near centre).
-            let rBase = 0.090 * (0.75 + 0.50 * rng.unit())
-            let rx: Float = rBase * (1.60 + 0.60 * (1 - r))
-            let ry: Float = rBase * (0.60 + 0.30 * r)
-
-            // Convert to grid.
-            let cx = (px * 0.5 + 0.5) * Float(cW)
-            let cy = (pz * 0.5 + 0.5) * Float(cW)
-
-            let sx = max(1.0, rx * Float(cW))
-            let sy = max(1.0, ry * Float(cW))
-            let radX = min(Float(cW), 3.0 * sx)
-            let radY = min(Float(cW), 3.0 * sy)
-
-            let x0 = SkyMath.safeIndex(SkyMath.safeFloorInt(cx - radX), 0, cW - 1)
-            let x1 = SkyMath.safeIndex(SkyMath.safeFloorInt(cx + radX), 0, cW - 1)
-            let y0 = SkyMath.safeIndex(SkyMath.safeFloorInt(cy - radY), 0, cW - 1)
-            let y1 = SkyMath.safeIndex(SkyMath.safeFloorInt(cy + radY), 0, cW - 1)
+            let x0 = max(0, SkyMath.safeFloorInt(cx - 3 * sx))
+            let x1 = min(cW - 1, SkyMath.safeFloorInt(cx + 3 * sx))
+            let y0 = max(0, SkyMath.safeFloorInt(cy - 3 * sy))
+            let y1 = min(cW - 1, SkyMath.safeFloorInt(cy + 3 * sy))
             if x0 > x1 || y0 > y1 { continue }
 
             // Slight centre boost so zenith never looks empty.
+            let dx = rx, dz = rz
+            let r = sqrtf(dx*dx + dz*dz)
             let amp = 0.85 + 0.35 * (1 - r) + 0.20 * rng.unit()
 
             for gy in y0...y1 {
@@ -79,10 +78,10 @@ struct ZenithCapField {
             }
         }
 
-        // Normalise and soften.
         var fmax: Float = 0
         for v in field where v.isFinite && v > fmax { fmax = v }
         let invMax: Float = fmax > 0 ? (1.0 / fmax) : 1.0
+
         for i in 0..<(cW * cW) {
             var t = field[i] * invMax
             t = max(0, t)
@@ -93,24 +92,28 @@ struct ZenithCapField {
         return ZenithCapField(size: cW, data: field)
     }
 
-    /// Bilinear sample in [0,1]x[0,1]. Returns 0 outside the unit disc.
+    /// Bilinear sample; returns 0 outside the unit disc.
     @inline(__always)
     func sample(u: Float, v: Float) -> Float {
         let uc = SkyMath.clampf(u, 0, 0.99999)
         let vc = SkyMath.clampf(v, 0, 0.99999)
 
-        // Discard outside the unit disc to avoid square corners.
         let dx = uc * 2 - 1
         let dz = vc * 2 - 1
         if dx * dx + dz * dz > 1.0 { return 0 }
 
         let xf = uc * Float(size) - 0.5
         let yf = vc * Float(size) - 0.5
-        let xi = SkyMath.safeFloorInt(xf), yi = SkyMath.safeFloorInt(yf)
-        let tx = xf - floorf(xf), ty = yf - floorf(yf)
 
-        let x0 = SkyMath.safeIndex(xi, 0, size - 1), x1 = SkyMath.safeIndex(xi + 1, 0, size - 1)
-        let y0 = SkyMath.safeIndex(yi, 0, size - 1), y1 = SkyMath.safeIndex(yi + 1, 0, size - 1)
+        let xi = SkyMath.safeFloorInt(xf)
+        let yi = SkyMath.safeFloorInt(yf)
+        let tx = xf - floorf(xf)
+        let ty = yf - floorf(yf)
+
+        let x0 = SkyMath.safeIndex(xi,     0, size - 1)
+        let x1 = SkyMath.safeIndex(xi + 1, 0, size - 1)
+        let y0 = SkyMath.safeIndex(yi,     0, size - 1)
+        let y1 = SkyMath.safeIndex(yi + 1, 0, size - 1)
 
         let a = data[y0 * size + x0], b = data[y0 * size + x1]
         let c = data[y1 * size + x0], d = data[y1 * size + x1]

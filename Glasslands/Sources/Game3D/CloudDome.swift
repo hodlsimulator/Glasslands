@@ -7,21 +7,12 @@
 //  Inside-out skydome textured with the generated equirectangular sky.
 //
 
-//
-//  CloudDome.swift
-//  Glasslands
-//
-
-//
-//  CloudDome.swift
-//  Glasslands
-//
-
 import SceneKit
 import UIKit
 
 @MainActor
 enum CloudDome {
+
     static func make(radius: CGFloat, skyImage: UIImage) -> SCNNode {
         let sphere = SCNSphere(radius: radius)
         sphere.isGeodesic = true
@@ -36,6 +27,7 @@ enum CloudDome {
         m.diffuse.wrapT = .clamp
         m.emission.wrapS = .repeat
         m.emission.wrapT = .clamp
+
         m.diffuse.mipFilter = .linear
         m.emission.mipFilter = .linear
 

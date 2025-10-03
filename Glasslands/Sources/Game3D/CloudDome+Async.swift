@@ -4,11 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-
-//  CloudDome+Async.swift
-//  Glasslands
-//
 //  Off-main sky generation; only UIKit/SceneKit work runs on the main actor.
+//
 
 @preconcurrency import SceneKit
 import UIKit
@@ -16,7 +13,7 @@ import CoreGraphics
 
 extension CloudDome {
 
-    // Callable from any actor; runs compute on a detached task and hops to main for node creation.
+    /// Callback style.
     nonisolated static func makeAsync(
         radius: CGFloat,
         coverage: Float = 0.34,
@@ -45,7 +42,7 @@ extension CloudDome {
         }
     }
 
-    // Async/await variant that returns the node; result is built on the main actor.
+    /// Async/await variant.
     nonisolated static func makeNode(
         radius: CGFloat,
         coverage: Float = 0.34,
@@ -68,9 +65,7 @@ extension CloudDome {
             )
         }.value
 
-        return await MainActor.run {
-            buildDomeNode(radius: radius, pixels: px)
-        }
+        return await MainActor.run { buildDomeNode(radius: radius, pixels: px) }
     }
 
     @MainActor

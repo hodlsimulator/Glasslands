@@ -5,6 +5,13 @@
 //  Created by . . on 10/3/25.
 //
 
+//
+//  SceneKitHelpers+Sky.swift
+//  Glasslands
+//
+//  Convenience for producing a UIImage sky on the main actor.
+//
+
 import Foundation
 import CoreGraphics
 import UIKit
@@ -22,7 +29,6 @@ enum SkyGen {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) -> UIImage {
-        // Compute can run anywhere; wrapping to UIImage must be on the main actor.
         let px = CumulusRenderer.computePixels(
             width: width,
             height: height,
@@ -32,10 +38,12 @@ enum SkyGen {
             sunAzimuthDeg: sunAzimuthDeg,
             sunElevationDeg: sunElevationDeg
         )
+
         let bpr = px.width * 4
         let data = CFDataCreate(nil, px.rgba, px.rgba.count)!
         let provider = CGDataProvider(data: data)!
         let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+
         let cg = CGImage(
             width: px.width,
             height: px.height,
@@ -49,6 +57,7 @@ enum SkyGen {
             shouldInterpolate: true,
             intent: .defaultIntent
         )!
+
         return UIImage(cgImage: cg)
     }
 }
