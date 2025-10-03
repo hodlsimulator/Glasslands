@@ -19,22 +19,19 @@ enum CloudDome {
         let m = SCNMaterial()
         m.lightingModel = .constant
 
-        // Emission-only keeps it cheap; set filters on the *property*.
+        // Emission-only, with crisp sampling
         m.emission.contents = skyImage
         m.diffuse.contents = nil
         m.emission.minificationFilter = .linear
-        m.emission.magnificationFilter = .linear
-        m.emission.mipFilter = .linear
+        m.emission.magnificationFilter = .nearest
+        m.emission.mipFilter = .none
 
-        // Render inside of the sphere
         m.isDoubleSided = false
         m.cullMode = .front
-
-        // No depth interaction
         m.writesToDepthBuffer = false
         m.readsFromDepthBuffer = false
 
-        // Flip horizontally so azimuth aligns with sun maths
+        // Match equirect orientation
         m.emission.contentsTransform = SCNMatrix4MakeScale(-1, 1, 1)
 
         sphere.firstMaterial = m

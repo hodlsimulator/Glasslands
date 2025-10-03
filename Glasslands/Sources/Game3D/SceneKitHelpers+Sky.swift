@@ -17,8 +17,8 @@ enum SkyGen {
     static func skyWithCloudsImage(
         width: Int = 2048,
         height: Int = 1024,
-        coverage: Float = 0.26,
-        thickness: Float = 0.30,
+        coverage: Float = 0.22,   // less base coverage -> more blue sky
+        thickness: Float = 0.16,  // crisper edges
         seed: UInt32 = 424242,
         sunAzimuthDeg: Float = 40,
         sunElevationDeg: Float = 65
@@ -27,6 +27,7 @@ enum SkyGen {
         let H = max(32, height)
         let bpr = W * 4
 
+        // sRGB prevents gamma wash-out
         let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         var pixels = [UInt8](repeating: 0, count: W * H * 4)
 
@@ -54,6 +55,7 @@ enum SkyGen {
             return i
         }
 
+        // Sun direction
         let deg: Float = .pi / 180
         let sunAz = sunAzimuthDeg * deg
         let sunEl = sunElevationDeg * deg
@@ -63,11 +65,12 @@ enum SkyGen {
             cosf(sunAz) * cosf(sunEl)
         ))
 
-        // Deeper sky gradient
-        let top = simd_float3(0.26, 0.55, 0.93)
-        let mid = simd_float3(0.52, 0.75, 0.95)
-        let bot = simd_float3(0.86, 0.93, 0.98)
+        // Sky gradient (constants used below; not redefined later)
+        let SKY_TOP = simd_float3(0.22, 0.50, 0.92)  // deeper zenith blue
+        let SKY_MID = simd_float3(0.50, 0.73, 0.95)
+        let SKY_BOT = simd_float3(0.86, 0.93, 0.98)
 
+        // Deterministic RNG
         struct LCG {
             private var state: UInt32
             init(seed: UInt32) { self.state = seed &* 1664525 &+ 1013904223 }
@@ -77,32 +80,34 @@ enum SkyGen {
         }
         var rng = LCG(seed: seed != 0 ? seed : 1)
 
-        // Low-res cloud density field
+        // Low-res cloud field then upsample (keeps CPU cost tiny)
         let gW = max(64, W / 3)
         let gH = max(32, H / 3)
         var field = [Float](repeating: 0, count: gW * gH)
 
-        let baseCount = max(60, (gW * gH) / 80)
+        let baseCount = max(40, (gW * gH) / 120) // fewer puffs -> more gaps
         let count = Int(Float(baseCount) * (0.34 / max(0.10, coverage)))
 
+        // Prevent blown-out zenith
         let capStart: Float = 0.975
         let capEnd: Float = 0.992
 
+        // Scatter puffs (flattened ellipses, gentle rotation)
         for _ in 0..<count {
             let u = rng.unit()
             let v = rng.unit()
             let upY = cosf((v - 0.5) * .pi)
 
-            let rBase = 0.06 + 0.12 * rng.unit()
-            let rx = rBase * (1.30 + 0.40 * rng.unit())
+            let rBase = 0.05 + 0.10 * rng.unit()
+            let rx = rBase * (1.20 + 0.40 * rng.unit())
             let ry = rBase * (0.55 + 0.25 * rng.unit())
 
-            let maxJitter: Float = .pi * 0.055
+            let maxJitter: Float = .pi * 0.045
             let ang = rng.range(-maxJitter, maxJitter)
             let ca = cosf(ang), sa = sinf(ang)
 
-            let amp = 0.8 + 0.4 * rng.unit()
-            let horizonBoost: Float = 0.20 * (1 - clampf(upY, 0, 1))
+            let amp = 0.7 + 0.4 * rng.unit()
+            let horizonBoost: Float = 0.14 * (1 - clampf(upY, 0, 1))
 
             let cx = clampf(u, 0, 0.9999) * Float(gW)
             let cy = clampf(v, 0, 0.9999) * Float(gH)
@@ -122,29 +127,30 @@ enum SkyGen {
             if x0 > x1 || y0 > y1 { continue }
             for gy in y0...y1 {
                 let yy = (Float(gy) + 0.5) - cy
-                let gravBias = 1.0 + 0.22 * smoothstep(0, sy * 0.8, max(0, yy))
+                let gravBias = 1.0 + 0.20 * smoothstep(0, sy * 0.8, max(0, yy))
                 for gx in x0...x1 {
                     let xx = (Float(gx) + 0.5) - cx
                     let xr = (xx * ca - yy * sa) / max(1e-4, sx)
                     let yr = (xx * sa + yy * ca) / max(1e-4, sy)
                     let d2 = xr*xr + yr*yr
-                    let k: Float = 1.75
+                    let k: Float = 1.65
                     let shape = 1.0 / ((1.0 + k * d2) * (1.0 + k * d2))
                     let add = (amp + horizonBoost) * shape * tCap * gravBias
-                    let idx = gy * gW + gx
-                    field[idx] += add.isFinite ? add : 0
+                    field[gy * gW + gx] += add.isFinite ? add : 0
                 }
             }
         }
 
-        // Normalise and gentle contrast
+        // Normalise and reduce overall fill so blue shows through
         var fmax: Float = 0
         for v in field where v.isFinite && v > fmax { fmax = v }
         let invMax: Float = fmax > 0 ? (1.0 / fmax) : 1.0
         for i in 0..<field.count {
             var x = field[i] * invMax
             x = clampf(x, 0, 1)
-            field[i] = x * (0.8 + 0.2 * x)
+            // Lower average + keep peaks -> more gaps, crisper tops
+            x = powf(x, 1.35) * 0.85
+            field[i] = x
         }
 
         @inline(__always) func sampleField(u: Float, v: Float) -> Float {
@@ -166,12 +172,13 @@ enum SkyGen {
             return v.isFinite ? v : 0
         }
 
-        // Paint
+        // Render
         for j in 0..<H {
             let v = (Float(j) + 0.5) / Float(H)
             for i in 0..<W {
                 let u = (Float(i) + 0.5) / Float(W)
 
+                // Equirect direction (for sun falloff & caps)
                 let azimuth = u * (.pi * 2)
                 let elevation = (1 - v) * .pi - (.pi / 2)
                 let dir = simd_float3(
@@ -181,21 +188,21 @@ enum SkyGen {
                 )
                 let upY = dir.y
 
-                let top = simd_float3(0.26, 0.55, 0.93)
-                let mid = simd_float3(0.52, 0.75, 0.95)
-                let bot = simd_float3(0.86, 0.93, 0.98)
-
+                // Sky gradient
                 let t1 = smoothstep(-0.15, 0.55, upY)
-                let base = mix3(bot, mid, t1)
+                let base = mix3(SKY_BOT, SKY_MID, t1)
                 let t2 = smoothstep(0.25, 0.95, upY)
-                let sky = mix3(base, top, t2)
+                let sky = mix3(base, SKY_TOP, t2)
 
+                // Cloud alpha from field with jitter to avoid banding
                 let jitterBits = (i &* 1664525 &+ j &* 1013904223) & 0xFFFF
-                let jitter = (Float(jitterBits) / 65535.0 - 0.5) * 0.04
+                let jitter = (Float(jitterBits) / 65535.0 - 0.5) * 0.035
+                let raw = sampleField(u: u, v: v)
+                var a = smoothstep(coverage + jitter, coverage + jitter + max(0.001, thickness), raw)
+                // Pull back fill slightly so detail pops
+                a = max(0, min(1, a * 0.9 - 0.03))
 
-                var a = smoothstep(coverage + jitter, coverage + jitter + max(0.001, thickness),
-                                   sampleField(u: u, v: v))
-
+                // Zenith and horizon shaping
                 var grav = 1 - clampf(upY, 0, 1)
                 grav = grav * (0.65 + 0.35 * grav)
                 a *= (0.92 + 0.08 * grav)
@@ -203,11 +210,13 @@ enum SkyGen {
                 let tFade = smoothstep(capStart, capEnd, upY)
                 a *= (1.0 - 0.35 * tFade)
 
+                // Sun silver lining (subtle)
                 let nd = max(0.0 as Float, simd_dot(simd_normalize(dir), sunDir))
                 let nd2 = nd * nd, nd4 = nd2 * nd2, nd8 = nd4 * nd4
-                let silver = nd4 * 0.20 + nd8 * 0.30
+                let silver = nd4 * 0.18 + nd8 * 0.28
 
-                let cloudBase: Float = 0.82
+                // Cloud colour
+                let cloudBase: Float = 0.78
                 let cloud = simd_float3(repeating: clampf(cloudBase + silver, 0, 1))
 
                 let rgb = mix3(sky, cloud, a)
