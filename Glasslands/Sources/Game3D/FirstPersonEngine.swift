@@ -269,24 +269,23 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Background: simple blue gradient cube; clouds alpha-over this
-        scene.background.contents = SceneKitHelpers.skyboxImages(size: 1024)
+        // Remove the cubemap entirely (it was causing the seams).
+        scene.background.contents = nil
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // World-anchored cloud dome (does NOT rotate with the camera)
+        // World-anchored cloud dome that also draws the sky gradient.
         let radius = CGFloat(cfg.skyDistance)
         let (cloudNode, cloudMat) = CloudDome.make(radius: radius, seed: 424242)
 
-        // Seed the sun direction for silver-lining; updated again in applySunDirection(...)
         if let sun = sunLightNode {
-            let d = sun.presentation.simdWorldFront * -1 // -Z is light direction
+            let d = sun.presentation.simdWorldFront * -1
             cloudMat.setValue(SCNVector3(d.x, d.y, d.z), forKey: "sunDir")
         }
 
         skyAnchor.addChildNode(cloudNode)
 
-        // Sun disc (only if a sun light exists)
+        // Optional billboarded sun disc
         if sunLightNode != nil {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
@@ -305,7 +304,6 @@ final class FirstPersonEngine: NSObject {
             skyAnchor.addChildNode(node)
             self.sunDiscNode = node
 
-            // Give the sun a nice starting position
             applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         }
     }
