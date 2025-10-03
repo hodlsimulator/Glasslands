@@ -38,7 +38,6 @@ enum SkyGen {
         let data = CFDataCreate(nil, px.rgba, px.rgba.count)!
         let provider = CGDataProvider(data: data)!
         let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-
         let cg = CGImage(
             width: px.width,
             height: px.height,
@@ -52,7 +51,6 @@ enum SkyGen {
             shouldInterpolate: true,
             intent: .defaultIntent
         )!
-
         return UIImage(cgImage: cg)
     }
 }

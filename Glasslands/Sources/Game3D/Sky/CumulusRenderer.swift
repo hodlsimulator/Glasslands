@@ -16,14 +16,14 @@
 import Foundation
 import simd
 
-struct CumulusPixels: Sendable {
-    let width: Int
-    let height: Int
-    let rgba: [UInt8]
+public struct CumulusPixels: Sendable {
+    public let width: Int
+    public let height: Int
+    public let rgba: [UInt8]
 }
 
-/// Free function version to avoid any accidental global-actor inference.
-func computeCumulusPixels(
+/// Free function version to avoid any accidental global‑actor inference.
+public func computeCumulusPixels(
     width: Int = 1536,
     height: Int = 768,
     coverage: Float = 0.34,
@@ -36,12 +36,11 @@ func computeCumulusPixels(
     let W = max(256, width)
     let H = max(128, height)
 
-    // Low-res fields (up-sampled for shading).
+    // Low‑res fields (up‑sampled for shading).
     let FW = max(256, W / 2)
     let FH = max(128, H / 2)
-
-    let baseField  = CloudFieldLL.build(width: FW, height: FH, coverage: coverage, seed: seed)
-    let capField   = ZenithCapField.build(size: max(FW, FH), seed: seed, densityScale: 0.55)
+    let baseField = CloudFieldLL.build(width: FW, height: FH, coverage: coverage, seed: seed)
+    let capField  = ZenithCapField.build(size: max(FW, FH), seed: seed, densityScale: 0.55)
 
     // Sun direction in world space (y up).
     let deg: Float = .pi / 180
@@ -55,45 +54,45 @@ func computeCumulusPixels(
     sunDir = simd_normalize(sunDir)
 
     // Sky gradient colours (sRGB).
-    let SKY_TOP = simd_float3(0.30, 0.56, 0.96)  // deep zenith blue
-    let SKY_MID = simd_float3(0.56, 0.74, 0.96)  // mid-sky
-    let SKY_BOT = simd_float3(0.88, 0.93, 0.99)  // near horizon
+    let SKY_TOP = simd_float3(0.30, 0.56, 0.96) // deep zenith blue
+    let SKY_MID = simd_float3(0.56, 0.74, 0.96) // mid‑sky
+    let SKY_BOT = simd_float3(0.88, 0.93, 0.99) // near horizon
 
-    // Soft threshold controls the silhouette. Lower threshold -> more clouds.
-    let thresh  = SkyMath.clampf(0.58 - 0.36 * coverage, 0.30, 0.70)
+    // Silhouette controls.
+    let thresh   = SkyMath.clampf(0.58 - 0.36 * coverage, 0.30, 0.70)
     let softness = SkyMath.clampf(edgeSoftness, 0.10, 0.35)
 
-    // Helpers to sample the combined density and its gradient.
+    // Helpers to go from (u,v) to world direction and back.
     @inline(__always)
     func dirFromUV(_ u: Float, _ v: Float) -> simd_float3 {
-        // Equirectangular: u ∈ [0,1] -> az ∈ [-π,π], v ∈ [0,1] -> el ∈ [π/2,-π/2]
+        // Equirectangular: u ∈ [0,1] → az ∈ [-π,π], v ∈ [0,1] → el ∈ [π/2, -π/2]
         let az = (u - 0.5) * (2.0 * .pi)
         let el = (.pi * (0.5 - v))
         return simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
     }
 
+    /// Smooth three‑stop blue gradient; v=0 top, 0.5 horizon, 1 nadir.
     @inline(__always)
     func skyBase(_ v: Float) -> simd_float3 {
-        // V=0 top, 0.5 horizon, 1 bottom (nadir). Blend three-way with a mild S-curve.
         let t = SkyMath.smooth01(v)
         let midBlend = SkyMath.smoothstep(0.18, 0.82, t)
         let topBlend = SkyMath.smoothstep(0.00, 0.42, t)
-        let top = SKY_TOP
-        let mid = SKY_MID
-        let bot = SKY_BOT
-        // Top->Mid->Bottom gradient.
-        return SkyMath.mix3(SkyMath.mix3(top, mid, topBlend), bot, midBlend)
+        return SkyMath.mix3(SkyMath.mix3(SKY_TOP, SKY_MID, topBlend), SKY_BOT, midBlend)
     }
 
+    /// Combined cloud density from the lat‑long field and the zenith cap.
     @inline(__always)
     func combinedDensity(u: Float, v: Float) -> Float {
         let dLL = baseField.sample(u: u, v: v)
 
-        // Zenith cap – projected orthographically using the direction.
+        // Zenith cap – project orthographically using the viewing direction.
         let d = dirFromUV(u, v)
         let up = d.y
-        // Fade in the cap near the zenith only.
+
+        // Fade in the cap only very close to the zenith so it never forms a ring.
         let capT = SkyMath.smoothstep(0.90, 0.985, up)
+
+        // Orthographic projection of the direction onto the unit disc.
         let uc = (d.x * 0.5) + 0.5
         let vc = (d.z * 0.5) + 0.5
         let dCap = capField.sample(u: uc, v: vc) * capT
@@ -101,6 +100,7 @@ func computeCumulusPixels(
         return dLL + dCap
     }
 
+    /// Gradient of the combined density in UV space.
     @inline(__always)
     func gradDensity(u: Float, v: Float) -> (Float, Float) {
         let du: Float = 1.0 / Float(FW)
@@ -115,87 +115,98 @@ func computeCumulusPixels(
     let invW = 1.0 / Float(W)
     let invH = 1.0 / Float(H)
 
-    // UV step vector that roughly follows the sun on the lat-long map.
-    // This is only used for a cheap one-bounce “self-shadow” probe.
+    // UV step that roughly follows the sun on the lat‑long map, for the
+    // cheap one‑bounce “self‑shadow” probe below.
     let sunUV = simd_float2(
-        sunDir.x * 0.035,     // x ~ azimuth
-        -sunDir.y * 0.045     // y ~ elevation (v increases downward)
+        sunDir.x * 0.035,      // x ~ azimuth
+        -sunDir.y * 0.045      // y ~ elevation (v increases downward)
     )
 
+    // Render.
     for j in 0..<H {
+        let v = Float(j) * invH
+        let base = skyBase(v)
+
         for i in 0..<W {
-            let u = (Float(i) + 0.5) * invW
-            let v = (Float(j) + 0.5) * invH
+            let u = Float(i) * invW
 
-            // Density and soft threshold (edge softening shapes big cotton puffs).
-            let dens = combinedDensity(u: u, v: v)
-            let t = (dens - thresh) / max(1e-5, softness)
-            let alpha = SkyMath.smooth01(t)          // 0..1 mask
+            // 1) Density and soft threshold → alpha.
+            let d = combinedDensity(u: u, v: v)
+            let a = SkyMath.smoothstep(thresh - softness, thresh + softness, d)
 
-            // Gradient for a pseudo-normal (billowy lighting).
-            let (gx, gy) = gradDensity(u: u, v: v)
-            // Treat density as a height field with upward bias.
-            let n = simd_normalize(simd_float3(-gx * 24, 1.6, -gy * 24))
-
-            // Sun lighting with soft wrap to keep tops bright.
-            let ndotl = max(0, simd_dot(n, sunDir))
-            let wrap  = (ndotl + 0.25) / (1.0 + 0.25) // wrap diffuse
-            var shade = 0.55 + 0.65 * wrap
-
-            // One-bounce self-shadow (very cheap, 3 taps).
-            var occl: Float = 0
-            var wSum: Float = 0
-            var step: Float = 1
-            for _ in 0..<3 {
-                let su = u - sunUV.x * step
-                let sv = v - sunUV.y * step
-                occl += combinedDensity(u: su, v: sv) * (0.50 / step)
-                wSum += (0.50 / step)
-                step += 1
+            // Early out → pure sky pixel.
+            if a <= 1e-4 {
+                let idx = (j * W + i) << 2
+                rgba[idx + 0] = SkyMath.toByte(base.x)
+                rgba[idx + 1] = SkyMath.toByte(base.y)
+                rgba[idx + 2] = SkyMath.toByte(base.z)
+                rgba[idx + 3] = 255
+                continue
             }
-            occl = occl / max(1e-5, wSum)
-            shade *= (1.0 - 0.55 * occl)
 
-            // Silver lining on sunward edges (forward scattering).
-            let dir = dirFromUV(u, v)
-            let facing = max(0, simd_dot(dir, sunDir))
-            let rim = powf(alpha * facing, 3.0)
-            shade += 0.20 * rim
+            // 2) Gradient → approximate normal in world space.
+            // Tangent basis at (u,v).
+            let az = (u - 0.5) * (2.0 * .pi)
+            let el = (.pi * (0.5 - v))
+            let ca = cosf(az), sa = sinf(az)
+            let ce = cosf(el), se = sinf(el)
 
-            // Base cloud albedo and subtle warm tint near sun.
-            let sunWarm = simd_float3(1.0, 0.98, 0.96)
-            let tWarm: Float = min(1.0, facing * 0.6)
-            let cloudWhite = SkyMath.mix3(simd_float3(repeating: 1.0), sunWarm, tWarm)
-            var cloudRGB = cloudWhite * shade
+            // World direction for this pixel.
+            let viewDir = simd_float3(sa * ce, se, ca * ce)
 
-            // Slightly darker bottoms.
-            let upness = dir.y
-            let bottomDark = 0.08 * SkyMath.smoothstep(-0.1, 0.25, 0.25 - upness)
-            cloudRGB *= (1.0 - bottomDark)
+            // ∂dir/∂az and ∂dir/∂el (scaled—but we normalise later).
+            let dAz = simd_float3(ca * ce, 0, -sa * ce)      // tangent along azimuth
+            let dEl = simd_float3(-sa * se, ce, -ca * se)    // tangent along elevation
+            let T_u = simd_normalize(dAz)
+            let T_v = simd_normalize(dEl)
 
-            // Background sky.
-            var sky = skyBase(v)
-            // Horizon brightening towards the sun.
-            let horizonT = SkyMath.smoothstep(0.38, 0.62, v) // near equator
-            sky = SkyMath.mix3(sky, simd_float3(1.0, 1.0, 1.0), 0.10 * horizonT * facing)
+            let (gx, gy) = gradDensity(u: u, v: v)
+            // Scale balances "puffing" vs. flatness.
+            let gradScale: Float = 2.1
+            // Blend between viewDir and gradient‑displaced normal.
+            var n = simd_normalize(viewDir - gradScale * (gx * T_u + gy * T_v))
+            // Ensure normal faces outward (towards the camera sphere).
+            if simd_dot(n, viewDir) < 0 { n = -n }
 
-            // Composite.
-            let outRGB = sky * (1.0 - alpha) + cloudRGB * alpha
+            // 3) Lighting: ambient + lambert + forward‑scattering “silver lining”.
+            let lambert = max(0, simd_dot(n, sunDir))
 
-            // Ordered-ish dithering to hide banding.
-            let h = SkyMath.h2(Int32(i), Int32(j), seed)
-            let dither = (Float(h & 255) / 255.0 - 0.5) * (1.0 / 255.0)
+            // Forward scattering: bright rim when looking towards the sun.
+            let mu = max(0, simd_dot(viewDir, sunDir))      // cos(scatter angle)
+            let silver = powf(mu, 8.0) * 0.65               // tight and bright near sun
 
-            let r = SkyMath.toByte(outRGB.x + dither)
-            let g = SkyMath.toByte(outRGB.y + dither)
-            let b = SkyMath.toByte(outRGB.z + dither)
-            let a = UInt8(255)
+            // Cheap self‑shadow: sample density up‑sun; more density → darker.
+            let uS = u - sunUV.x
+            let vS = v - sunUV.y
+            let dS = combinedDensity(u: uS, v: vS)
+            let occl = SkyMath.clampf(1.0 - (dS - d) * 1.35, 0.2, 1.0)
 
-            let idx = (j * W + i) * 4
-            rgba[idx + 0] = r
-            rgba[idx + 1] = g
-            rgba[idx + 2] = b
-            rgba[idx + 3] = a
+            // Horizon brightening helps the perspective feel near the bottom.
+            let horizon = SkyMath.smoothstep(0.46, 0.70, v)
+
+            // Compose cloud colour (sRGB). Keep it white but softly shaded.
+            var intensity = 0.52                                 // base ambient
+            intensity += 0.45 * lambert * occl                   // lit faces
+            intensity += 0.18 * silver                           // silver lining
+            intensity += 0.10 * horizon                          // subtle uplift near horizon
+            intensity = min(intensity, 1.05)
+
+            var cloud = simd_float3(repeating: intensity)
+
+            // 4) Alpha blend over sky.
+            var rgb = base * (1.0 - a) + cloud * a
+
+            // 5) Tiny ordered dither to avoid banding on low‑bit displays.
+            let h = SkyMath.h2(Int32(i), Int32(j), seed) & 0xFF
+            let dither = (Float(h) * (1.0 / 255.0) - 0.5) * (1.0 / 255.0)
+            rgb += simd_float3(repeating: dither)
+
+            // Store.
+            let idx = (j * W + i) << 2
+            rgba[idx + 0] = SkyMath.toByte(rgb.x)
+            rgba[idx + 1] = SkyMath.toByte(rgb.y)
+            rgba[idx + 2] = SkyMath.toByte(rgb.z)
+            rgba[idx + 3] = 255
         }
     }
 

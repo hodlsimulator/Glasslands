@@ -20,32 +20,29 @@ enum CloudDome {
 
         let m = SCNMaterial()
         m.lightingModel = .constant
-        m.diffuse.contents = skyImage
+        m.diffuse.contents  = skyImage
         m.emission.contents = skyImage
-
         m.diffuse.wrapS = .repeat
         m.diffuse.wrapT = .clamp
         m.emission.wrapS = .repeat
         m.emission.wrapT = .clamp
-
-        m.diffuse.mipFilter = .linear
+        m.diffuse.mipFilter  = .linear
         m.emission.mipFilter = .linear
-
         m.isDoubleSided = false
-        m.cullMode = .front
+        m.cullMode = .front                 // render inside only
         m.writesToDepthBuffer = false
-        m.readsFromDepthBuffer = false
+        m.readsFromDepthBuffer  = false
 
         // Flip horizontally so azimuth matches the generator’s convention.
         let flip = SCNMatrix4MakeScale(-1, 1, 1)
-        m.diffuse.contentsTransform = flip
+        m.diffuse.contentsTransform  = flip
         m.emission.contentsTransform = flip
 
         sphere.firstMaterial = m
 
         let node = SCNNode(geometry: sphere)
         node.name = "CloudDome"
-        node.renderingOrder = -10_000
+        node.renderingOrder = -10_000       // draw before everything else
         return node
     }
 }

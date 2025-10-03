@@ -13,7 +13,7 @@ import CoreGraphics
 
 extension CloudDome {
 
-    /// Callback style.
+    /// Callback style (compute off‑main; hop to main only to build UIKit/SceneKit objects).
     nonisolated static func makeAsync(
         radius: CGFloat,
         coverage: Float = 0.34,
@@ -26,18 +26,15 @@ extension CloudDome {
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            // Compiler treats computeCumulusPixels as @MainActor; run it there explicitly.
-            let px = await MainActor.run {
-                computeCumulusPixels(
-                    width: width,
-                    height: height,
-                    coverage: coverage,
-                    edgeSoftness: edgeSoftness,
-                    seed: seed,
-                    sunAzimuthDeg: sunAzimuthDeg,
-                    sunElevationDeg: sunElevationDeg
-                )
-            }
+            let px = computeCumulusPixels(
+                width: width,
+                height: height,
+                coverage: coverage,
+                edgeSoftness: edgeSoftness,
+                seed: seed,
+                sunAzimuthDeg: sunAzimuthDeg,
+                sunElevationDeg: sunElevationDeg
+            )
             await MainActor.run {
                 let node = buildDomeNode(radius: radius, pixels: px)
                 completion(node)
@@ -56,8 +53,7 @@ extension CloudDome {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) async -> SCNNode {
-        // Same workaround: hop to MainActor just for the compute call.
-        let px = await MainActor.run {
+        let px = await Task.detached(priority: .userInitiated) {
             computeCumulusPixels(
                 width: width,
                 height: height,
@@ -67,8 +63,7 @@ extension CloudDome {
                 sunAzimuthDeg: sunAzimuthDeg,
                 sunElevationDeg: sunElevationDeg
             )
-        }
-
+        }.value
         return await MainActor.run { buildDomeNode(radius: radius, pixels: px) }
     }
 
@@ -78,7 +73,6 @@ extension CloudDome {
         let data = Data(pixels.rgba) as CFData
         let provider = CGDataProvider(data: data)!
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-
         let cgImage = CGImage(
             width: pixels.width,
             height: pixels.height,
@@ -92,7 +86,6 @@ extension CloudDome {
             shouldInterpolate: true,
             intent: .defaultIntent
         )!
-
         let skyImage = UIImage(cgImage: cgImage)
         return CloudDome.make(radius: radius, skyImage: skyImage)
     }
