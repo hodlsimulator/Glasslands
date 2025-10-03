@@ -248,41 +248,41 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func buildSky() {
-        // Reset anchor
+        // Reset container
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Recreate the disc
-        sunDiscNode = nil
-
-        // Let the dome paint the background; no SceneKit background image.
+        // Let the dome paint the background.
         scene.background.contents = nil
-
-        // Keep IBL off for now (cheapest).
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Dome with the restored “soft blob” clouds and whiter blue gradient.
-        let dome = CloudDome.make(
+        // Build the skydome asynchronously, then prewarm the resource.
+        CloudDome.makeAsync(
             radius: CGFloat(cfg.skyDistance),
-            coverage: 0.30,          // try 0.26…0.34
-            thickness: 0.44,         // softer edges
-            seed: 424242,
+            coverage: 0.34,
+            edgeSoftness: 0.20,
+            seed: 20251003,
             width: 1536,
             height: 768,
             sunAzimuthDeg: 40,
             sunElevationDeg: 65
-        )
-        skyAnchor.addChildNode(dome)
+        ) { [weak self] dome in
+            guard let self else { return }
+            self.skyAnchor.addChildNode(dome)
+            if let view = self.scnView {
+                view.prepare([dome]) { _ in }
+            }
+        }
 
-        // Visible sun disc (billboard). Keep your existing SunSprite helper.
+        // Optional: visible sun disc (simple emissive sprite).
         let discSize: CGFloat = 48
         let disc = SCNPlane(width: discSize, height: discSize)
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = SunSprite.image
-        mat.emission.contents = nil
+        mat.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
+        mat.emission.contents = UIColor(white: 1.0, alpha: 1.0)
         mat.isDoubleSided = true
         mat.writesToDepthBuffer = false
         disc.firstMaterial = mat
@@ -294,7 +294,7 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.addChildNode(discNode)
         self.sunDiscNode = discNode
 
-        // Align the light + disc to the same sun direction.
+        // Aim light + disc.
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
