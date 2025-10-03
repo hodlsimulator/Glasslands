@@ -26,15 +26,18 @@ extension CloudDome {
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            let px = computeCumulusPixels(
-                width: width,
-                height: height,
-                coverage: coverage,
-                edgeSoftness: edgeSoftness,
-                seed: seed,
-                sunAzimuthDeg: sunAzimuthDeg,
-                sunElevationDeg: sunElevationDeg
-            )
+            // Compiler treats computeCumulusPixels as @MainActor; run it there explicitly.
+            let px = await MainActor.run {
+                computeCumulusPixels(
+                    width: width,
+                    height: height,
+                    coverage: coverage,
+                    edgeSoftness: edgeSoftness,
+                    seed: seed,
+                    sunAzimuthDeg: sunAzimuthDeg,
+                    sunElevationDeg: sunElevationDeg
+                )
+            }
             await MainActor.run {
                 let node = buildDomeNode(radius: radius, pixels: px)
                 completion(node)
@@ -53,7 +56,8 @@ extension CloudDome {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) async -> SCNNode {
-        let px = await Task.detached(priority: .userInitiated) {
+        // Same workaround: hop to MainActor just for the compute call.
+        let px = await MainActor.run {
             computeCumulusPixels(
                 width: width,
                 height: height,
@@ -63,7 +67,7 @@ extension CloudDome {
                 sunAzimuthDeg: sunAzimuthDeg,
                 sunElevationDeg: sunElevationDeg
             )
-        }.value
+        }
 
         return await MainActor.run { buildDomeNode(radius: radius, pixels: px) }
     }
