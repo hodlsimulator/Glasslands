@@ -15,7 +15,7 @@ import ImagePlayground  // Hypothetical iOS 26 framework (guarded)
 #endif
 
 /// Builds a stylised "postcard" image.
-/// If Image Playground / Image Creator is present, you can wire it here; otherwise we
+/// If Image Playground / Image Creator is present, wire it here; otherwise we
 /// render a high-quality CoreGraphics card and optionally apply a small Metal compute effect.
 final class ImageCreatorService {
 

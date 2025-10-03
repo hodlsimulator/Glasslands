@@ -5,7 +5,7 @@
 //  Created by . . on 9/30/25.
 //
 //  Adapts a GameplayKit GKRandomSource to Swift's RandomNumberGenerator,
-//  so you can use Double.random(in:using:), shuffle(using:), etc., with a seed.
+//  for use with Double.random(in:using:), shuffle(using:), etc., with a seed.
 //
 
 import Foundation

@@ -79,7 +79,6 @@ final class FirstPersonEngine: NSObject {
     private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
         guard let sunLightNode else { return }
         let dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
-
         let origin = yawNode.presentation.position
         let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
         sunLightNode.position = origin
@@ -89,18 +88,12 @@ final class FirstPersonEngine: NSObject {
             let dist = max(10, CGFloat(cfg.skyDistance - 180))
             disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
         }
-
-        if let cloud = skyAnchor.childNode(withName: "CloudDome", recursively: false),
-           let mat = cloud.geometry?.firstMaterial {
-            mat.setValue(SCNVector3(dir.x, dir.y, dir.z), forKey: "sunDir")
-        }
     }
 
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
 
-        // Perf-first: no MSAA, no jitter; continuous render
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
@@ -156,8 +149,8 @@ final class FirstPersonEngine: NSObject {
 
         updateRig()
 
-        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
+        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
         let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
         var next = yawNode.simdPosition + attemptedDelta
 
@@ -259,17 +252,17 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Draw our own dome; no SceneKit background/env to keep fill-rate down
         scene.background.contents = nil
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Quantile-threshold sky (real gaps), emission-only for perf
+        // Force gradient-only for now (guarantees blue sky; zero clouds).
+        // Later, bump coverage to 0.10–0.20 for clouds.
         let img = SkyGen.skyWithCloudsImage(
             width: 2048,
             height: 1024,
-            coverage: 0.20,
-            thickness: 0.10,
+            coverage: 0.0,            // <<< keep 0.0 to verify the pipeline
+            thickness: 0.12,
             seed: 424242,
             sunAzimuthDeg: 40,
             sunElevationDeg: 65
@@ -277,28 +270,6 @@ final class FirstPersonEngine: NSObject {
 
         let dome = CloudDome.make(radius: CGFloat(cfg.skyDistance), skyImage: img)
         skyAnchor.addChildNode(dome)
-
-        // Subtle sun disc
-        if sunLightNode != nil {
-            let discSize: CGFloat = 192
-            let plane = SCNPlane(width: discSize, height: discSize)
-            plane.cornerRadius = discSize * 0.5
-
-            let m = SCNMaterial()
-            m.lightingModel = .constant
-            m.emission.contents = SceneKitHelpers.sunImage(diameter: Int(discSize))
-            m.blendMode = .add
-            m.writesToDepthBuffer = false
-            m.readsFromDepthBuffer = false
-            plane.firstMaterial = m
-
-            let node = SCNNode(geometry: plane)
-            node.constraints = [SCNBillboardConstraint()]
-            skyAnchor.addChildNode(node)
-            self.sunDiscNode = node
-
-            applySunDirection(azimuthDeg: 40, elevationDeg: 65)
-        }
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {

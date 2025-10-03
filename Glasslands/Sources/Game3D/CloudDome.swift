@@ -18,11 +18,13 @@ enum CloudDome {
 
         let m = SCNMaterial()
         m.lightingModel = .constant
+
         m.emission.contents = skyImage
         m.diffuse.contents = nil
         m.emission.minificationFilter = .linear
         m.emission.magnificationFilter = .linear
         m.emission.mipFilter = .linear
+
         m.isDoubleSided = false
         m.cullMode = .front
         m.writesToDepthBuffer = false

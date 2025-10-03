@@ -5,7 +5,6 @@
 //  Created by . . on 9/29/25.
 //
 // SwiftUI HUD overlays handle pause/resume; this file remains for future expansion.
-// Keeping it to match the agreed folder structure and provide a place for menu code if you want it.
 //
 
 import SwiftUI
