@@ -13,11 +13,19 @@
 import UIKit
 import simd
 
+// MARK: - File-private math (free function so it can’t be @MainActor by inference)
+
+@inline(__always)
+fileprivate func cbSmooth01(_ x: Float) -> Float {
+    let t = max(0 as Float, min(1 as Float, x))
+    return t * t * (3 - 2 * t)
+}
+
 enum CloudBillboardLayer {
 
     /// Asynchronously builds the billboard layer.
     /// Heavy maths runs off-main; UIKit/SceneKit hops to MainActor.
-    nonisolated static func makeAsync(
+    static func makeAsync(
         radius: CGFloat,
         minAltitudeY: Float = 0.08,      // lowest cloud y on the unit sphere
         clusterCount: Int = 120,
@@ -62,7 +70,6 @@ enum CloudBillboardLayer {
 
     /// Computes cluster + puff directions on the unit sphere.
     /// Runs off-main (pure value types; Sendable).
-    nonisolated
     private static func buildSpecs(
         clusterCount: Int,
         minAltitudeY: Float,
@@ -137,7 +144,7 @@ enum CloudBillboardLayer {
 
                 // Size falls off from centre; scale with elevation as a perspective cue.
                 let falloff = 1.0 - min(1.0, simd_length(offset)) * 0.28
-                let elevationScale = 0.8 + 0.9 * smooth01(dir.y)
+                let elevationScale = 0.8 + 0.9 * cbSmooth01(dir.y)
                 let size = baseSize * falloff * elevationScale * (0.88 + 0.24 * rand(&s))
 
                 let roll = (rand(&s) * 2 - 1) * .pi
@@ -222,14 +229,5 @@ enum CloudBillboardLayer {
         }
 
         return root
-    }
-
-    // MARK: - Math helpers (nonisolated)
-
-    nonisolated
-    @inline(__always)
-    private static func smooth01(_ x: Float) -> Float {
-        let t = max(0 as Float, min(1 as Float, x))
-        return t * t * (3 - 2 * t)
     }
 }
