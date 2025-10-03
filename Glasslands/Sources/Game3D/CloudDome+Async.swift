@@ -26,7 +26,7 @@ extension CloudDome {
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            let px = CumulusRenderer.computePixels(
+            let px = computeCumulusPixels(
                 width: width,
                 height: height,
                 coverage: coverage,
@@ -54,7 +54,7 @@ extension CloudDome {
         sunElevationDeg: Float = 63
     ) async -> SCNNode {
         let px = await Task.detached(priority: .userInitiated) {
-            CumulusRenderer.computePixels(
+            computeCumulusPixels(
                 width: width,
                 height: height,
                 coverage: coverage,
