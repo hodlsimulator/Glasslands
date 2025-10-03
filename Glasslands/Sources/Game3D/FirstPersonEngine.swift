@@ -101,7 +101,6 @@ final class FirstPersonEngine: NSObject {
         scnView = view
         view.scene = scene
 
-        // Enforce low-cost AA here too (in case caller changes view defaults)
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
@@ -139,8 +138,8 @@ final class FirstPersonEngine: NSObject {
         lastTime = t
 
         if pendingLookDeltaPts != .zero {
-            let yawRadPerPt = cfg.swipeYawDegPerPt * (.pi / 180)
-            let pitchRadPerPt = cfg.swipePitchDegPerPt * (.pi / 180)
+            let yawRadPerPt = cfg.swipeYawDegPerPt * (Float.pi / 180)
+            let pitchRadPerPt = cfg.swipePitchDegPerPt * (Float.pi / 180)
             yaw -= pendingLookDeltaPts.x * yawRadPerPt
             pitch -= pendingLookDeltaPts.y * pitchRadPerPt
             pendingLookDeltaPts = .zero
@@ -154,7 +153,6 @@ final class FirstPersonEngine: NSObject {
         let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
         var next = yawNode.simdPosition + attemptedDelta
 
-        // Ground height from rendered terrain (raycast), with noise fallback
         let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
         let targetY = groundY + cfg.eyeHeight
         if !targetY.isFinite {
@@ -236,7 +234,7 @@ final class FirstPersonEngine: NSObject {
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1300
-        sun.color = .white
+        sun.color = UIColor.white
         sun.castsShadow = false
 
         let sunNode = SCNNode()
@@ -254,14 +252,13 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Draw a textured dome; do not use SceneKit background/env maps
         scene.background.contents = nil
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
         let img = SkyGen.skyWithCloudsImage(
-            width: 1536,   // was 2048
-            height: 768,   // was 1024
+            width: 1536,
+            height: 768,
             coverage: 0.22,
             thickness: 0.55,
             seed: 424242,
@@ -307,7 +304,7 @@ final class FirstPersonEngine: NSObject {
         plane.firstMaterial = mat
 
         let node = SCNNode(geometry: plane)
-        node.eulerAngles = SCNVector3(-.pi/2, 0, 0)
+        node.eulerAngles = SCNVector3(-Float.pi/2, 0, 0)
 
         let y = TerrainMath.heightWorld(x: worldPos.x, z: worldPos.z, cfg: cfg, noise: noise) - 0.02
         node.simdPosition = simd_float3(worldPos.x, y, worldPos.z)
@@ -326,9 +323,10 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func clampAngles() {
-        pitch = max(-.pi/2 + 0.01, min(.pi/2 - 0.01, pitch))
-        if yaw > .pi { yaw -= 2 * .pi }
-        else if yaw < -.pi { yaw += 2 * .pi }
+        let halfPi = Float.pi / 2
+        pitch = max(-halfPi + 0.01, min(halfPi - 0.01, pitch))
+        if yaw > Float.pi { yaw -= 2 * Float.pi }
+        else if yaw < -Float.pi { yaw += 2 * Float.pi }
     }
 
     private func spawn() -> SCNVector3 {
@@ -455,3 +453,4 @@ final class FirstPersonEngine: NSObject {
         }
     }
 }
+
