@@ -21,7 +21,7 @@ enum CloudBillboardLayer {
         var size: Float           // quad size in metres
         var roll: Float           // uv rotation in radians
         var atlasIndex: Int       // which sprite variant
-        var opacity: Float        // per‑puff fade for depth layering
+        var opacity: Float        // per-puff fade for depth layering
     }
 
     private struct Cluster { var puffs: [PuffSpec] }
@@ -38,7 +38,7 @@ enum CloudBillboardLayer {
     ) {
         Task.detached(priority: .userInitiated) {
 
-            // Pure‑math helper (not actor‑isolated) to avoid the global‑actor trap.
+            // Pure-math helper (not actor-isolated) to avoid the global-actor trap.
             func buildSpecs(
                 clusterCount: Int,
                 minAltitudeY: Float,
@@ -52,7 +52,7 @@ enum CloudBillboardLayer {
 
                 var s = seed == 0 ? 1 : seed
 
-                // Poisson‑ish placement of cluster centres on the upper hemisphere.
+                // Poisson-ish placement of cluster centres on the upper hemisphere.
                 let minSepDeg: Float = 7.5
                 let minCos:    Float = cosf(minSepDeg * .pi / 180.0)
                 var centres: [simd_float3] = []
@@ -62,7 +62,7 @@ enum CloudBillboardLayer {
                     attempts += 1
                     let u = rand(&s), v = rand(&s)
                     let az = (u - 0.5) * (2 * .pi)
-                    // Bias elevation to mid‑sky. Clamp above horizon.
+                    // Bias elevation to mid-sky. Clamp above horizon.
                     let el = (0.16 + 0.76 * v) * (.pi / 2)
 
                     var d = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
@@ -75,7 +75,7 @@ enum CloudBillboardLayer {
                 }
 
                 // Build each cumulus as a compact clump:
-                //   - 1 large “core”, 2‑3 medium, 3‑6 small caps around.
+                //   - 1 large “core”, 2-3 medium, 3-6 small caps around.
                 //   - Slight vertical lift for the upper puffs.
                 //   - Smaller/clearer near horizon to avoid ground intersections.
                 var clusters: [Cluster] = []
@@ -184,7 +184,7 @@ enum CloudBillboardLayer {
             // No tiling, no sampling beyond 0..1.
             m.diffuse.wrapS = .clamp;  m.diffuse.wrapT = .clamp
             m.emission.wrapS = .clamp; m.emission.wrapT = .clamp
-            m.borderColor = UIColor.clear
+            // (No borderColor on SCNMaterial — clamping is sufficient.)
 
             m.diffuse.mipFilter  = .linear
             m.emission.mipFilter = .linear
@@ -213,7 +213,7 @@ enum CloudBillboardLayer {
                     z: p.dir.z * Float(radius)
                 )
 
-                // Face the camera but keep an upright “Y” to avoid rolling with the view.
+                // Face the camera but keep an upright “Y”.
                 let bb = SCNBillboardConstraint()
                 bb.freeAxes = .Y
                 n.constraints = [bb]
