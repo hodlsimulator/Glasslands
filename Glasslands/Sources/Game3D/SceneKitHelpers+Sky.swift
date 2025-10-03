@@ -22,7 +22,8 @@ enum SkyGen {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) -> UIImage {
-        let px = CumulusCompute.renderPixels(
+        // Compute can run anywhere; wrapping to UIImage must be on the main actor.
+        let px = CumulusRenderer.computePixels(
             width: width,
             height: height,
             coverage: coverage,
@@ -51,4 +52,3 @@ enum SkyGen {
         return UIImage(cgImage: cg)
     }
 }
-
