@@ -11,6 +11,8 @@ import SceneKit
 import UIKit
 
 enum CloudDome {
+
+    /// Build a dome from a ready image (kept for completeness).
     static func make(radius: CGFloat, skyImage: UIImage) -> SCNNode {
         let sphere = SCNSphere(radius: radius)
         sphere.isGeodesic = true
@@ -18,18 +20,20 @@ enum CloudDome {
 
         let m = SCNMaterial()
         m.lightingModel = .constant
-        m.emission.contents = skyImage
-        m.diffuse.contents = nil
-        m.emission.minificationFilter = .linear
-        m.emission.magnificationFilter = .linear
-        m.emission.mipFilter = .linear
+        m.diffuse.contents = skyImage
+        m.emission.contents = nil
 
-        // Inside-out dome
-        m.isDoubleSided = true
-        m.cullMode = .back
+        // Render only the interior faces (no negative scaling).
+        m.isDoubleSided = false
+        m.cullMode = .front
+
         m.writesToDepthBuffer = false
         m.readsFromDepthBuffer = false
-        m.emission.contentsTransform = SCNMatrix4Identity
+
+        // Proper sampling
+        m.diffuse.minificationFilter = .linear
+        m.diffuse.magnificationFilter = .linear
+        m.diffuse.mipFilter = .linear
 
         sphere.firstMaterial = m
 
@@ -37,11 +41,10 @@ enum CloudDome {
         node.name = "CloudDome"
         node.renderingOrder = -10_000
         node.castsShadow = false
-        node.scale = SCNVector3(-1, 1, 1) // flip faces inward
         return node
     }
 
-    /// Convenience: if coverage == 0, use a solid blue *colour* instead of an image.
+    /// Primary path: if `coverage == 0`, the dome is a **solid blue colour** (fastest and unambiguous).
     static func make(
         radius: CGFloat,
         coverage: Float,
@@ -58,20 +61,24 @@ enum CloudDome {
 
         let m = SCNMaterial()
         m.lightingModel = .constant
-        m.diffuse.contents = nil
-        m.isDoubleSided = true
-        m.cullMode = .back
+        m.emission.contents = nil
+
+        // Render only the interior faces; no negative scale required.
+        m.isDoubleSided = false
+        m.cullMode = .front
+
         m.writesToDepthBuffer = false
         m.readsFromDepthBuffer = false
-        m.emission.minificationFilter = .linear
-        m.emission.magnificationFilter = .linear
-        m.emission.mipFilter = .linear
+
+        m.diffuse.minificationFilter = .linear
+        m.diffuse.magnificationFilter = .linear
+        m.diffuse.mipFilter = .linear
 
         if coverage <= 0 {
-            // Solid, unmistakably blue sky (fastest path; no image sampling).
-            m.emission.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
+            // **Unmistakably blue**. This path bypasses the procedural image entirely.
+            m.diffuse.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
         } else {
-            let img = SkyGen.skyWithCloudsImage(
+            m.diffuse.contents = SkyGen.skyWithCloudsImage(
                 width: width,
                 height: height,
                 coverage: coverage,
@@ -80,7 +87,6 @@ enum CloudDome {
                 sunAzimuthDeg: sunAzimuthDeg,
                 sunElevationDeg: sunElevationDeg
             )
-            m.emission.contents = img
         }
 
         sphere.firstMaterial = m
@@ -89,14 +95,13 @@ enum CloudDome {
         node.name = "CloudDome"
         node.renderingOrder = -10_000
         node.castsShadow = false
-        node.scale = SCNVector3(-1, 1, 1)
         return node
     }
 
     static func update(_ node: SCNNode, skyImage: UIImage) {
-        guard let sphere = node.geometry as? SCNSphere,
-              let m = sphere.firstMaterial else { return }
-        m.emission.contents = skyImage
+        guard let m = node.geometry?.firstMaterial else { return }
+        m.diffuse.contents = skyImage
+        m.emission.contents = nil
     }
 
     static func update(
@@ -109,10 +114,10 @@ enum CloudDome {
         sunAzimuthDeg: Float = 40,
         sunElevationDeg: Float = 65
     ) {
+        guard let m = node.geometry?.firstMaterial else { return }
         if coverage <= 0 {
-            guard let sphere = node.geometry as? SCNSphere,
-                  let m = sphere.firstMaterial else { return }
-            m.emission.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
+            m.diffuse.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
+            m.emission.contents = nil
             return
         }
         let img = SkyGen.skyWithCloudsImage(
@@ -124,6 +129,7 @@ enum CloudDome {
             sunAzimuthDeg: sunAzimuthDeg,
             sunElevationDeg: sunElevationDeg
         )
-        update(node, skyImage: img)
+        m.diffuse.contents = img
+        m.emission.contents = nil
     }
 }

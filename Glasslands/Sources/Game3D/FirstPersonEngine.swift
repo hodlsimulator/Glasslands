@@ -246,19 +246,24 @@ final class FirstPersonEngine: NSObject {
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
+    @MainActor
     private func buildSky() {
+        // Reset anchor
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
         sunDiscNode = nil
 
-        // No background image; let the dome be the background.
-        scene.background.contents = nil
+        // **Hard fallback:** paint the SceneKit background solid blue.
+        // This guarantees blue even if the dome were culled or not visible yet.
+        scene.background.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
+
+        // No IBL while clouds are off (cheapest).
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Solid blue dome (clouds fully disabled)
+        // **Keep the dome**; clouds disabled for now (coverage: 0).
         let dome = CloudDome.make(
             radius: CGFloat(cfg.skyDistance),
             coverage: 0.0
