@@ -227,32 +227,31 @@ final class FirstPersonEngine: NSObject {
 
         let amb = SCNLight()
         amb.type = .ambient
-        amb.intensity = 350
-        amb.color = UIColor(white: 0.96, alpha: 1.0)
+        amb.intensity = 650
+        amb.color = UIColor(white: 0.97, alpha: 1.0)
         let ambNode = SCNNode()
         ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
         let sun = SCNLight()
         sun.type = .directional
-        sun.intensity = 1600
+        sun.intensity = 1300
         sun.color = UIColor.white
-        sun.castsShadow = true
-        sun.shadowMode = .deferred
-        sun.automaticallyAdjustsShadowProjection = true
-        sun.maximumShadowDistance = 600
-        sun.shadowMapSize = CGSize(width: 2048, height: 2048)
-        sun.shadowRadius = 4
-        sun.shadowSampleCount = 8
-        sun.shadowBias = 2.0 / 2048.0
+        sun.castsShadow = false                    // eliminate near-black distant bands
+        // If you want shadows later, set castsShadow=true and keep:
+        // sun.shadowColor = UIColor(white: 0.0, alpha: 0.10)
+        // sun.maximumShadowDistance = 160
+        // sun.shadowMapSize = CGSize(width: 1536, height: 1536)
+        // sun.shadowRadius = 5
+        // sun.shadowSampleCount = 8
+        // sun.shadowBias = 3.0 / 1536.0
 
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
 
-        // Put the sun higher now.
-        applySunDirection(azimuthDeg: 45, elevationDeg: 55)
+        applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
     private func buildSky() {
@@ -263,16 +262,15 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Bake fluffy clouds into the background so they’re guaranteed to show.
-        // Higher coverage + slightly thicker edges for visibility.
+        // Baked fluffy clouds (lower coverage → clearly visible; horizon-fade removes smears).
         let skyImg = SkyGen.skyWithCloudsImage(width: 2048, height: 4096,
-                                               coverage: 0.70, thickness: 0.26, seed: 424242)
+                                               coverage: 0.36, thickness: 0.20, seed: 424242)
         scene.background.contents = skyImg
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Create the sun billboard and place it using the same sun direction.
-        if let sunLightNode {
+        // Only create the sun disc if a sun light exists; fix the warning by not binding.
+        if sunLightNode != nil {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
             plane.cornerRadius = discSize * 0.5
@@ -290,8 +288,8 @@ final class FirstPersonEngine: NSObject {
             skyAnchor.addChildNode(node)
             self.sunDiscNode = node
 
-            // Reuse the exact sun orientation (matches lighting).
-            applySunDirection(azimuthDeg: 45, elevationDeg: 55)
+            // Sun higher in the sky.
+            applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         }
     }
 

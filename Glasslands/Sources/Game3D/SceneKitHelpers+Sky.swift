@@ -11,10 +11,10 @@ import simd
 
 enum SkyGen {
     static func skyWithCloudsImage(
-        width: Int = 1024,
-        height: Int = 2048,
-        coverage: Float = 0.52,
-        thickness: Float = 0.23,
+        width: Int = 2048,
+        height: Int = 4096,
+        coverage: Float = 0.48,   // lower than before → more visible clouds
+        thickness: Float = 0.20,
         seed: Int32 = 424242
     ) -> UIImage {
         let W = max(64, width)
@@ -38,17 +38,19 @@ enum SkyGen {
             return UInt8(max(0, min(255, v)))
         }
 
-        // Vertical sky gradient (top → mid → bottom)
+        // Sky gradient (top → mid → bottom)
         let top = simd_float3(0.50, 0.74, 0.92)
         let mid = simd_float3(0.70, 0.86, 0.95)
         let bot = simd_float3(0.86, 0.93, 0.98)
 
-        // Billowy FBM + domain warp (GKNoise uses Float positions)
+        // FBM billow with light domain-warp (Float positions for GKNoise)
         let base  = GKBillowNoiseSource(frequency: 1.2, octaveCount: 5, persistence: 0.5, lacunarity: 2.0, seed: seed)
         let n0    = GKNoise(base)
         let warpX = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: seed &+ 101))
         let warpY = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: seed &+ 202))
-        let scale: Float = 2.6
+
+        // Slightly larger features than before so clouds are obvious
+        let scale: Float = 1.8
 
         for y in 0..<H {
             let v = Float(y) / Float(H - 1)
@@ -66,15 +68,17 @@ enum SkyGen {
                 let raw = n0.value(atPosition: vector_float2(uu, vv))
                 let n = pow(n01(raw), 1.45)
 
+                // Cloud alpha
                 let cov = clampf(coverage, 0, 1)
                 let thk = max(0.001, thickness)
                 var a = smoothstep(cov, cov + thk, n)
 
-                // Horizon fade
-                let horizon = clampf((v - 0.12) * 1.5, 0, 1)
-                a *= horizon
+                // Fade OUT near the horizon (bottom of the image), not the zenith.
+                // This removes that single “smudge” sitting on the horizon line.
+                let horizonFade = smoothstep(0.0, 0.35, 1.0 - v)
+                a *= horizonFade
 
-                // Silver lining towards a notional sun (top-right)
+                // Subtle silver lining towards a notional sun (top-right)
                 let sunDir  = simd_normalize(simd_float3(0.4, -0.7, 0.6))
                 let viewDir = simd_normalize(simd_float3(u - 0.5, v - 0.5, 1))
                 let sunDot  = max(0, simd_dot(viewDir, sunDir))
@@ -82,7 +86,7 @@ enum SkyGen {
 
                 var rgb = skyRGB
                 if a > 0 {
-                    let cloud = simd_float3(repeating: 0.84 + 0.30 * silver)
+                    let cloud = simd_float3(repeating: 0.86 + 0.28 * silver)
                     rgb = rgb * (1 - a) + cloud * a
                 }
 
