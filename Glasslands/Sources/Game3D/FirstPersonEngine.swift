@@ -100,7 +100,7 @@ final class FirstPersonEngine: NSObject {
         view.rendersContinuously = true
         view.isPlaying = true
         view.isOpaque = true
-        view.backgroundColor = UIColor(red: 0.86, green: 0.93, blue: 0.98, alpha: 1.0)
+        view.backgroundColor = UIColor.black
 
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
