@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates a small set of reusable, pre‑multiplied alpha “puff” textures.
-//  Textures are created on the main actor to avoid UIKit off‑thread issues.
+//  Generates a small set of reusable, premultiplied‑alpha “puff” textures.
+//  All UIKit work happens on the main actor to avoid concurrency issues.
 //
 
 import UIKit
@@ -20,101 +20,92 @@ enum CloudSpriteTexture {
     }
 
     /// Build a small atlas of puffs with subtle shape variants.
-    /// All UIKit work runs on the main actor (c77df77 pattern).
-    nonisolated static func makeAtlas(size: Int = 256, seed: UInt32 = 0x0C10D5, count: Int = 4) async -> Atlas {
-        await MainActor.run {
-            var imgs: [UIImage] = []
-            let n = max(1, min(8, count))
+    /// Kept on MainActor so that `UIImage`/CoreGraphics never run off‑thread.
+    nonisolated static func makeAtlas(
+        size: Int = 256,
+        seed: UInt32 = 0x0C10D5,
+        count: Int = 4
+    ) async -> Atlas {
+        let n = max(1, min(8, count))
+        let s = max(64, size)
+
+        let imgs: [UIImage] = await MainActor.run {
+            var out: [UIImage] = []
+            out.reserveCapacity(n)
             for i in 0..<n {
-                let s = seed &+ UInt32(i) &+ 0x9E37_79B9
-                imgs.append(makePuffImage(size: size, seed: s))
+                out.append(renderPuff(size: s, seed: seed &+ UInt32(i &* 977)))
             }
-            return Atlas(images: imgs, size: size)
+            return out
         }
+
+        return Atlas(images: imgs, size: s)
     }
 
-    // MARK: - Internals
+    // MARK: - Rendering (MainActor)
 
-    /// Produces a cauliflower‑style puff by summing several soft discs with
-    /// slightly different centres/radii, then baking gentle top‑lit shading.
     @MainActor
-    private static func makePuffImage(size: Int, seed: UInt32) -> UIImage {
-        let W = max(64, size)
-        let H = W
+    private static func renderPuff(size: Int, seed: UInt32) -> UIImage {
+        let W = max(64, size), H = W
         let bytesPerRow = W * 4
+
+        // Fully initialised buffer prevents garbage / black artefacts.
         var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-        @inline(__always) func urand(_ s: inout UInt32) -> Float {
+        // Tiny LCG (deterministic, re‑entrant).
+        var s = (seed == 0) ? 1 : seed
+        @inline(__always) func urand() -> Float {
             s = 1664525 &* s &+ 1013904223
             return Float(s >> 8) * (1.0 / 16_777_216.0)
         }
 
-        var s = (seed == 0) ? 1 : seed
-
-        // Define 5–7 soft discs.
-        let discCount = Int(5 + floorf(urand(&s) * 3.0 as Float))
+        // Build 5–7 overlapping soft discs to get an irregular puff.
         struct Disc { var cx: Float; var cy: Float; var r: Float; var a: Float }
         var discs: [Disc] = []
-        for i in 0..<discCount {
-            // Bias a couple of “caplets” towards the top.
-            let biasTop: Float = (i < 2) ? -0.18 as Float : 0.0 as Float
-            let cx = (urand(&s) * 0.30 as Float - 0.15 as Float)
-            let cy = (urand(&s) * 0.25 as Float - 0.125 as Float) + biasTop
-            let r  = 0.36 as Float + 0.18 as Float * urand(&s)
-            let a  = 0.65 as Float + 0.35 as Float * urand(&s)
-            discs.append(Disc(cx: cx, cy: cy, r: r, a: a))
+        let discCount = 5 + Int(floorf(urand() * 3.0)) // 5..7
+        for _ in 0..<discCount {
+            // Position discs around centre with slight vertical bias (flatter base).
+            let ang = urand() * .pi * 2
+            let ring = (0.05 + 0.35 * urand()) * Float(W)
+            let cx = Float(W) * 0.5 + cosf(ang) * ring * 0.45
+            let cy = Float(H) * 0.5 + sinf(ang) * ring * 0.32 - 0.04 * Float(H)
+            let r  = (0.18 + 0.42 * urand()) * Float(W) * 0.35
+            let a  = 0.55 + 0.35 * urand()
+            discs.append(.init(cx: cx, cy: cy, r: max(1, r), a: a))
         }
 
-        // Sun direction in puff texture space (top‑left highlight).
-        let sun = simd_float2(-0.5 as Float, -0.75 as Float)
-        let sunN = simd_normalize(sun)
-
-        // Render
+        // Paint: Lorentzian^2 profile gives that pillowy fall‑off.
         for y in 0..<H {
-            let vy = (Float(y) / Float(H - 1)) * 2 - 1
+            let fy = Float(y) + 0.5
             for x in 0..<W {
-                let vx = (Float(x) / Float(W - 1)) * 2 - 1
+                let fx = Float(x) + 0.5
 
-                var dens: Float = 0
-                var peak: Float = 0
-                for d in discs {
-                    let dx = (vx - d.cx) / (d.r * 1.05 as Float)
-                    let dy = (vy - d.cy) / (d.r * 1.15 as Float)
-                    let r2 = dx*dx + dy*dy
-                    if r2 < 4.0 as Float {
-                        let k: Float = 1.6
-                        let v = d.a / ((1 + k*r2) * (1 + k*r2))
-                        dens += v
-                        peak = max(peak, v)
-                    }
+                var d: Float = 0
+                for disc in discs {
+                    let dx = (fx - disc.cx) / disc.r
+                    let dy = (fy - disc.cy) / disc.r
+                    let q  = dx*dx + dy*dy
+                    if q > 4 { continue }
+                    let k: Float = 1.6
+                    let shape = 1.0 / ((1.0 + k*q) * (1.0 + k*q))
+                    d += disc.a * shape
                 }
 
-                // Normalise and soft threshold.
-                dens = max(0, dens)
-                dens = dens / (1.0 as Float + dens)
-                let alpha = powf(dens, 0.85 as Float)
+                // Normalise + gentle S‑curve to keep edges airy.
+                d = max(0, min(1, d))
+                d = d * (0.70 + 0.30 * d)
 
-                // Baked top‑lit shading (very gentle).
-                let h = simd_dot(simd_float2(vx, vy), sunN)
-                let shade: Float = 0.55 as Float + 0.35 as Float * max(0, -h) + 0.10 as Float * peak
-
-                // Premultiplied.
-                let white: Float = min(1.05 as Float, shade)
-                let r = UInt8(min(255, Int(white * alpha * 255.0 as Float + 0.5 as Float)))
-                let g = r
-                let b = r
-                let a = UInt8(min(255, Int(alpha * 255.0 as Float + 0.5 as Float)))
-
-                let idx = (y * W + x) * 4
-                buf[idx + 0] = r
-                buf[idx + 1] = g
-                buf[idx + 2] = b
-                buf[idx + 3] = a
+                // Premultiplied white (avoids dark fringes during alpha blending).
+                let a = UInt8(d * 255.0 + 0.5)
+                let i = (y * W + x) * 4
+                buf[i + 0] = a
+                buf[i + 1] = a
+                buf[i + 2] = a
+                buf[i + 3] = a
             }
         }
 
-        // Make CGImage → UIImage.
-        let data = Data(buf) as CFData
+        // Upload as premultiplied‑alpha CGImage.
+        let data = CFDataCreate(nil, buf, buf.count)!
         let provider = CGDataProvider(data: data)!
         let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let cg = CGImage(
@@ -122,8 +113,11 @@ enum CloudSpriteTexture {
             bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow,
             space: cs,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
+            provider: provider, decode: nil,
+            shouldInterpolate: true, intent: .defaultIntent
         )!
-        return UIImage(cgImage: cg)
+
+        return UIImage(cgImage: cg, scale: 1, orientation: .up)
     }
 }
+
