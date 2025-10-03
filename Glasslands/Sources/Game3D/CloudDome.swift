@@ -14,24 +14,28 @@ enum CloudDome {
     static func make(radius: CGFloat, skyImage: UIImage) -> SCNNode {
         let sphere = SCNSphere(radius: radius)
         sphere.isGeodesic = true
-        sphere.segmentCount = 64  // was 128
+        sphere.segmentCount = 64
 
         let m = SCNMaterial()
         m.lightingModel = .constant
 
-        // Emission-only to avoid double sampling the sky texture
+        // Emission-only keeps it cheap; ensure clean sampling.
         m.emission.contents = skyImage
         m.diffuse.contents = nil
-        m.emission.mipFilter = .linear
+        m.minificationFilter = .linear
+        m.magnificationFilter = .linear
+        m.mipFilter = .linear
 
+        // Render inside of the sphere
         m.isDoubleSided = false
         m.cullMode = .front
+
+        // No depth interaction
         m.writesToDepthBuffer = false
         m.readsFromDepthBuffer = false
 
         // Flip horizontally so azimuth aligns with sun maths
-        let flip = SCNMatrix4MakeScale(-1, 1, 1)
-        m.emission.contentsTransform = flip
+        m.emission.contentsTransform = SCNMatrix4MakeScale(-1, 1, 1)
 
         sphere.firstMaterial = m
 

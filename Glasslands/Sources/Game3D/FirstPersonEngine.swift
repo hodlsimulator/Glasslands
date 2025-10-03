@@ -51,7 +51,6 @@ final class FirstPersonEngine: NSObject {
     private let skyAnchor = SCNNode()
     private var sunDiscNode: SCNNode?
     private var sunLightNode: SCNNode?
-    private var skyboxTask: Task<Void, Never>?
 
     private var lastTime: TimeInterval = 0
     private var beacons = Set<SCNNode>()
@@ -246,7 +245,6 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func buildSky() {
-        skyboxTask?.cancel()
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
@@ -257,10 +255,10 @@ final class FirstPersonEngine: NSObject {
         scene.lightingEnvironment.intensity = 0
 
         let img = SkyGen.skyWithCloudsImage(
-            width: 1536,
-            height: 768,
-            coverage: 0.22,
-            thickness: 0.55,
+            width: 2048,
+            height: 1024,
+            coverage: 0.26,
+            thickness: 0.30,
             seed: 424242,
             sunAzimuthDeg: 40,
             sunElevationDeg: 65
@@ -453,4 +451,3 @@ final class FirstPersonEngine: NSObject {
         }
     }
 }
-
