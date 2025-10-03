@@ -13,14 +13,6 @@
 import UIKit
 import simd
 
-// MARK: - File-private math (free function so it cannot be @MainActor by inference)
-
-@inline(__always)
-fileprivate func cbSmooth01(_ x: Float) -> Float {
-    let t = max(0 as Float, min(1 as Float, x))
-    return t * t * (3 - 2 * t)
-}
-
 // MARK: - Layer
 
 enum CloudBillboardLayer {
@@ -56,6 +48,12 @@ enum CloudBillboardLayer {
                 func rand(_ s: inout UInt32) -> Float {
                     s = 1664525 &* s &+ 1013904223
                     return Float(s >> 8) * (1.0 / 16_777_216.0)
+                }
+
+                @inline(__always)
+                func smooth01(_ x: Float) -> Float {
+                    let t = max(0 as Float, min(1 as Float, x))
+                    return t * t * (3 - 2 * t)
                 }
 
                 var s = seed == 0 ? 1 : seed
@@ -121,7 +119,7 @@ enum CloudBillboardLayer {
 
                         // Size falls off from centre; scale with elevation as a perspective cue.
                         let falloff = 1.0 - min(1.0, simd_length(offset)) * 0.28
-                        let elevationScale = 0.8 + 0.9 * cbSmooth01(dir.y)
+                        let elevationScale = 0.8 + 0.9 * smooth01(dir.y)
                         let size = baseSize * falloff * elevationScale * (0.88 + 0.24 * rand(&s))
 
                         let roll = (rand(&s) * 2 - 1) * .pi
