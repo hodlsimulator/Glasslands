@@ -4,29 +4,19 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Places hundreds of alpha‑puffed billboards on a spherical shell above the
-//  player, grouped into clusters. Correct perspective, no lat‑long stretching.
-//  All SceneKit/UIKit work is executed on the main actor (c77df77 style).
-//
-
-//
-//  CloudBillboardLayer.swift
-//  Glasslands
-//
-//  Places hundreds of alpha‑puffed billboards on a spherical shell above the
-//  player, grouped into clusters. Correct perspective, no lat‑long stretching.
-//  All SceneKit/UIKit happens on the main actor.
+//  Places hundreds of alpha-puffed billboards on a spherical shell above the
+//  player, grouped into clusters. Correct perspective, no lat-long stretching.
+//  SceneKit/UIKit work stays on the main actor; heavy maths runs off-main.
 //
 
 @preconcurrency import SceneKit
 import UIKit
 import simd
 
-@MainActor
 enum CloudBillboardLayer {
 
     /// Asynchronously builds the billboard layer.
-    /// Heavy maths runs off‑main; UIKit/SceneKit hops to MainActor.
+    /// Heavy maths runs off-main; UIKit/SceneKit hops to MainActor.
     nonisolated static func makeAsync(
         radius: CGFloat,
         minAltitudeY: Float = 0.08,      // lowest cloud y on the unit sphere
@@ -35,7 +25,7 @@ enum CloudBillboardLayer {
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            // 1) Off‑main: plan the clusters & puffs.
+            // 1) Off-main: plan the clusters & puffs.
             let specs = buildSpecs(
                 clusterCount: clusterCount,
                 minAltitudeY: minAltitudeY,
@@ -46,7 +36,9 @@ enum CloudBillboardLayer {
             let atlas = await CloudSpriteTexture.makeAtlas(size: 256, seed: seed, count: 4)
 
             // 3) Main: assemble SceneKit nodes.
-            let node = await MainActor.run { assembleLayer(radius: radius, specs: specs, atlas: atlas) }
+            let node = await MainActor.run {
+                assembleLayer(radius: radius, specs: specs, atlas: atlas)
+            }
             await MainActor.run { completion(node) }
         }
     }
@@ -56,9 +48,9 @@ enum CloudBillboardLayer {
     struct PuffSpec {
         /// Unit direction from origin to the puff’s centre on the dome.
         var dir: simd_float3
-        /// World‑space quad size in metres (or whatever the world units are).
+        /// World-space quad size.
         var size: Float
-        /// Texture roll (so sprites don’t look identical).
+        /// Texture roll so sprites don’t look identical.
         var roll: Float
         /// Which atlas entry to use.
         var atlasIndex: Int
@@ -69,17 +61,19 @@ enum CloudBillboardLayer {
     }
 
     /// Computes cluster + puff directions on the unit sphere.
-    /// Runs off‑main (pure value types; Sendable).
+    /// Runs off-main (pure value types; Sendable).
     nonisolated
     private static func buildSpecs(
         clusterCount: Int,
         minAltitudeY: Float,
         seed: UInt32
     ) -> [Cluster] {
-        @inline(__always) func rand(_ s: inout UInt32) -> Float {
+        @inline(__always)
+        func rand(_ s: inout UInt32) -> Float {
             s = 1664525 &* s &+ 1013904223
             return Float(s >> 8) * (1.0 / 16_777_216.0)
         }
+
         var s = seed == 0 ? 1 : seed
 
         // 1) Place cluster centres on the upper hemisphere with minimum angular separation.
@@ -90,16 +84,26 @@ enum CloudBillboardLayer {
 
         while centres.count < clusterCount && attempts < clusterCount * 200 {
             attempts += 1
-            // Bias elevation towards mid‑sky (feels more like the reference image).
+
+            // Bias elevation towards mid-sky (closer to the reference look).
             let u1 = rand(&s)
             let t  = rand(&s)
             let az = (u1 - 0.5) * (2.0 * .pi)
             let el = (0.08 + 0.84 * t) * (.pi / 2.0)
-            let d  = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
+
+            let d = simd_float3(
+                sinf(az) * cosf(el),
+                sinf(el),
+                cosf(az) * cosf(el)
+            )
+
             if d.y < minAltitudeY { continue }
 
             var ok = true
-            for c in centres where simd_dot(c, d) > minCos { ok = false; break }
+            for c in centres where simd_dot(c, d) > minCos {
+                ok = false
+                break
+            }
             if ok { centres.append(simd_normalize(d)) }
         }
 
@@ -116,8 +120,8 @@ enum CloudBillboardLayer {
             let north = simd_normalize(simd_cross(up, east))
 
             var puffs: [PuffSpec] = []
-            let baseSize: Float = 110.0 + 45.0 * rand(&s)       // tuned for ~2 km dome
-            let count = 4 + Int(rand(&s) * 5.0)                  // 4–8 puffs per cluster
+            let baseSize: Float = 110.0 + 45.0 * rand(&s)      // tuned for ~2 km dome
+            let count = 4 + Int(rand(&s) * 5.0)                // 4–8 puffs per cluster
 
             for _ in 0..<count {
                 // Scatter within a small ellipse in tangent space (flatter vertically).
@@ -127,10 +131,11 @@ enum CloudBillboardLayer {
 
                 // Slight upward skew so the top is puffier.
                 let skew: Float = 0.10 * rand(&s)
+
+                // Move from centre along tangent and re-normalise to the sphere.
                 let dir = simd_normalize(up + offset * 0.08 + north * skew * 0.05)
 
-                // Size falls off gently from the centre; also scale with elevation
-                // so near‑zenith puffs are a touch larger (perspective cue).
+                // Size falls off from centre; scale with elevation as a perspective cue.
                 let falloff = 1.0 - min(1.0, simd_length(offset)) * 0.28
                 let elevationScale = 0.8 + 0.9 * smooth01(dir.y)
                 let size = baseSize * falloff * elevationScale * (0.88 + 0.24 * rand(&s))
@@ -138,7 +143,12 @@ enum CloudBillboardLayer {
                 let roll = (rand(&s) * 2 - 1) * .pi
                 let atlas = Int(rand(&s) * 4.0)
 
-                puffs.append(PuffSpec(dir: dir, size: max(8, size), roll: roll, atlasIndex: atlas))
+                puffs.append(PuffSpec(
+                    dir: dir,
+                    size: max(8, size),
+                    roll: roll,
+                    atlasIndex: atlas
+                ))
             }
 
             clusters.append(Cluster(puffs: puffs))
@@ -171,7 +181,7 @@ enum CloudBillboardLayer {
             m.writesToDepthBuffer = false
             m.readsFromDepthBuffer = false
             m.blendMode = .alpha
-            m.transparencyMode = .aOne // premultiplied
+            m.transparencyMode = .aOne // premultiplied alpha
             m.diffuse.mipFilter = .linear
             m.emission.mipFilter = .linear
             materials.append(m)
@@ -197,9 +207,8 @@ enum CloudBillboardLayer {
                 bb.freeAxes = .all
                 n.constraints = [bb]
 
-                // Unique-ish material per puff (copy for per‑node roll).
+                // Per-node material copy so texture roll can differ.
                 let mat = materials[p.atlasIndex % materials.count].copy() as! SCNMaterial
-                // Rotate the texture so repeated sprites don’t line up.
                 let rot = SCNMatrix4MakeRotation(p.roll, 0, 0, 1)
                 mat.diffuse.contentsTransform = rot
                 mat.emission.contentsTransform = rot
@@ -215,8 +224,10 @@ enum CloudBillboardLayer {
         return root
     }
 
-    // Local smoothstep for use in buildSpecs (kept nonisolated).
-    nonisolated @inline(__always)
+    // MARK: - Math helpers (nonisolated)
+
+    nonisolated
+    @inline(__always)
     private static func smooth01(_ x: Float) -> Float {
         let t = max(0 as Float, min(1 as Float, x))
         return t * t * (3 - 2 * t)

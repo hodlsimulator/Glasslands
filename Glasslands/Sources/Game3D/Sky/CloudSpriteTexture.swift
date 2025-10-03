@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates a small set of reusable, premultiplied‑alpha “puff” textures.
-//  All UIKit work happens on the main actor to avoid concurrency issues.
+//  Generates a small set of reusable, premultiplied-alpha “puff” textures.
+//  UIKit/CoreGraphics work is run on the main actor to avoid concurrency issues.
 //
 
 import UIKit
@@ -20,7 +20,7 @@ enum CloudSpriteTexture {
     }
 
     /// Build a small atlas of puffs with subtle shape variants.
-    /// Kept on MainActor so that `UIImage`/CoreGraphics never run off‑thread.
+    /// Kept on MainActor so that UIImage/CoreGraphics never run off-thread.
     nonisolated static func makeAtlas(
         size: Int = 256,
         seed: UInt32 = 0x0C10D5,
@@ -51,9 +51,10 @@ enum CloudSpriteTexture {
         // Fully initialised buffer prevents garbage / black artefacts.
         var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-        // Tiny LCG (deterministic, re‑entrant).
+        // Tiny LCG (deterministic, re-entrant).
         var s = (seed == 0) ? 1 : seed
-        @inline(__always) func urand() -> Float {
+        @inline(__always)
+        func urand() -> Float {
             s = 1664525 &* s &+ 1013904223
             return Float(s >> 8) * (1.0 / 16_777_216.0)
         }
@@ -73,7 +74,7 @@ enum CloudSpriteTexture {
             discs.append(.init(cx: cx, cy: cy, r: max(1, r), a: a))
         }
 
-        // Paint: Lorentzian^2 profile gives that pillowy fall‑off.
+        // Paint: Lorentzian^2 profile gives a pillowy fall-off.
         for y in 0..<H {
             let fy = Float(y) + 0.5
             for x in 0..<W {
@@ -90,7 +91,7 @@ enum CloudSpriteTexture {
                     d += disc.a * shape
                 }
 
-                // Normalise + gentle S‑curve to keep edges airy.
+                // Normalise + gentle S-curve to keep edges airy.
                 d = max(0, min(1, d))
                 d = d * (0.70 + 0.30 * d)
 
@@ -104,7 +105,7 @@ enum CloudSpriteTexture {
             }
         }
 
-        // Upload as premultiplied‑alpha CGImage.
+        // Upload as premultiplied-alpha CGImage.
         let data = CFDataCreate(nil, buf, buf.count)!
         let provider = CGDataProvider(data: data)!
         let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
@@ -120,4 +121,3 @@ enum CloudSpriteTexture {
         return UIImage(cgImage: cg, scale: 1, orientation: .up)
     }
 }
-
