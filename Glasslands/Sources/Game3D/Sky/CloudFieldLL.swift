@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Low-resolution lat-long “puff” field with clustering and horizon/zenith bias.
-//  The field is bilinearly sampled in (u,v) ∈ [0,1]^2.
+//  Cumulus cluster field in lat-long space.
+//  Produces rounded “pile-of-balls” clusters with a proper horizon/zenith bias.
 //
 
 import Foundation
@@ -16,101 +16,87 @@ struct CloudFieldLL {
     let height: Int
     private let data: [Float]
 
-    /// Deterministic field for the given parameters.
+    // File-private RNG used by the builder and helpers.
+    fileprivate struct LCG {
+        private var s: UInt32
+        init(_ seed: UInt32) { self.s = seed == 0 ? 1 : seed }
+        mutating func next() -> UInt32 { s = 1664525 &* s &+ 1013904223; return s }
+        mutating func unit() -> Float { Float(next() >> 8) * (1.0 / 16_777_216.0) }
+        mutating func range(_ lo: Float, _ hi: Float) -> Float { lo + (hi - lo) * unit() }
+        mutating func int(_ lo: Int, _ hi: Int) -> Int {
+            let u = unit()
+            return lo + Int(Float(hi - lo + 1) * u)
+        }
+    }
+
     static func build(width: Int, height: Int, coverage: Float, seed: UInt32) -> CloudFieldLL {
-        let gW = max(128, width)
-        let gH = max(64, height)
+        let gW = max(256, width)
+        let gH = max(128, height)
         var field = [Float](repeating: 0, count: gW * gH)
 
-        struct LCG {
-            private var s: UInt32
-            init(seed: UInt32) { self.s = (seed == 0 ? 1 : seed) }
-            mutating func next() -> UInt32 { s = 1664525 &* s &+ 1013904223; return s }
-            mutating func unit() -> Float { Float(next() >> 8) * (1.0 / 16_777_216.0) }
-            mutating func range(_ lo: Float, _ hi: Float) -> Float { lo + (hi - lo) * unit() }
-            mutating func normal(_ mu: Float, _ sigma: Float) -> Float {
-                let u1 = max(1e-6, unit()), u2 = unit()
-                let r = sqrtf(-2.0 * logf(u1)); let t = 2.0 * .pi * u2
-                return mu + sigma * r * cosf(t)
-            }
-        }
-        var rng = LCG(seed: seed ^ 0xA51C_2C2D)
+        var rng = LCG(seed ^ 0x7F4A_AE13)
 
-        // Roughly constant number of "puffs" across sizes; fewer when coverage is high.
-        let baseCount = max(80, (gW * gH) / 60)
-        let puffCount = Int(Float(baseCount) * (0.34 / max(0.10, coverage)))
+        // Jittered grid for blue-noise-ish placement of clusters.
+        // More clusters near v≈0.3–0.65, fewer near zenith and near the horizon.
+        let rows = max(10, gH / 40)
+        for r in 0..<rows {
+            let vRow = (Float(r) + 0.5) / Float(rows)
+            // 0 at very top/bottom, 1 in the mid-sky band.
+            let band = {
+                let t = vRow
+                let a = SkyMath.smoothstep(0.05, 0.25, t)
+                let b = 1.0 - SkyMath.smoothstep(0.72, 0.94, t)
+                return a * b
+            }()
 
-        // Fade the very top of the sky so the zenith never becomes a white cap.
-        let zenithFadeStart: Float = 0.96
-        let zenithFadeEnd: Float   = 0.995
+            let baseCols = max(10, gW / 40)
+            let cols = max(6, Int(Float(baseCols) * (0.75 + 1.35 * band)))
+            for c in 0..<cols {
+                if rng.unit() > coverage { continue }
 
-        for _ in 0..<puffCount {
-            // Centre with horizon bias (more puffs towards v ~ 0.55).
-            let u = rng.unit()
-            let vbias = SkyMath.smoothstep(0.10, 0.90, rng.unit())
-            let v = 0.25 + 0.65 * vbias
+                let u = (Float(c) + rng.unit()) / Float(cols)
+                let v = (Float(r) + rng.unit()) / Float(rows)
 
-            let cx = u * Float(gW)
-            let cy = v * Float(gH)
+                // Keep inside the visible sky band; avoid very bottom (nadir).
+                let vClamped = min(0.88, max(0.04, v))
 
-            // Elliptical "puff" with mild rotation and scale → produces rounded clumps.
-            let theta = rng.range(-.pi, .pi)
-            let ca = cosf(theta), sa = sinf(theta)
-            let sx = rng.range(6, 26)
-            let sy = rng.range(6, 24)
-            let amp = 0.7 + 0.6 * rng.unit()     // amplitude variation
+                // Scale with perspective: larger near zenith, smaller near horizon.
+                let zen = 1.0 - (vClamped)          // v=0 top → zen=1
+                let scale = 0.8 + 0.9 * SkyMath.smooth01(zen)   // 0.8..1.7
 
-            // Slight horizon boost: bigger/brighter puffs lower in the sky.
-            let horizonBoost = 0.25 * SkyMath.smoothstep(0.32, 0.75, v)
+                // Base cloud size in pixels.
+                let base = (18.0 + 28.0 * rng.unit()) * scale
 
-            // Bounding box in grid space.
-            let x0 = max(0, Int(cx - sx * 2 - 2)), x1 = min(gW - 1, Int(cx + sx * 2 + 2))
-            let y0 = max(0, Int(cy - sy * 2 - 2)), y1 = min(gH - 1, Int(cy + sy * 2 + 2))
-            if x0 > x1 || y0 > y1 { continue }
-
-            // Zenith fade multiplier (prevents "ring" artefacts near the very top).
-            let upY = (Float(gH) * 0.5 - cy) / Float(gH) * 2.0 // -1..1 (approx)
-            let tFade = SkyMath.smoothstep(zenithFadeStart, zenithFadeEnd, SkyMath.clampf(upY, -1, 1))
-            let tCap  = 1.0 - 0.40 * tFade
-
-            for gy in y0...y1 {
-                let yy = (Float(gy) + 0.5) - cy
-
-                // Gentle accumulation bias upwards so puffs "stack".
-                let gravBias = 1.0 + 0.22 * SkyMath.smoothstep(0, sy * 0.8, max(0, yy))
-
-                for gx in x0...x1 {
-                    let xx = (Float(gx) + 0.5) - cx
-
-                    // Rotate & squash to ellipse space.
-                    let xr = (xx * ca - yy * sa) / max(1e-4, sx)
-                    let yr = (xx * sa + yy * ca) / max(1e-4, sy)
-                    let d2 = xr * xr + yr * yr
-
-                    // Squared–Lorentzian falloff → rounded shoulders.
-                    let k: Float = 1.75
-                    let shape = 1.0 / ((1.0 + k * d2) * (1.0 + k * d2))
-                    let add = (amp + horizonBoost) * shape * tCap * gravBias
-                    field[gy * gW + gx] += add.isFinite ? add : 0
-                }
+                addCluster(
+                    into: &field, gW: gW, gH: gH,
+                    cx: u * Float(gW),
+                    cy: vClamped * Float(gH),
+                    base: base,
+                    rng: &rng
+                )
             }
         }
 
-        // Normalise and give density a mild "S" curve (brings out edges).
+        // Normalise + gentle S-curve to bring out edges.
         var fmax: Float = 0
         for v in field where v.isFinite && v > fmax { fmax = v }
         let invMax: Float = fmax > 0 ? (1.0 / fmax) : 1.0
         for i in 0..<(gW * gH) {
             var t = field[i] * invMax
             t = max(0, t)
-            t = t * (0.70 + 0.30 * t)
+            // Add a little micro detail with 2-octave value noise to avoid flat blobs.
+            let nx = (Float(i % gW) + 13.0) * 0.015
+            let ny = (Float(i / gW) + 17.0) * 0.015
+            let micro = 0.55 * valueFBM(x: nx, y: ny, seed: seed &+ 19, octaves: 2)
+            t = t * (0.70 + 0.30 * t) * (0.95 + 0.10 * micro)
             field[i] = t
         }
 
         return CloudFieldLL(width: gW, height: gH, data: field)
     }
 
-    /// Bilinear sample in [0,1]^2.
+    // MARK: - Sampling
+
     @inline(__always)
     func sample(u: Float, v: Float) -> Float {
         let uc = SkyMath.clampf(u, 0, 0.99999)
@@ -130,13 +116,105 @@ struct CloudFieldLL {
         let y0 = SkyMath.safeIndex(yi    , 0, height - 1)
         let y1 = SkyMath.safeIndex(yi + 1, 0, height - 1)
 
-        let i00 = y0 * width + x0, i10 = y0 * width + x1
-        let i01 = y1 * width + x0, i11 = y1 * width + x1
-
-        let a = data[i00], b = data[i10], c = data[i01], d = data[i11]
+        let a = data[y0 * width + x0], b = data[y0 * width + x1]
+        let c = data[y1 * width + x0], d = data[y1 * width + x1]
         let ab = a + (b - a) * tx
         let cd = c + (d - c) * tx
-        let v  = ab + (cd - ab) * ty
-        return v.isFinite ? v : 0
+        return ab + (cd - ab) * ty
+    }
+
+    // MARK: - Internals
+
+    private static func addCluster(
+        into field: inout [Float], gW: Int, gH: Int,
+        cx: Float, cy: Float, base: Float, rng: inout LCG
+    ) {
+        // Number of constituent puffs (pile-of-balls).
+        let n = max(4, min(10, rng.int(6, 9)))
+
+        // Slight upward skew so tops feel cauliflower-like.
+        for k in 0..<n {
+            let ang = rng.range(-Float.pi, Float.pi)
+            let r   = (0.2 + 0.9 * rng.unit()) * base
+            let dx  = cosf(ang) * r
+            let dy  = sinf(ang) * (r * 0.7) - (0.15 * base)   // push a little downward so base bulks up
+            let px  = cx + dx
+            let py  = cy + dy
+
+            // Larger, brighter cores near the cluster centre; smaller towards edges.
+            let fall = 1.0 - Float(k) / Float(n)
+            let puffR = (0.65 + 0.55 * fall) * base
+            let amp   = (0.75 + 0.35 * fall) * (0.90 + 0.20 * rng.unit())
+
+            stampPuff(into: &field, gW: gW, gH: gH, cx: px, cy: py, rx: puffR, ry: puffR * 0.92, amp: amp)
+        }
+
+        // A couple of small “caplets” on top to suggest recent growth.
+        let capCount = rng.int(1, 3)
+        for _ in 0..<capCount {
+            let px = cx + rng.range(-0.25 * base, 0.25 * base)
+            let py = cy - rng.range(0.55 * base, 0.95 * base)
+            let puffR: Float = (0.30 + 0.25 * rng.unit()) * base
+            let amp: Float = 0.60 + 0.25 * rng.unit()
+            stampPuff(into: &field, gW: gW, gH: gH, cx: px, cy: py, rx: puffR, ry: puffR, amp: amp)
+        }
+    }
+
+    /// Spherical-ish kernel with rounded shoulders; elliptical support.
+    private static func stampPuff(
+        into field: inout [Float], gW: Int, gH: Int,
+        cx: Float, cy: Float, rx: Float, ry: Float, amp: Float
+    ) {
+        let x0 = max(0, Int(cx - rx * 2 - 2)), x1 = min(gW - 1, Int(cx + rx * 2 + 2))
+        let y0 = max(0, Int(cy - ry * 2 - 2)), y1 = min(gH - 1, Int(cy + ry * 2 + 2))
+        if x0 > x1 || y0 > y1 { return }
+
+        let invRx = 1.0 / max(1e-4, rx)
+        let invRy = 1.0 / max(1e-4, ry)
+        for gy in y0...y1 {
+            let yy = (Float(gy) + 0.5) - cy
+            let yr = yy * invRy
+            for gx in x0...x1 {
+                let xx = (Float(gx) + 0.5) - cx
+                let xr = xx * invRx
+                let d2 = xr * xr + yr * yr
+                if d2 > 4.0 { continue }
+
+                // Squared-Lorentzian → puffy.
+                let k: Float = 1.6
+                let shape = 1.0 / ((1.0 + k * d2) * (1.0 + k * d2))
+                field[gy * gW + gx] += amp * shape
+            }
+        }
+    }
+
+    // Simple value noise + fBm for micro structure.
+    private static func valueNoise(x: Float, y: Float, seed: UInt32) -> Float {
+        let xi = floorf(x), yi = floorf(y)
+        let tx = x - xi, ty = y - yi
+        func h(_ X: Int32, _ Y: Int32) -> Float {
+            let v = SkyMath.h2(X, Y, seed) & 0xFFFF
+            return Float(v) * (1.0 / 65535.0)
+        }
+        let X = Int32(xi), Y = Int32(yi)
+        let a = h(X, Y), b = h(X + 1, Y)
+        let c = h(X, Y + 1), d = h(X + 1, Y + 1)
+        let ab = a + (b - a) * tx
+        let cd = c + (d - c) * tx
+        return ab + (cd - ab) * ty
+    }
+
+    private static func valueFBM(x: Float, y: Float, seed: UInt32, octaves: Int) -> Float {
+        var amp: Float = 0.5
+        var freq: Float = 1.0
+        var sum: Float = 0
+        var s = seed
+        for _ in 0..<max(1, octaves) {
+            sum += amp * valueNoise(x: x * freq, y: y * freq, seed: s)
+            amp *= 0.5
+            freq *= 2.0
+            s &+= 0x9E37_79B9
+        }
+        return sum * (1.0 / (1.0 - powf(0.5, Float(max(1, octaves)))))
     }
 }
