@@ -269,17 +269,21 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Seam-free equirectangular background with gravity-biased cumulus.
-        let sky = SkyGen.skyWithCloudsImage(width: 4096, height: 2048,
-                                            coverage: 0.38, thickness: 0.32,
-                                            seed: 424242)
-        scene.background.contents = sky
-        scene.background.wrapS = .repeat
-        scene.background.wrapT = .clamp
-        // Flip horizontally so the sun disc lines up with azimuth math.
-        scene.background.contentsTransform = SCNMatrix4MakeScale(-1, 1, 1)
+        // Do not use SceneKit's background; draw a textured dome instead.
+        scene.background.contents = nil
+        scene.lightingEnvironment.contents = nil
+        scene.lightingEnvironment.intensity = 0
 
-        // Optional billboarded sun disc (still helpful for a bright centre).
+        let img = SkyGen.skyWithCloudsImage(
+            width: 2048, height: 1024,
+            coverage: 0.22, thickness: 0.55,
+            seed: 424242,
+            sunAzimuthDeg: 40, sunElevationDeg: 65
+        )
+        let dome = CloudDome.make(radius: CGFloat(cfg.skyDistance), skyImage: img)
+        skyAnchor.addChildNode(dome)
+
+        // Optional sun disc
         if sunLightNode != nil {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
