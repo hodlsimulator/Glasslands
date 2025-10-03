@@ -11,103 +11,114 @@ import simd
 
 enum SkyGen {
     static func skyWithCloudsImage(
-        width: Int = 2048,
-        height: Int = 4096,
-        coverage: Float = 0.48,   // lower than before → more visible clouds
-        thickness: Float = 0.20,
-        seed: Int32 = 424242
+        width: Int = 4096,
+        height: Int = 2048,
+        coverage: Float = 0.38,      // lower → more cloud area
+        thickness: Float = 0.32,     // higher → softer edges
+        seed: Int32 = 424242,
+        sunAzimuthDeg: Float = 40,
+        sunElevationDeg: Float = 65
     ) -> UIImage {
         let W = max(64, width)
-        let H = max(64, height)
-
+        let H = max(32, height)
         let cs = CGColorSpaceCreateDeviceRGB()
         let bpr = W * 4
         var pixels = [UInt8](repeating: 0, count: W * H * 4)
 
         @inline(__always) func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float { min(hi, max(lo, x)) }
-        @inline(__always) func lerp3(_ a: simd_float3, _ b: simd_float3, _ t: Float) -> simd_float3 { a + (b - a) * t }
+        @inline(__always) func mix3(_ a: simd_float3, _ b: simd_float3, _ t: Float) -> simd_float3 { a + (b - a) * t }
+        @inline(__always) func toByte(_ f: Float) -> UInt8 { UInt8(max(0, min(255, Int(f * 255.0)))) }
         @inline(__always) func smooth01(_ x: Float) -> Float { let t = clampf(x, 0, 1); return t * t * (3 - 2 * t) }
         @inline(__always) func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
             let d = e1 - e0
             if abs(d) < .ulpOfOne { return x < e0 ? 0 : 1 }
             return smooth01((x - e0) / d)
         }
-        @inline(__always) func n01(_ v: Float) -> Float { v * 0.5 + 0.5 }
-        @inline(__always) func toByte(_ f: Float) -> UInt8 {
-            let v = Int(f * 255.0)
-            return UInt8(max(0, min(255, v)))
-        }
 
-        // Sky gradient (top → mid → bottom)
+        let deg = Float.pi / 180
+        let sunAz = sunAzimuthDeg * deg
+        let sunEl = sunElevationDeg * deg
+        let sunDir = simd_normalize(simd_float3(
+            sinf(sunAz) * cosf(sunEl),
+            sinf(sunEl),
+            cosf(sunAz) * cosf(sunEl)
+        ))
+
+        // Sky gradient colours (top → mid → bottom)
         let top = simd_float3(0.50, 0.74, 0.92)
         let mid = simd_float3(0.70, 0.86, 0.95)
         let bot = simd_float3(0.86, 0.93, 0.98)
 
-        // FBM billow with light domain-warp (Float positions for GKNoise)
-        let base  = GKBillowNoiseSource(frequency: 1.2, octaveCount: 5, persistence: 0.5, lacunarity: 2.0, seed: seed)
-        let n0    = GKNoise(base)
+        // Domain-warped 2D FBM (lat/long space) — fast and seam-free.
+        let base  = GKNoise(GKBillowNoiseSource(frequency: 1.2, octaveCount: 5, persistence: 0.5, lacunarity: 2.0, seed: seed))
         let warpX = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: seed &+ 101))
         let warpY = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: seed &+ 202))
 
-        // Slightly larger features than before so clouds are obvious
-        let scale: Float = 1.8
+        let scale: Float = 1.8   // feature size (bigger → smaller details)
 
         for y in 0..<H {
-            let v = Float(y) / Float(H - 1)
-            let cTopMid = lerp3(top, mid, smooth01(min(1, v / 0.55)))
-            let skyRGB  = lerp3(cTopMid, bot, smooth01(max(0, (v - 0.55) / 0.45)))
+            let v = (Float(y) + 0.5) / Float(H)             // 0 at top → 1 at bottom
+            let phi = v * Float.pi                           // latitude (0..π)
+            let upY = cosf(phi)                              // 1 at zenith → -1 at nadir
+
+            // Sky gradient (no cubemap → no seams)
+            var sky = mix3(bot, mid, clampf((upY + 0.20) * 0.80, 0, 1))
+            sky = mix3(sky, top, clampf((upY + 1.00) * 0.50, 0, 1))
 
             for x in 0..<W {
-                let u = Float(x) / Float(W - 1)
+                let u = (Float(x) + 0.5) / Float(W)         // 0..1 across
+                let theta = u * 2 * Float.pi                 // longitude
+                let dir = simd_float3(cosf(theta) * sinf(phi), upY, sinf(theta) * sinf(phi))
 
-                // Domain-warped sample in image space (seam-free)
-                let wx = warpX.value(atPosition: vector_float2(u * scale, v * scale))
-                let wy = warpY.value(atPosition: vector_float2((u + 0.21) * scale, (v - 0.37) * scale))
-                let uu = u * scale + wx * 0.18
-                let vv = v * scale + wy * 0.18
-                let raw = n0.value(atPosition: vector_float2(uu, vv))
-                let n = pow(n01(raw), 1.45)
+                // Domain-warped noise in equirectangular space (seam-free at u=0/1)
+                let wx = Float(warpX.value(atPosition: vector_float2(u * 4.0, v * 2.0)))
+                let wy = Float(warpY.value(atPosition: vector_float2(u * 4.0, v * 2.0)))
+                var n  = Float(base .value(atPosition: vector_float2(u * scale + wx * 0.33,
+                                                                      v * scale + wy * 0.33)))
+                n = max(-1.0, min(1.0, n))
+                var billow = Float(0.5 * n + 0.5)            // 0..1
+                billow = pow(billow, 1.25)
 
-                // Cloud alpha
-                let cov = clampf(coverage, 0, 1)
-                let thk = max(0.001, thickness)
-                var a = smoothstep(cov, cov + thk, n)
+                // Gravity bias: heavier bottoms, lighter tops
+                let baseThr = clampf(coverage, 0, 1)
+                let thick = max(0.001, thickness)
+                let grav = (1 - clampf(upY, 0, 1))           // 0 at top → 1 near horizon
+                let bias = grav * 0.25
+                var a = smoothstep(baseThr - bias, baseThr - bias + thick, billow)
 
-                // Fade OUT near the horizon (bottom of the image), not the zenith.
-                // This removes that single “smudge” sitting on the horizon line.
-                let horizonFade = smoothstep(0.0, 0.35, 1.0 - v)
-                a *= horizonFade
+                // Flatten undersides slightly
+                let flat = smoothstep(-0.15, 0.35, -dir.y)
+                a = a * (0.90 + 0.10 * flat)
 
-                // Subtle silver lining towards a notional sun (top-right)
-                let sunDir  = simd_normalize(simd_float3(0.4, -0.7, 0.6))
-                let viewDir = simd_normalize(simd_float3(u - 0.5, v - 0.5, 1))
-                let sunDot  = max(0, simd_dot(viewDir, sunDir))
-                let silver  = pow(sunDot, 10) * 0.6 + pow(sunDot, 28) * 0.4
+                // Horizon fade
+                a *= clampf((upY + 0.20) * 1.4, 0, 1)
 
-                var rgb = skyRGB
-                if a > 0 {
-                    let cloud = simd_float3(repeating: 0.86 + 0.28 * silver)
-                    rgb = rgb * (1 - a) + cloud * a
-                }
+                // Silver lining facing the sun
+                let sdot = max(0, simd_dot(dir, sunDir))
+                let silver = pow(sdot, 10) * 0.6 + pow(sdot, 28) * 0.4
+                let cloud = simd_float3(repeating: 0.84 + 0.30 * silver)
+
+                let rgb = mix3(sky, cloud, a)
 
                 let idx = y * bpr + x * 4
-                pixels[idx + 0] = toByte(rgb.x)  // R
-                pixels[idx + 1] = toByte(rgb.y)  // G
-                pixels[idx + 2] = toByte(rgb.z)  // B
-                pixels[idx + 3] = 255            // A
+                pixels[idx + 0] = toByte(rgb.x)   // R
+                pixels[idx + 1] = toByte(rgb.y)   // G
+                pixels[idx + 2] = toByte(rgb.z)   // B
+                pixels[idx + 3] = 255             // A
             }
         }
 
         var cgImg: CGImage?
-        pixels.withUnsafeMutableBytes { rawBuf in
-            guard let base = rawBuf.baseAddress else { return }
-            guard let ctx = CGContext(
-                data: base, width: W, height: H, bitsPerComponent: 8, bytesPerRow: bpr,
-                space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            ) else { return }
-            cgImg = ctx.makeImage()
+        pixels.withUnsafeMutableBytes { raw in
+            guard let basePtr = raw.baseAddress else { return }
+            if let ctx = CGContext(data: basePtr,
+                                   width: W, height: H,
+                                   bitsPerComponent: 8, bytesPerRow: bpr,
+                                   space: cs,
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                cgImg = ctx.makeImage()
+            }
         }
-
         if let cg = cgImg { return UIImage(cgImage: cg, scale: 1, orientation: .up) }
         return UIImage()
     }

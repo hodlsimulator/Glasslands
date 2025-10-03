@@ -22,40 +22,44 @@ enum CloudDome {
 
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor.white          // visible even if shader fails
+        mat.diffuse.contents = UIColor.white
         mat.emission.contents = UIColor.white
         mat.emission.intensity = 1.0
         mat.blendMode = .alpha
         mat.transparencyMode = .aOne
-        mat.isDoubleSided = true                      // no surprises on GPU front/back
-        mat.cullMode = .back
+
+        // IMPORTANT: render the inside of the sphere.
+        mat.isDoubleSided = false
+        mat.cullMode = .front
+
         mat.writesToDepthBuffer = false
         mat.readsFromDepthBuffer = false
 
         mat.shaderModifiers = [.surface: surface]
 
-        // Cloud + sky uniforms
-        mat.setValue(0.45, forKey: "coverage")
-        mat.setValue(0.24, forKey: "thickness")
-        mat.setValue(1.8,  forKey: "detailScale")
+        // Tunables (looser defaults so clouds are obvious)
+        mat.setValue(0.35, forKey: "coverage")                        // lower = more / bigger clouds
+        mat.setValue(0.50, forKey: "thickness")                       // softer edges
+        mat.setValue(1.6,  forKey: "detailScale")                     // feature size
         mat.setValue(SCNVector3(0.04, 0.0, 0.02), forKey: "windDir")
-        mat.setValue(0.005, forKey: "windSpeed")
-        mat.setValue(1.0,   forKey: "brightness")
+        mat.setValue(0.0045, forKey: "windSpeed")
+        mat.setValue(1.0,     forKey: "brightness")
         mat.setValue(Float(seed & 0xFFFF), forKey: "seed")
         mat.setValue(SCNVector3(0,  1, 0), forKey: "sunDir")
         mat.setValue(SCNVector3(0, -1, 0), forKey: "gravityDir")
 
-        // Sky gradient (top → mid → bottom)
+        // Seamless gradient colours (top → mid → bottom)
         mat.setValue(SCNVector3(0.50, 0.74, 0.92), forKey: "skyTop")
         mat.setValue(SCNVector3(0.70, 0.86, 0.95), forKey: "skyMid")
         mat.setValue(SCNVector3(0.86, 0.93, 0.98), forKey: "skyBot")
 
         let node = SCNNode(geometry: sphere)
         node.name = "CloudDome"
-        node.renderingOrder = -10_000
+        node.renderingOrder = -1   // early, but not extreme
         return (node, mat)
     }
 
+    // Skydome gradient + gravity-biased cumulus.
     private static let surface = """
     #pragma arguments
     float coverage, thickness, detailScale, windSpeed, brightness, seed;
@@ -88,14 +92,14 @@ enum CloudDome {
         return v;
     }
 
-    // World direction for this fragment: convert view-space normal → world-space
-    float3 nView   = normalize(_surface.normal);
-    float3 dirWorld = normalize((u_inverseViewTransform * float4(nView, 0.0)).xyz);
+    // Robust direction: use the sphere's normal (already radial), in WORLD space.
+    // For backfacing fragments (inside the dome), flip so 'dirWorld' points outward.
+    float3 dirWorld = normalize((u_inverseModelTransform * float4(_surface.normal, 0.0)).xyz);
+    if (!_surface.frontFacing) { dirWorld = -dirWorld; }
 
+    // Sky gradient (no cubemap → no seams)
     float3 up = normalize(-gravityDir);
     float y = clamp(dot(dirWorld, up), -1.0, 1.0);
-
-    // Sky gradient (replaces cubemap; no seams)
     float t1 = clamp((y + 0.20) * 0.80, 0.0, 1.0);
     float t0 = clamp((y + 1.00) * 0.50, 0.0, 1.0);
     float3 skyCol = mix(skyBot, skyMid, t1);
@@ -108,18 +112,20 @@ enum CloudDome {
     float3 p = float3(dirWorld.x, dirWorld.y*0.55, dirWorld.z) * s + wind * t;
 
     float warp = noise3(p*0.70 + 13.37) * 0.85;
-    float n = pow(fbm(p + warp), 1.30);
+    float n = pow(fbm(p + warp), 1.20);  // a touch brighter
 
     // Gravity bias: heavier bottoms, lighter tops
     float base = clamp(coverage, 0.0, 1.0);
     float thick = max(0.001, thickness);
+
+    // bigger usable range so clouds show up decisively
     float grav = (1.0 - clamp(y, 0.0, 1.0));
-    float bias = grav * 0.22;
-    float a = smoothstep(base - bias, base - bias + thick, n);
+    float bias = grav * 0.28;
+    float a = smoothstep(base - bias - 0.10, base - bias + thick, n);
 
     // Flatter undersides
     float flat = smoothstep(-0.15, 0.35, -dirWorld.y);
-    a = mix(a, a*0.92 + 0.08, flat);
+    a = mix(a, a*0.90 + 0.10, flat);
 
     // Horizon fade
     float horizon = clamp((y + 0.20) * 1.4, 0.0, 1.0);
@@ -133,7 +139,6 @@ enum CloudDome {
 
     float3 col = mix(skyCol, cloudCol, a);
 
-    // Write both diffuse and emission so it shows even with odd lighting paths.
     _surface.diffuse  = col;
     _surface.emission = col;
     _surface.opacity  = 1.0;

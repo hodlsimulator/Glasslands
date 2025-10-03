@@ -269,23 +269,17 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Remove the cubemap entirely (it was causing the seams).
-        scene.background.contents = nil
-        scene.lightingEnvironment.contents = nil
-        scene.lightingEnvironment.intensity = 0
+        // Seam-free equirectangular background with gravity-biased cumulus.
+        let sky = SkyGen.skyWithCloudsImage(width: 4096, height: 2048,
+                                            coverage: 0.38, thickness: 0.32,
+                                            seed: 424242)
+        scene.background.contents = sky
+        scene.background.wrapS = .repeat
+        scene.background.wrapT = .clamp
+        // Flip horizontally so the sun disc lines up with azimuth math.
+        scene.background.contentsTransform = SCNMatrix4MakeScale(-1, 1, 1)
 
-        // World-anchored cloud dome that also draws the sky gradient.
-        let radius = CGFloat(cfg.skyDistance)
-        let (cloudNode, cloudMat) = CloudDome.make(radius: radius, seed: 424242)
-
-        if let sun = sunLightNode {
-            let d = sun.presentation.simdWorldFront * -1
-            cloudMat.setValue(SCNVector3(d.x, d.y, d.z), forKey: "sunDir")
-        }
-
-        skyAnchor.addChildNode(cloudNode)
-
-        // Optional billboarded sun disc
+        // Optional billboarded sun disc (still helpful for a bright centre).
         if sunLightNode != nil {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
