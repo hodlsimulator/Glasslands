@@ -5,12 +5,19 @@
 //  Created by . . on 10/3/25.
 //
 
-import SceneKit
+//  CloudDome+Async.swift
+//  Glasslands
+//
+//  Off-main sky generation; only UIKit/SceneKit work runs on the main actor.
+
+@preconcurrency import SceneKit
 import UIKit
 import CoreGraphics
 
 extension CloudDome {
-    static func makeAsync(
+
+    // Callable from any actor; runs compute on a detached task and hops to main for node creation.
+    nonisolated static func makeAsync(
         radius: CGFloat,
         coverage: Float = 0.34,
         edgeSoftness: Float = 0.20,
@@ -19,10 +26,9 @@ extension CloudDome {
         height: Int = 640,
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63,
-        completion: @Sendable @MainActor @escaping (SCNNode) -> Void
+        completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         Task.detached(priority: .userInitiated) {
-            // Pure compute off the main actor.
             let px = CumulusRenderer.computePixels(
                 width: width,
                 height: height,
@@ -32,30 +38,63 @@ extension CloudDome {
                 sunAzimuthDeg: sunAzimuthDeg,
                 sunElevationDeg: sunElevationDeg
             )
-
-            // Hop to main actor for UIImage + SceneKit node creation.
             await MainActor.run {
-                let bpr = px.width * 4
-                let data = CFDataCreate(nil, px.rgba, px.rgba.count)!
-                let provider = CGDataProvider(data: data)!
-                let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-                let cg = CGImage(
-                    width: px.width,
-                    height: px.height,
-                    bitsPerComponent: 8,
-                    bitsPerPixel: 32,
-                    bytesPerRow: bpr,
-                    space: cs,
-                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                    provider: provider,
-                    decode: nil,
-                    shouldInterpolate: true,
-                    intent: .defaultIntent
-                )!
-                let img = UIImage(cgImage: cg)
-                let node = CloudDome.make(radius: radius, skyImage: img)
+                let node = buildDomeNode(radius: radius, pixels: px)
                 completion(node)
             }
         }
+    }
+
+    // Async/await variant that returns the node; result is built on the main actor.
+    nonisolated static func makeNode(
+        radius: CGFloat,
+        coverage: Float = 0.34,
+        edgeSoftness: Float = 0.20,
+        seed: UInt32 = 424242,
+        width: Int = 1280,
+        height: Int = 640,
+        sunAzimuthDeg: Float = 35,
+        sunElevationDeg: Float = 63
+    ) async -> SCNNode {
+        let px = await Task.detached(priority: .userInitiated) {
+            CumulusRenderer.computePixels(
+                width: width,
+                height: height,
+                coverage: coverage,
+                edgeSoftness: edgeSoftness,
+                seed: seed,
+                sunAzimuthDeg: sunAzimuthDeg,
+                sunElevationDeg: sunElevationDeg
+            )
+        }.value
+
+        return await MainActor.run {
+            buildDomeNode(radius: radius, pixels: px)
+        }
+    }
+
+    @MainActor
+    private static func buildDomeNode(radius: CGFloat, pixels: CumulusPixels) -> SCNNode {
+        let bytesPerRow = pixels.width * 4
+        let data = Data(pixels.rgba) as CFData
+        let provider = CGDataProvider(data: data)!
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+
+        let cgImage = CGImage(
+            width: pixels.width,
+            height: pixels.height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )!
+
+        let skyImage = UIImage(cgImage: cgImage)
+        return CloudDome.make(radius: radius, skyImage: skyImage)
     }
 }

@@ -4,6 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
+//  Pure compute (no UIKit/SceneKit). Safe to call from any thread/actor.
+//
 
 import Foundation
 import simd
@@ -14,19 +16,52 @@ struct CumulusPixels: Sendable {
     let rgba: [UInt8]
 }
 
-/// Pure compute (no UIKit/CoreGraphics). Safe to call from any thread/actor.
-/// Produces a bright-white, fluffy cumulus sky in 2:1 equirectangular RGBA8.
 struct CumulusRenderer {
-    @inline(__always) private static func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float { x.isFinite ? min(hi, max(lo, x)) : lo }
-    @inline(__always) private static func smooth01(_ x: Float) -> Float { let t = clampf(x, 0, 1); return t * t * (3 - 2 * t) }
-    @inline(__always) private static func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float { let d = e1 - e0; return d == 0 ? (x < e0 ? 0 : 1) : smooth01((x - e0) / d) }
-    @inline(__always) private static func mix3(_ a: simd_float3, _ b: simd_float3, _ t: Float) -> simd_float3 { a + (b - a) * t }
-    @inline(__always) private static func toByte(_ f: Float) -> UInt8 { UInt8(clampf(f, 0, 1) * 255.0 + 0.5) }
-    @inline(__always) private static func safeFloorInt(_ x: Float) -> Int { let y = floorf(x); return y >= Float(Int.max) ? Int.max : (y <= Float(Int.min) ? Int.min : Int(y)) }
-    @inline(__always) private static func safeIndex(_ i: Int, _ lo: Int, _ hi: Int) -> Int { (i < lo) ? lo : (i > hi ? hi : i) }
-    @inline(__always) private static func wrapIndex(_ i: Int, _ n: Int) -> Int { let m = i % n; return m < 0 ? m + n : m }
 
-    static func computePixels(
+    // MARK: - Math helpers (actor-agnostic)
+
+    @inline(__always) nonisolated private static func clampf(_ x: Float, _ lo: Float, _ hi: Float) -> Float {
+        x.isFinite ? min(hi, max(lo, x)) : lo
+    }
+
+    @inline(__always) nonisolated private static func smooth01(_ x: Float) -> Float {
+        let t = clampf(x, 0, 1)
+        return t * t * (3 - 2 * t)
+    }
+
+    @inline(__always) nonisolated private static func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
+        let d = e1 - e0
+        return d == 0 ? (x < e0 ? 0 : 1) : smooth01((x - e0) / d)
+    }
+
+    @inline(__always) nonisolated private static func mix3(_ a: simd_float3, _ b: simd_float3, _ t: Float) -> simd_float3 {
+        a + (b - a) * t
+    }
+
+    @inline(__always) nonisolated private static func toByte(_ f: Float) -> UInt8 {
+        UInt8(clampf(f, 0, 1) * 255.0 + 0.5)
+    }
+
+    @inline(__always) nonisolated private static func safeFloorInt(_ x: Float) -> Int {
+        guard x.isFinite else { return 0 }
+        let y = floorf(x)
+        if y >= Float(Int.max) { return Int.max }
+        if y <= Float(Int.min) { return Int.min }
+        return Int(y)
+    }
+
+    @inline(__always) nonisolated private static func safeIndex(_ i: Int, _ lo: Int, _ hi: Int) -> Int {
+        (i < lo) ? lo : (i > hi ? hi : i)
+    }
+
+    @inline(__always) nonisolated private static func wrapIndex(_ i: Int, _ n: Int) -> Int {
+        let m = i % n
+        return m < 0 ? m + n : m
+    }
+
+    // MARK: - Sky generator
+
+    nonisolated static func computePixels(
         width: Int = 1536,
         height: Int = 768,
         coverage: Float = 0.34,
@@ -35,11 +70,13 @@ struct CumulusRenderer {
         sunAzimuthDeg: Float = 35,
         sunElevationDeg: Float = 63
     ) -> CumulusPixels {
+
         let W = max(256, width)
         let H = max(128, height)
+
+        // Low-res “puff field” we’ll upsample.
         let FW = max(256, W / 2)
         let FH = max(128, H / 2)
-
         var field = [Float](repeating: 0, count: FW * FH)
 
         struct LCG {
@@ -59,61 +96,50 @@ struct CumulusRenderer {
         var rng = LCG(seed ^ 0xA51C_2C2D)
 
         // Cluster distribution: smaller/denser near horizon, larger up high, with some at zenith.
-        let clusterCount = max(36, (FW * FH) / 24000)
+        let clusterCount = max(36, (FW * FH) / 24_000)
         for _ in 0..<clusterCount {
-            let u = rng.unit()
-            let xC = u * Float(FW)
-            let v: Float = (rng.unit() < 0.70) ? rng.range(0.55, 0.90) : rng.range(0.12, 0.42)
-            let yC = v * Float(FH)
+            let cx = rng.range(0, Float(FW) - 1)
+            let cy = rng.range(0, Float(FH) - 1)
 
-            let sizeBias = 0.55 + 0.45 * (1.0 - v)
-            let baseAmp  = 0.95 + 0.35 * rng.unit()
-            let puffCount = Int(min(20, max(8, Int(roundf(9 + 9 * sizeBias)))))
-            let dir = rng.range(-0.55, 0.55)
-            let cth = cosf(dir), sth = sinf(dir)
+            let amp: Float = 0.75 + 0.55 * rng.unit()
+            let rx:  Float = 2.2 + 5.8 * rng.unit()
+            let ry:  Float = 1.8 + 5.4 * rng.unit()
+            let theta = rng.range(0, 2 * .pi)
+            let cth = cosf(theta), sth = sinf(theta)
 
-            for _ in 0..<puffCount {
-                let jx = rng.norm(0, 0.12) * sizeBias
-                let jy = rng.norm(0, 0.10) * sizeBias
-                let cx = xC + jx * Float(FW)
-                let cy = yC + jy * Float(FH)
+            let y0 = max(0, safeFloorInt(cy - 3 * ry))
+            let y1 = min(FH - 1, safeFloorInt(cy + 3 * ry))
+            if y0 > y1 { continue }
 
-                let base = (0.016 + 0.020 * rng.unit()) * sizeBias
-                let rx = base * (1.30 + 0.70 * rng.unit()) * Float(FW)
-                let ry = base * (0.85 + 0.45 * rng.unit()) * Float(FH)
-                let amp = baseAmp * (0.80 + 0.35 * rng.unit())
+            // Limit x-range but allow wrapping so clusters at edges contribute on both sides.
+            let xMin = safeFloorInt(cx - 3 * rx) - FW
+            let xMax = safeFloorInt(cx + 3 * rx) + FW
 
-                let ex = max(8.0, rx * 2.8)
-                let ey = max(8.0, ry * 2.8)
-                let xMin = Int(floorf(cx - ex)), xMax = Int(ceilf(cx + ex))
-                let yMin = Int(floorf(cy - ey)), yMax = Int(ceilf(cy + ey))
-                let y0 = max(0, yMin), y1 = min(FH - 1, yMax)
-                if y0 > y1 { continue }
+            for yy in y0...y1 {
+                let Y = (Float(yy) + 0.5) - cy
+                let bottom = smooth01(clampf((Y + 0.5 * ry) / (2.0 * ry), 0, 1))
+                let gravBias: Float = 1.0 + 0.22 * bottom
 
-                for yy in y0...y1 {
-                    let Y = (Float(yy) + 0.5) - cy
-                    let bottom = smooth01(clampf((Y + 0.5 * ry) / (2.0 * ry), 0, 1))
-                    let gravBias: Float = 1.0 + 0.22 * bottom
+                var xx = xMin
+                while xx <= xMax {
+                    let xw0 = wrapIndex(xx, FW)
 
-                    var xx = xMin
-                    while xx <= xMax {
-                        let xw0 = wrapIndex(xx, FW)
-                        let X = (Float(xx) + 0.5) - cx
-                        let xr = (X * cth - Y * sth) / max(1e-4, rx)
-                        let yr = (X * sth + Y * cth) / max(1e-4, ry)
-                        let d2 = xr * xr + yr * yr
+                    let X = (Float(xx) + 0.5) - cx
+                    let xr = (X * cth - Y * sth) / max(1e-4, rx)
+                    let yr = (X * sth + Y * cth) / max(1e-4, ry)
+                    let d2 = xr * xr + yr * yr
+                    let kBase: Float = 1.55 + 0.50 * rng.unit()
+                    let shape = 1.0 / ((1.0 + kBase * d2) * (1.0 + kBase * d2))
 
-                        let kBase: Float = 1.55 + 0.50 * rng.unit()
-                        let shape = 1.0 / ((1.0 + kBase * d2) * (1.0 + kBase * d2))
+                    field[yy * FW + xw0] += amp * shape * gravBias
 
-                        field[yy * FW + xw0] += amp * shape * gravBias
-
-                        if xx < 0 || xx >= FW {
-                            let xw1 = wrapIndex(xx < 0 ? xx + FW : xx - FW, FW)
-                            field[yy * FW + xw1] += amp * shape * gravBias
-                        }
-                        xx += 1
+                    // If this sample fell outside, mirror its contribution into the wrapped location too.
+                    if xx < 0 || xx >= FW {
+                        let xw1 = wrapIndex(xx < 0 ? xx + FW : xx - FW, FW)
+                        field[yy * FW + xw1] += amp * shape * gravBias
                     }
+
+                    xx += 1
                 }
             }
         }
@@ -125,7 +151,7 @@ struct CumulusRenderer {
         for i in 0..<(FW * FH) {
             var t = field[i] * invMax
             t = max(0, t)
-            t = t * (0.70 + 0.30 * t)
+            t = t * (0.70 + 0.30 * t) // mild contrast curve
             field[i] = t
         }
 
@@ -135,12 +161,14 @@ struct CumulusRenderer {
         // Raster to RGBA8.
         var out = [UInt8](repeating: 0, count: W * H * 4)
 
+        // Sun lighting.
         let deg: Float = .pi / 180
         let sunAz = sunAzimuthDeg * deg
         let sunEl = sunElevationDeg * deg
         var sunDir = simd_float3(sinf(sunAz) * cosf(sunEl), sinf(sunEl), cosf(sunAz) * cosf(sunEl))
         sunDir = simd_normalize(sunDir)
 
+        // Sky gradient.
         let SKY_TOP = simd_float3(0.30, 0.56, 0.96)
         let SKY_MID = simd_float3(0.56, 0.74, 0.96)
         let SKY_BOT = simd_float3(0.88, 0.93, 0.99)
@@ -177,49 +205,37 @@ struct CumulusRenderer {
         let invH = 1.0 / Float(H)
 
         for j in 0..<H {
-            let v = (Float(j) + 0.5) * invH
-            var sky = mix3(SKY_TOP, SKY_MID, v)
-            sky = mix3(sky, SKY_BOT, smoothstep(0.62, 1.00, v))
+            let v = Float(j) * invH
+
+            // Smooth three-stop gradient (bottom→mid→top).
+            let g0 = smooth01(min(1, v * 2))               // bottom→mid
+            let g1 = smooth01(min(1, max(0, (v - 0.5) * 2))) // mid→top
+            let skyBase = mix3(mix3(SKY_BOT, SKY_MID, g0), mix3(SKY_MID, SKY_TOP, g1), 0.15 * smooth01(abs(2 * v - 1)))
+
+            // Elevation for equirectangular mapping.
+            let theta = .pi * v // 0 at top, π at bottom
 
             for i in 0..<W {
-                let u = (Float(i) + 0.5) * invW
+                let u = Float(i) * invW
 
-                let maskSrc = sampleField(u: u, v: v)
-                let mask = smoothstep(thresh - edge, thresh + edge, maskSrc)
+                // Cloud density from field.
+                let d = sampleField(u: u, v: v)
+                let t = smoothstep(thresh - edge, thresh + edge, d)
 
-                let (gx, gy) = gradField(u: u, v: v)
-                var n = simd_float3(-gx * 1.4, 1.0, -gy * 1.0)
-                n = simd_normalize(n)
+                // Direction for sun highlight (az∈[-π, π], el∈[-π/2, π/2]).
+                let az = (u - 0.5) * 2 * .pi
+                let el = (.pi / 2) - theta
+                let dir = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
+                let h = powf(max(0, simd_dot(dir, sunDir)), 24) // tight glossy lobe
+                let cloudCol = simd_float3(repeating: 1.0) * (0.92 + 0.08 * h)
 
-                let ndotl = max(0, simd_dot(n, sunDir))
-                var shade: Float = 0.92 + 0.18 * ndotl
-                let ao = 0.18 * powf(smoothstep(0.55, 0.99, mask), 1.1)
-                shade = max(0.86, min(1.0, shade * (1.0 - ao)))
-
-                let edgeAmt = 0.10 * smoothstep(0.35, 0.95, 1.0 - mask) * (0.6 + 0.4 * ndotl)
-                let cloud = simd_clamp(
-                    simd_float3(repeating: shade) + simd_float3(0.95, 0.97, 1.00) * edgeAmt,
-                    simd_float3(repeating: 0),
-                    simd_float3(repeating: 1)
-                )
-
-                let rgb = sky * (1.0 - mask) + cloud * mask
+                let rgb = mix3(skyBase, cloudCol, t)
                 let idx = (j * W + i) * 4
                 out[idx + 0] = toByte(rgb.x)
                 out[idx + 1] = toByte(rgb.y)
                 out[idx + 2] = toByte(rgb.z)
                 out[idx + 3] = 255
             }
-        }
-
-        // Perfect horizontal wrap.
-        for j in 0..<H {
-            let a = (j * W + 0) * 4
-            let b = (j * W + (W - 1)) * 4
-            out[b + 0] = out[a + 0]
-            out[b + 1] = out[a + 1]
-            out[b + 2] = out[a + 2]
-            out[b + 3] = out[a + 3]
         }
 
         return CumulusPixels(width: W, height: H, rgba: out)
