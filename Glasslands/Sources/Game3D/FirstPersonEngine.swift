@@ -253,22 +253,50 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
+        // We will recreate the disc
         sunDiscNode = nil
 
-        // **Hard fallback:** paint the SceneKit background solid blue.
-        // This guarantees blue even if the dome were culled or not visible yet.
-        scene.background.contents = UIColor(red: 0.22, green: 0.50, blue: 0.92, alpha: 1.0)
+        // Let the dome paint the background; no fallback colour that can wash things out.
+        scene.background.contents = nil
 
-        // No IBL while clouds are off (cheapest).
+        // No IBL while we stabilise clouds; cheapest path.
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // **Keep the dome**; clouds disabled for now (coverage: 0).
+        // --- Dome with LIGHTER sky + cumulus clouds (single static texture, cached) ---
+        // Coverage ~0.18–0.22 is a gentle, non-overcast look.
         let dome = CloudDome.make(
             radius: CGFloat(cfg.skyDistance),
-            coverage: 0.0
+            coverage: 0.20,              // <— clouds ON, tuned “normal” day
+            thickness: 0.12,
+            seed: 424242,
+            width: 1024,                  // 1024x512 = fast to generate, looks clean
+            height: 512,
+            sunAzimuthDeg: 40,
+            sunElevationDeg: 65
         )
         skyAnchor.addChildNode(dome)
+
+        // --- Visible sun disc (2D billboard plane with soft edges) ---
+        let discSize: CGFloat = 48        // ~0.6° apparent at your sky radius
+        let disc = SCNPlane(width: discSize, height: discSize)
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = SunSprite.image // cached UIImage
+        mat.emission.contents = nil
+        mat.isDoubleSided = true
+        mat.writesToDepthBuffer = false   // never writes depth; can be occluded by terrain
+        disc.firstMaterial = mat
+
+        let discNode = SCNNode(geometry: disc)
+        discNode.name = "SunDisc"
+        discNode.renderingOrder = -9_900  // draws after dome (-10_000) but before foreground
+        discNode.constraints = [SCNBillboardConstraint()] // always faces camera
+        skyAnchor.addChildNode(discNode)
+        self.sunDiscNode = discNode
+
+        // Position the light and disc together along the sun direction.
+        applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {
@@ -431,5 +459,30 @@ final class FirstPersonEngine: NSObject {
             score += picked.count
             DispatchQueue.main.async { [score, onScore] in onScore(score) }
         }
+    }
+    
+    private enum SunSprite {
+        static let image: UIImage = {
+            let N = 256
+            let size = CGSize(width: N, height: N)
+            let scale = UIScreen.main.scale
+            UIGraphicsBeginImageContextWithOptions(size, false, scale)
+            guard let ctx = UIGraphicsGetCurrentContext() else { return UIImage() }
+
+            // Radial soft disc: white core → warm rim → transparent edge
+            let colors = [
+                UIColor(white: 1.0, alpha: 1.00).cgColor,
+                UIColor(red: 1.0, green: 0.98, blue: 0.90, alpha: 0.75).cgColor,
+                UIColor(red: 1.0, green: 0.96, blue: 0.80, alpha: 0.00).cgColor
+            ] as CFArray
+            let locs: [CGFloat] = [0.0, 0.55, 1.0]
+            let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: locs)!
+            let c = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
+            ctx.drawRadialGradient(grad, startCenter: c, startRadius: 0, endCenter: c, endRadius: size.width * 0.5, options: .drawsAfterEndLocation)
+
+            let img = UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
+            UIGraphicsEndImageContext()
+            return img
+        }()
     }
 }

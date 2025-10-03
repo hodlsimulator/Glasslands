@@ -14,7 +14,8 @@ import CoreGraphics
 import simd
 
 enum SkyGen {
-    static var defaultCoverage: Float = 0.0
+    // default used only if a caller does not pass coverage explicitly
+    static var defaultCoverage: Float = 0.18
 
     private struct Key: Hashable {
         let w: Int, h: Int
@@ -26,10 +27,10 @@ enum SkyGen {
     private static var cache: [Key: UIImage] = [:]
 
     static func skyWithCloudsImage(
-        width: Int = 2048,
-        height: Int = 1024,
-        coverage: Float = defaultCoverage,
-        thickness: Float = 0.12,
+        width: Int = 1024,
+        height: Int = 512,
+        coverage: Float = defaultCoverage,   // 0.00–0.35 typical
+        thickness: Float = 0.12,             // edge softness 0.05–0.25
         seed: UInt32 = 424242,
         sunAzimuthDeg: Float = 40,
         sunElevationDeg: Float = 65
@@ -66,6 +67,7 @@ enum SkyGen {
             UInt8(clampf(f, 0, 1) * 255.0 + 0.5)
         }
 
+        // Sun vector for a subtle directional lift (not the visible disc).
         let deg: Float = .pi / 180
         let sunAz = sunAzimuthDeg * deg
         let sunEl = sunElevationDeg * deg
@@ -75,28 +77,25 @@ enum SkyGen {
             cosf(sunAz) * cosf(sunEl)
         ))
 
-        // Target palette: top deep blue, mid brighter blue, horizon lightest
-        let SKY_TOP = simd_float3(0.22, 0.50, 0.92)
-        let SKY_MID = simd_float3(0.50, 0.73, 0.95)
-        let SKY_BOT = simd_float3(0.86, 0.93, 0.98)
+        // --- Lighter, whiter palette (top→horizon) ---
+        let SKY_TOP = simd_float3(0.40, 0.66, 0.98) // lighter azure
+        let SKY_MID = simd_float3(0.66, 0.80, 0.98) // softer mid
+        let SKY_BOT = simd_float3(0.92, 0.96, 0.99) // light near-horizon
 
         // -------- Gradient-only (clouds disabled) --------
         if coverage <= 0 {
             for j in 0..<H {
-                let v = Float(j) / Float(H - 1)         // 0 = zenith (top), 1 = horizon/bottom
+                let v = Float(j) / Float(H - 1) // 0 = zenith (top), 1 = horizon (bottom)
                 let t = smooth01(v)
-                // Quadratic Bezier through TOP → MID → BOT as v goes 0→1
                 let a = mix3(SKY_TOP, SKY_MID, t)
                 let b = mix3(SKY_MID, SKY_BOT, t)
                 var base = mix3(a, b, t)
 
-                // Subtle lift toward the sun
-                do {
-                    let phi = v * .pi
-                    let dir = simd_float3(0, cosf(phi), 0)
-                    let sunLift = max(0, simd_dot(dir, sunDir))
-                    base += simd_float3(repeating: sunLift * 0.015)
-                }
+                // Tiny lift toward the sun, purely for depth cue
+                let phi = v * .pi
+                let dir = simd_float3(0, cosf(phi), 0)
+                let sunLift = max(0, simd_dot(dir, sunDir))
+                base += simd_float3(repeating: sunLift * 0.012)
 
                 for i in 0..<W {
                     let idx = (j * W + i) * 4
@@ -111,7 +110,7 @@ enum SkyGen {
             return img
         }
 
-        // -------- Cloud field (FBM) --------
+        // -------- Cloud field (deterministic FBM) --------
         @inline(__always) func h2(_ x: Int32, _ y: Int32, _ s: UInt32) -> UInt32 {
             var h = UInt32(bitPattern: x) &* 374761393
             h &+= UInt32(bitPattern: y) &* 668265263
@@ -148,63 +147,69 @@ enum SkyGen {
             return f
         }
 
-        let scale: Float = 1.7
+        // Build cloud field; mild warp to break up large blobs
+        let scale: Float = 1.6
         var fmin: Float = 1, fmax: Float = 0
         var field = [Float](repeating: 0, count: W * H)
 
         for j in 0..<H {
-            let v = Float(j) / Float(H) // 0 top
+            let v = Float(j) / Float(H)
             for i in 0..<W {
                 let u = Float(i) / Float(W)
+
                 let theta = (u - 0.5) * 2 * .pi
                 let phi = v * .pi
                 var dir = simd_float3(sinf(theta) * sinf(phi), cosf(phi), cosf(theta) * sinf(phi))
-                let w = fbm(u * 2.0, v * 1.2, seed &+ 991)
-                dir.x += (w - 0.5) * 0.08
+
+                let w = fbm(u * 1.7, v * 1.2, seed &+ 991)
+                dir.x += (w - 0.5) * 0.07
                 dir.z += (w - 0.5) * 0.05
+
                 let px = (atan2f(dir.x, dir.z) / (2 * .pi) + 0.5) * scale * 3.0
                 let py = (acosf(clampf(dir.y, -1, 1)) / .pi) * scale * 1.6
+
                 let f = fbm(px, py, seed)
                 fmin = min(fmin, f)
                 fmax = max(fmax, f)
                 field[j * W + i] = f
             }
         }
+
         let span: Float = max(1e-6, fmax - fmin)
         for k in 0..<(W * H) { field[k] = (field[k] - fmin) / span }
 
+        // Render clouds over lighter gradient
         let tEdge = clampf(thickness, 0.01, 0.5)
-        let baseCut: Float = clampf(0.60 - coverage * 0.35, 0.25, 0.65)
+        let baseCut: Float = clampf(0.60 - coverage * 0.33, 0.28, 0.65)
 
-        // Zenith clamp must act near the TOP (v≈0), not the bottom.
-        let capStart: Float = 0.00
-        let capEnd:   Float = 0.10
+        // Reduce overhead cloud density so zenith stays blue
+        let zenithStart: Float = 0.00
+        let zenithEnd:   Float = 0.10
 
         for j in 0..<H {
             let v = Float(j) / Float(H - 1) // 0 top
             let t = smooth01(v)
-            var base = mix3(mix3(SKY_TOP, SKY_MID, t), mix3(SKY_MID, SKY_BOT, t), t)
 
-            do {
-                let phi = v * .pi
-                let dir = simd_float3(0, cosf(phi), 0)
-                let sunLift = max(0, simd_dot(dir, sunDir))
-                base += simd_float3(repeating: sunLift * 0.015)
-            }
+            var c = mix3(mix3(SKY_TOP, SKY_MID, t), mix3(SKY_MID, SKY_BOT, t), t)
+
+            // Very mild directional brightening (haze near sun)
+            let phi = v * .pi
+            let dir = simd_float3(0, cosf(phi), 0)
+            let sunLift = max(0, simd_dot(dir, sunDir))
+            c += simd_float3(repeating: sunLift * 0.010)
 
             for i in 0..<W {
                 let idx = (j * W + i) * 4
-                var c = base
-                var f = field[j * W + i]
 
-                if v < capEnd {
-                    let cap = 1 - smoothstep(capStart, capEnd, v)
+                var f = field[j * W + i]
+                if v < zenithEnd {
+                    let cap = 1 - smoothstep(zenithStart, zenithEnd, v)
                     f *= (1 - cap)
                 }
 
-                let a = smoothstep(baseCut, baseCut + tEdge, f) * coverage * 1.6
+                let a = smoothstep(baseCut, baseCut + tEdge, f) * coverage * 1.55
                 if a > 0 {
-                    let cloud = simd_float3(1, 1, 1) * (0.92 - (f * 0.15))
+                    let cloud = simd_float3(1, 1, 1) * (0.95 - (f * 0.12))
                     c = mix3(c, cloud, clampf(a, 0, 1))
                 }
 
