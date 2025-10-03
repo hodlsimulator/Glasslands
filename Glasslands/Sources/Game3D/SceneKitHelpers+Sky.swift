@@ -4,8 +4,9 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Equirectangular sky generator (blue gradient + gravity-biased cumulus).
-//  Pure Swift (no GameplayKit), seam-free across 0/360°.
+//  Seam-free equirectangular sky with gravity-biased cumulus.
+//  Pure Swift (no GameplayKit). Zenith warp is faded out to avoid the circular artefact.
+//  Clouds are smaller/more individual by increasing field scale and sharpening a touch.
 //
 
 import UIKit
@@ -15,8 +16,8 @@ enum SkyGen {
     static func skyWithCloudsImage(
         width: Int = 2048,
         height: Int = 1024,
-        coverage: Float = 0.22,     // lower → more clouds
-        thickness: Float = 0.55,    // higher → softer edges
+        coverage: Float = 0.26,     // lower → more/larger clouds
+        thickness: Float = 0.42,    // higher → softer edges
         seed: UInt32 = 424242,
         sunAzimuthDeg: Float = 40,
         sunElevationDeg: Float = 65
@@ -35,7 +36,7 @@ enum SkyGen {
             let d = e1 - e0; return d == 0 ? (x < e0 ? 0 : 1) : smooth01((x - e0) / d)
         }
 
-        // Sun direction for silver lining (world space).
+        // Sun direction (world space)
         let deg = Float.pi / 180
         let sunAz = sunAzimuthDeg * deg
         let sunEl = sunElevationDeg * deg
@@ -50,7 +51,7 @@ enum SkyGen {
         let mid = simd_float3(0.70, 0.86, 0.95)
         let bot = simd_float3(0.86, 0.93, 0.98)
 
-        // Perlin FBM — fixed permutation (seed used as offsets).
+        // Perlin FBM (fixed permutation)
         struct Perlin {
             static let p: [Int] = {
                 let base: [Int] = [
@@ -101,46 +102,52 @@ enum SkyGen {
         let sy = Float((seed &+ 202) % 991)
         let sz = Float((seed &+ 303) % 983)
 
-        // Feature scales
-        let fieldScale: Float = 3.0
-        let warpScale:  Float = 0.9
-        let warpAmp:    Float = 0.35
+        // Feature scales (smaller, more individual clouds)
+        let fieldScale: Float = 7.5
+        let warpScale:  Float = 1.0
+        let warpAmp:    Float = 0.20
 
         for y in 0..<H {
-            let v = (Float(y) + 0.5) / Float(H)      // 0 at top → 1 at bottom
-            let phi = v * Float.pi                   // latitude 0..π
-            let upY = cosf(phi)                      // 1 at zenith → -1 at nadir
+            let v = (Float(y) + 0.5) / Float(H)   // 0 at top → 1 at bottom
+            let phi = v * Float.pi                 // latitude 0..π
+            let upY = cosf(phi)                    // 1 at zenith → -1 at nadir
 
             // Base sky gradient
             var sky = mix3(bot, mid, clampf((upY + 0.20) * 0.80, 0, 1))
             sky = mix3(sky, top, clampf((upY + 1.00) * 0.50, 0, 1))
 
             for x in 0..<W {
-                let u = (Float(x) + 0.5) / Float(W)      // 0..1 across
+                let u = (Float(x) + 0.5) / Float(W)
                 let theta = u * 2 * Float.pi
-                // Direction on unit sphere (seam-free across u=0/1)
+
+                // Direction on unit sphere (seam-free)
                 let dir = simd_float3(cosf(theta) * sinf(phi),
                                       upY,
                                       sinf(theta) * sinf(phi))
+
+                // Fade domain-warp to zero at zenith to remove circular artefact
+                let zenith = clampf(upY, 0, 1)                 // 1 at zenith
+                let warpFade = 1 - pow(zenith, 10)            // 0 near zenith, 1 away from it
+                let warpA = warpAmp * warpFade
 
                 // Domain warp in world space
                 let wx = Perlin.fbm(dir.x * warpScale + sx, dir.y * warpScale + sy, dir.z * warpScale + sz, octaves: 3)
                 let wy = Perlin.fbm(dir.x * warpScale + sy, dir.y * warpScale + sz, dir.z * warpScale + sx, octaves: 3)
                 let wz = Perlin.fbm(dir.x * warpScale + sz, dir.y * warpScale + sx, dir.z * warpScale + sy, octaves: 3)
-                let warped = simd_float3(dir.x + warpAmp * wx, dir.y + warpAmp * wy, dir.z + warpAmp * wz)
+                let warped = simd_float3(dir.x + warpA * wx, dir.y + warpA * wy, dir.z + warpA * wz)
 
                 // FBM field for clouds → 0..1 billow
-                var n = Perlin.fbm(warped.x * fieldScale + sx,
+                let n = Perlin.fbm(warped.x * fieldScale + sx,
                                    warped.y * fieldScale + sy,
                                    warped.z * fieldScale + sz,
                                    octaves: 5)
                 var billow = 0.5 * (n + 1.0)
-                billow = pow(billow, 1.15)
+                billow = pow(billow, 1.25)                    // a touch crisper
 
                 // Gravity bias (fuller bottoms, lighter tops)
                 let baseThr = clampf(coverage, 0, 1)
                 let thick = max(0.001, thickness)
-                let grav = (1 - clampf(upY, 0, 1))          // 0 at zenith → 1 near horizon
+                let grav = (1 - clampf(upY, 0, 1))            // 0 at zenith → 1 near horizon
                 let bias = grav * 0.25
                 var a = smoothstep(baseThr - bias, baseThr - bias + thick, billow)
 
