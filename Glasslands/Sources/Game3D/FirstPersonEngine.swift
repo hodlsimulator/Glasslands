@@ -80,18 +80,25 @@ final class FirstPersonEngine: NSObject {
     @MainActor
     private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
         guard let sunLightNode else { return }
+
         let dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
 
-        // For a directional light, direction is the node’s -Z; look(at:) points -Z to target.
+        // Directional light: -Z points at the target
         let origin = yawNode.presentation.position
         let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
         sunLightNode.position = origin
         sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
 
-        // Move the sun disc to the actual sun direction in the sky.
+        // Move the billboarded sun disc
         if let disc = sunDiscNode {
             let dist = max(10, CGFloat(cfg.skyDistance - 180))
             disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
+        }
+
+        // Feed the world-space sun direction into the cloud shader
+        if let cloud = skyAnchor.childNode(withName: "CloudDome", recursively: false),
+           let mat = cloud.geometry?.firstMaterial {
+            mat.setValue(SCNVector3(dir.x, dir.y, dir.z), forKey: "sunDir")
         }
     }
 
@@ -262,33 +269,43 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Baked fluffy clouds (lower coverage → clearly visible; horizon-fade removes smears).
-        let skyImg = SkyGen.skyWithCloudsImage(width: 2048, height: 4096,
-                                               coverage: 0.36, thickness: 0.20, seed: 424242)
-        scene.background.contents = skyImg
+        // Background: simple blue gradient cube; clouds alpha-over this
+        scene.background.contents = SceneKitHelpers.skyboxImages(size: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Only create the sun disc if a sun light exists; fix the warning by not binding.
+        // World-anchored cloud dome (does NOT rotate with the camera)
+        let radius = CGFloat(cfg.skyDistance)
+        let (cloudNode, cloudMat) = CloudDome.make(radius: radius, seed: 424242)
+
+        // Seed the sun direction for silver-lining; updated again in applySunDirection(...)
+        if let sun = sunLightNode {
+            let d = sun.presentation.simdWorldFront * -1 // -Z is light direction
+            cloudMat.setValue(SCNVector3(d.x, d.y, d.z), forKey: "sunDir")
+        }
+
+        skyAnchor.addChildNode(cloudNode)
+
+        // Sun disc (only if a sun light exists)
         if sunLightNode != nil {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
             plane.cornerRadius = discSize * 0.5
 
-            let mat = SCNMaterial()
-            mat.lightingModel = .constant
-            mat.emission.contents = SceneKitHelpers.sunImage(diameter: Int(discSize))
-            mat.blendMode = .add
-            mat.writesToDepthBuffer = false
-            mat.readsFromDepthBuffer = false
-            plane.firstMaterial = mat
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.emission.contents = SceneKitHelpers.sunImage(diameter: Int(discSize))
+            m.blendMode = .add
+            m.writesToDepthBuffer = false
+            m.readsFromDepthBuffer = false
+            plane.firstMaterial = m
 
             let node = SCNNode(geometry: plane)
             node.constraints = [SCNBillboardConstraint()]
             skyAnchor.addChildNode(node)
             self.sunDiscNode = node
 
-            // Sun higher in the sky.
+            // Give the sun a nice starting position
             applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         }
     }
