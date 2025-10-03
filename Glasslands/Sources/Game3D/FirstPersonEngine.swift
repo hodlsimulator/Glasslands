@@ -67,6 +67,34 @@ final class FirstPersonEngine: NSObject {
         super.init()
     }
 
+    @inline(__always)
+    private func sunDirection(azimuthDeg: Float, elevationDeg: Float) -> simd_float3 {
+        let az = azimuthDeg * Float.pi / 180
+        let el = elevationDeg * Float.pi / 180
+        let x = sinf(az) * cosf(el)
+        let y = sinf(el)
+        let z = cosf(az) * cosf(el)
+        return simd_normalize(simd_float3(x, y, z))
+    }
+
+    @MainActor
+    private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
+        guard let sunLightNode else { return }
+        let dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
+
+        // For a directional light, direction is the node’s -Z; look(at:) points -Z to target.
+        let origin = yawNode.presentation.position
+        let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
+        sunLightNode.position = origin
+        sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
+
+        // Move the sun disc to the actual sun direction in the sky.
+        if let disc = sunDiscNode {
+            let dist = max(10, CGFloat(cfg.skyDistance - 180))
+            disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
+        }
+    }
+
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
@@ -195,37 +223,36 @@ final class FirstPersonEngine: NSObject {
     }
     
     private func buildLighting() {
-        // Clear any previous lights
         scene.rootNode.childNodes.filter { $0.light != nil }.forEach { $0.removeFromParentNode() }
 
         let amb = SCNLight()
         amb.type = .ambient
         amb.intensity = 350
         amb.color = UIColor(white: 0.96, alpha: 1.0)
-        let ambNode = SCNNode(); ambNode.light = amb
+        let ambNode = SCNNode()
+        ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
-        // Directional “sun” with soft shadows
         let sun = SCNLight()
         sun.type = .directional
-        sun.intensity = 1500
-        sun.color = UIColor(white: 1.0, alpha: 1.0)
-
+        sun.intensity = 1600
+        sun.color = UIColor.white
         sun.castsShadow = true
         sun.shadowMode = .deferred
         sun.automaticallyAdjustsShadowProjection = true
         sun.maximumShadowDistance = 600
         sun.shadowMapSize = CGSize(width: 2048, height: 2048)
-        sun.shadowRadius = 4.0                   // softness
-        sun.shadowSampleCount = 8                // denoise (iOS 15+)
-        sun.shadowBias = 2.0 / 2048.0            // reduce acne without peter-panning
+        sun.shadowRadius = 4
+        sun.shadowSampleCount = 8
+        sun.shadowBias = 2.0 / 2048.0
 
         let sunNode = SCNNode()
         sunNode.light = sun
-        // Late-afternoon angle feels nice; tweak to taste
-        sunNode.eulerAngles = SCNVector3(-1.2, .pi / 4, 0)
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
+
+        // Put the sun higher now.
+        applySunDirection(azimuthDeg: 45, elevationDeg: 55)
     }
 
     private func buildSky() {
@@ -236,17 +263,20 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.addChildNode(skyAnchor)
         sunDiscNode = nil
 
-        // Seam-free gradient + fluffy clouds baked straight into the background image.
-        let skyImg = SkyGen.skyWithCloudsImage(width: 1024, height: 2048, coverage: 0.54, thickness: 0.22, seed: 424242)
+        // Bake fluffy clouds into the background so they’re guaranteed to show.
+        // Higher coverage + slightly thicker edges for visibility.
+        let skyImg = SkyGen.skyWithCloudsImage(width: 2048, height: 4096,
+                                               coverage: 0.70, thickness: 0.26, seed: 424242)
         scene.background.contents = skyImg
         scene.lightingEnvironment.contents = nil
-        scene.lightingEnvironment.intensity = 0.0
+        scene.lightingEnvironment.intensity = 0
 
-        // Sun billboard (as before)
+        // Create the sun billboard and place it using the same sun direction.
         if let sunLightNode {
             let discSize: CGFloat = 192
             let plane = SCNPlane(width: discSize, height: discSize)
             plane.cornerRadius = discSize * 0.5
+
             let mat = SCNMaterial()
             mat.lightingModel = .constant
             mat.emission.contents = SceneKitHelpers.sunImage(diameter: Int(discSize))
@@ -257,11 +287,11 @@ final class FirstPersonEngine: NSObject {
 
             let node = SCNNode(geometry: plane)
             node.constraints = [SCNBillboardConstraint()]
-            let dirToSun = -sunLightNode.presentation.simdWorldFront
-            node.simdPosition = simd_normalize(dirToSun) * (cfg.skyDistance - 180)
-            node.renderingOrder = -990
             skyAnchor.addChildNode(node)
             self.sunDiscNode = node
+
+            // Reuse the exact sun orientation (matches lighting).
+            applySunDirection(azimuthDeg: 45, elevationDeg: 55)
         }
     }
 
