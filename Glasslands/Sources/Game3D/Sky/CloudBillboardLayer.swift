@@ -4,8 +4,9 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Sprite‑impostor cumulus: hundreds of billboards grouped into clusters,
-//  placed on a spherical shell. UIKit/SceneKit on main; maths off‑main.
+//  Plane-based cumulus: hundreds of billboard sprites grouped into clusters,
+//  placed on a horizontal cloud layer (fixed altitude). UIKit/SceneKit on main;
+//  maths off-main. This gives real perspective: far near the horizon, close overhead.
 //
 
 @preconcurrency import SceneKit
@@ -17,33 +18,45 @@ enum CloudBillboardLayer {
     // MARK: Specs
 
     private struct PuffSpec {
-        var dir: simd_float3      // unit direction on the skydome
-        var size: Float           // quad size in metres
-        var roll: Float           // uv rotation in radians
-        var atlasIndex: Int       // which sprite variant
-        var opacity: Float        // per-puff fade for depth layering
+        var pos: simd_float3       // world position on the cloud plane
+        var size: Float            // quad size in metres
+        var roll: Float            // uv rotation in radians
+        var atlasIndex: Int        // which sprite variant
+        var opacity: Float         // per-puff fade for soft layering
     }
 
     private struct Cluster { var puffs: [PuffSpec] }
 
     // MARK: Build API
 
-    /// Builds the cloud layer asynchronously. Follows the same pattern as CloudDome+Async.
+    /// Builds the cloud layer asynchronously (same pattern as CloudDome+Async).
+    /// - Parameters:
+    ///   - radius: skyDistance (used to derive plane height and far cap)
+    ///   - minAltitudeY: min elevation for ray directions (keeps above horizon)
+    ///   - clusterCount: number of cumulus clusters
+    ///   - seed: RNG seed
     nonisolated static func makeAsync(
         radius: CGFloat,
-        minAltitudeY: Float = 0.22,   // keep comfortably above horizon
-        clusterCount: Int = 190,      // dense but still performant
+        minAltitudeY: Float = 0.18,
+        clusterCount: Int = 240,        // higher coverage
         seed: UInt32 = 0xC10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
+        // Derive a reasonable cloud-base height and far cap from the sky distance.
+        let layerHeight: Float = max(800, min(Float(radius) * 0.38, 2200))   // ~1–2.2 km
+        let farCap:      Float = max(layerHeight + 2000, Float(radius) * 2.6) // ~10–12 km
+
         Task.detached(priority: .userInitiated) {
 
-            // Pure-math helper (not actor-isolated) to avoid the global-actor trap.
-            func buildSpecs(
+            // Pure-math helper (not actor-isolated) to avoid global-actor inference.
+            func buildSpecsOnPlane(
                 clusterCount: Int,
-                minAltitudeY: Float,
+                minY: Float,
+                height: Float,
+                farCap: Float,
                 seed: UInt32
             ) -> [Cluster] {
+
                 @inline(__always)
                 func rand(_ s: inout UInt32) -> Float {
                     s = 1664525 &* s &+ 1013904223
@@ -52,86 +65,97 @@ enum CloudBillboardLayer {
 
                 var s = seed == 0 ? 1 : seed
 
-                // Poisson-ish placement of cluster centres on the upper hemisphere.
-                let minSepDeg: Float = 7.5
-                let minCos:    Float = cosf(minSepDeg * .pi / 180.0)
-                var centres: [simd_float3] = []
-                var attempts = 0
-
-                while centres.count < clusterCount && attempts < clusterCount * 240 {
-                    attempts += 1
-                    let u = rand(&s), v = rand(&s)
+                // We sample directions above the horizon, biasing towards the horizon
+                // so the plane is denser there (like the reference image).
+                @inline(__always)
+                func sampleDirectionAboveHorizon(_ s: inout UInt32, minY: Float) -> simd_float3? {
+                    let u = rand(&s)
+                    let v = rand(&s)
                     let az = (u - 0.5) * (2 * .pi)
-                    // Bias elevation to mid-sky. Clamp above horizon.
-                    let el = (0.16 + 0.76 * v) * (.pi / 2)
+                    // Elevation y in [minY, 1], biased towards minY via (1 - (1 - r)^k)
+                    let k: Float = 3.2
+                    let ry = 1 - powf(1 - v, k)
+                    let y  = min(0.985, max(minY, ry))
+                    let cosEl = sqrtf(max(0, 1 - y * y))
+                    return simd_normalize(simd_float3(sinf(az) * cosEl, y, cosf(az) * cosEl))
+                }
 
-                    var d = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
-                    if d.y < minAltitudeY { d.y = minAltitudeY }
-                    d = simd_normalize(d)
+                // Simple Poisson-ish keep-out in ANGLE space to avoid identical centres.
+                let minSepDeg: Float = 6.5
+                let minCos:    Float = cosf(minSepDeg * .pi / 180.0)
 
+                var centres: [simd_float3] = [] // store directions for centre rays
+                var attempts = 0
+                while centres.count < clusterCount && attempts < clusterCount * 260 {
+                    attempts += 1
+                    guard let d = sampleDirectionAboveHorizon(&s, minY: minY) else { continue }
                     var ok = true
                     for c in centres where simd_dot(c, d) > minCos { ok = false; break }
                     if ok { centres.append(d) }
                 }
 
-                // Build each cumulus as a compact clump:
-                //   - 1 large “core”, 2-3 medium, 3-6 small caps around.
-                //   - Slight vertical lift for the upper puffs.
-                //   - Smaller/clearer near horizon to avoid ground intersections.
+                // World axes on the plane
+                let planeX = simd_float3(1, 0, 0)
+                let planeZ = simd_float3(0, 0, 1)
+
+                // Build each cumulus cluster on the plane by intersecting the camera ray
+                // O + t*d with y = height => t = height / d.y
                 var clusters: [Cluster] = []
                 clusters.reserveCapacity(centres.count)
 
-                for centre in centres {
-                    let up = simd_normalize(centre)
-                    var east = simd_cross(simd_float3(0, 1, 0), up)
-                    if simd_length_squared(east) < 1e-6 { east = simd_float3(1, 0, 0) }
-                    east = simd_normalize(east)
-                    let north = simd_normalize(simd_cross(up, east))
+                for d in centres {
+                    let y = max(minY, d.y)
+                    let t = height / y
+                    if !t.isFinite || t <= 0 || t > farCap { continue }
 
-                    let horizonScale = 0.70 + 0.60 * max(0, up.y) // y∈[0..1] => [0.70..1.30]
-                    let baseSize = (170.0 + 60.0 * rand(&s)) * horizonScale
+                    let centre = d * t // world position on plane
+                    let dist   = length(centre)
+                    let farFade: Float = dist > (0.9 * farCap) ? max(0.2, 1 - (dist - 0.9 * farCap) / (0.1 * farCap)) : 1
+
+                    // Perspective-independent physical base size in metres.
+                    // Big, fluffy: cores ~800–1400 m; mediums ~450–800 m; smalls ~250–480 m.
+                    let base = (900.0 + 500.0 * rand(&s))
 
                     var puffs: [PuffSpec] = []
 
                     // Core
-                    let core = PuffSpec(
-                        dir: up * (1.02),
-                        size: baseSize * (1.10 + 0.20 * rand(&s)),
+                    puffs.append(PuffSpec(
+                        pos: centre + simd_float3(0, 60, 0),
+                        size: base * (1.00 + 0.30 * rand(&s)),
                         roll: 2 * .pi * rand(&s),
                         atlasIndex: Int(rand(&s) * 1024),
-                        opacity: 0.96
-                    )
-                    puffs.append(core)
+                        opacity: 0.97 * farFade
+                    ))
 
-                    // Medium ring
-                    let mediumCount = 2 + Int(rand(&s) * 2.9) // 2..4
-                    for _ in 0..<mediumCount {
-                        let r = 0.12 + 0.22 * rand(&s)
-                        let t = 2 * .pi * rand(&s)
-                        let lift = 0.03 + 0.08 * rand(&s)
-                        let dir = simd_normalize(up * (1 + lift) + east * (r * cosf(t)) + north * (0.55 * r * sinf(t)))
+                    // Medium ring around the core (elliptical spread, slightly lifted)
+                    let mCount = 3 + Int(rand(&s) * 3.9) // 3..6
+                    for _ in 0..<mCount {
+                        let r     = (140.0 + 260.0 * rand(&s))
+                        let theta = 2 * .pi * rand(&s)
+                        let off   = planeX * (r * cosf(theta)) + planeZ * (0.65 * r * sinf(theta))
+                        let lift  = 40.0 + 80.0 * rand(&s)
                         puffs.append(PuffSpec(
-                            dir: dir,
-                            size: baseSize * (0.70 + 0.25 * rand(&s)),
+                            pos: centre + off + simd_float3(0, lift, 0),
+                            size: base * (0.55 + 0.30 * rand(&s)),
                             roll: 2 * .pi * rand(&s),
                             atlasIndex: Int(rand(&s) * 1024),
-                            opacity: 0.92
+                            opacity: 0.93 * farFade
                         ))
                     }
 
-                    // Small caps
-                    let smallCount = 3 + Int(rand(&s) * 4.9) // 3..7
-                    for _ in 0..<smallCount {
-                        let r = 0.18 + 0.40 * rand(&s)
-                        let t = 2 * .pi * rand(&s)
-                        let lift = 0.08 + 0.18 * rand(&s)
-                        let dir = simd_normalize(up * (1 + lift) + east * (r * cosf(t)) + north * (0.55 * r * sinf(t)))
+                    // Small caps sprinkled above/around
+                    let sCount = 4 + Int(rand(&s) * 5.9) // 4..9
+                    for _ in 0..<sCount {
+                        let r     = (220.0 + 420.0 * rand(&s))
+                        let theta = 2 * .pi * rand(&s)
+                        let off   = planeX * (r * cosf(theta)) + planeZ * (0.70 * r * sinf(theta))
+                        let lift  = 110.0 + 180.0 * rand(&s)
                         puffs.append(PuffSpec(
-                            dir: dir,
-                            size: baseSize * (0.38 + 0.22 * rand(&s)),
+                            pos: centre + off + simd_float3(0, lift, 0),
+                            size: base * (0.30 + 0.22 * rand(&s)),
                             roll: 2 * .pi * rand(&s),
                             atlasIndex: Int(rand(&s) * 1024),
-                            opacity: 0.88
+                            opacity: 0.88 * farFade
                         ))
                     }
 
@@ -141,11 +165,17 @@ enum CloudBillboardLayer {
                 return clusters
             }
 
-            let specs = buildSpecs(clusterCount: clusterCount, minAltitudeY: minAltitudeY, seed: seed)
+            let specs = buildSpecsOnPlane(
+                clusterCount: clusterCount,
+                minY: max(0.05, minAltitudeY),
+                height: layerHeight,
+                farCap: farCap,
+                seed: seed
+            )
 
-            // Textures and node construction on main.
-            let atlas = await CloudSpriteTexture.makeAtlas(size: 256, seed: seed, count: 4)
-            let node  = await MainActor.run { buildNode(radius: radius, atlas: atlas, specs: specs) }
+            // Build textures and nodes on main.
+            let atlas = await CloudSpriteTexture.makeAtlas(size: 512, seed: seed, count: 4)
+            let node  = await MainActor.run { buildNode(atlas: atlas, specs: specs) }
             await MainActor.run { completion(node) }
         }
     }
@@ -154,7 +184,6 @@ enum CloudBillboardLayer {
 
     @MainActor
     private static func buildNode(
-        radius: CGFloat,
         atlas: CloudSpriteTexture.Atlas,
         specs: [Cluster]
     ) -> SCNNode {
@@ -169,29 +198,26 @@ enum CloudBillboardLayer {
         for img in atlas.images {
             let m = SCNMaterial()
             m.lightingModel = .constant
-            m.diffuse.contents  = img           // IMPORTANT: both diffuse and emission
+            m.diffuse.contents  = img
             m.emission.contents = img
             m.isDoubleSided = true
 
-            // Read depth so the terrain/horizon occludes clouds correctly.
+            // Depth: read so the terrain/horizon can occlude; don’t write.
             m.readsFromDepthBuffer = true
             m.writesToDepthBuffer  = false
 
-            // Premultiplied alpha setup.
             m.blendMode = .alpha
             m.transparencyMode = .aOne
 
-            // No tiling, no sampling beyond 0..1.
+            // Clamp UVs; rotate around centre in code below.
             m.diffuse.wrapS = .clamp;  m.diffuse.wrapT = .clamp
             m.emission.wrapS = .clamp; m.emission.wrapT = .clamp
-            // (No borderColor on SCNMaterial — clamping is sufficient.)
 
             m.diffuse.mipFilter  = .linear
             m.emission.mipFilter = .linear
             materials.append(m)
         }
 
-        // Helper: rotate a material around the UV centre (0.5, 0.5)
         @inline(__always)
         func centredUVRotation(_ angle: Float) -> SCNMatrix4 {
             let t1 = SCNMatrix4MakeTranslation(0.5, 0.5, 0)
@@ -206,14 +232,9 @@ enum CloudBillboardLayer {
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
                 let n = SCNNode(geometry: plane)
 
-                // Position on the skydome.
-                n.position = SCNVector3(
-                    x: p.dir.x * Float(radius),
-                    y: p.dir.y * Float(radius),
-                    z: p.dir.z * Float(radius)
-                )
+                n.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
 
-                // Face the camera but keep an upright “Y”.
+                // Keep clouds upright; face camera around Y.
                 let bb = SCNBillboardConstraint()
                 bb.freeAxes = .Y
                 n.constraints = [bb]
