@@ -5,13 +5,9 @@
 //  Created by . . on 10/3/25.
 //
 
-//
-//  CloudDome+Async.swift
-//  Glasslands
-//
-
 import SceneKit
 import UIKit
+import CoreGraphics
 
 extension CloudDome {
     static func makeAsync(
@@ -27,7 +23,7 @@ extension CloudDome {
     ) {
         Task.detached(priority: .userInitiated) {
             // Pure, thread-safe builder (no UIKit/SceneKit here).
-            let cg = buildCumulusCGImage(
+            let px = CumulusBuilder.buildPixels(
                 width: width,
                 height: height,
                 coverage: coverage,
@@ -37,8 +33,25 @@ extension CloudDome {
                 sunElevationDeg: sunElevationDeg
             )
 
-            // Hop to main actor for UIImage + SceneKit.
+            // Hop to main actor for UIImage + SceneKit node creation.
             await MainActor.run {
+                let bpr = px.width * 4
+                let data = CFDataCreate(nil, px.rgba, px.rgba.count)!
+                let provider = CGDataProvider(data: data)!
+                let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+                let cg = CGImage(
+                    width: px.width,
+                    height: px.height,
+                    bitsPerComponent: 8,
+                    bitsPerPixel: 32,
+                    bytesPerRow: bpr,
+                    space: cs,
+                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                    provider: provider,
+                    decode: nil,
+                    shouldInterpolate: true,
+                    intent: .defaultIntent
+                )!
                 let img = UIImage(cgImage: cg)
                 let node = CloudDome.make(radius: radius, skyImage: img)
                 completion(node)
