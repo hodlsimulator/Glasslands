@@ -148,24 +148,27 @@ final class ChunkStreamer3D {
             let data = await self.builder.build(originChunkX: ox, originChunkY: oy)
 
             guard let root = self.root else { self.pending.remove(k); return }
+
             let key = IVec2(ox, oy)
             guard self.desired.contains(key) else { self.pending.remove(key); return }
 
             let terrainNode = TerrainChunkNode.node(from: data)
             let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
             let veg = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let scenery = SceneryPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
 
-            await self.prepareAsync([terrainNode] + beacons + veg)
+            await self.prepareAsync([terrainNode] + beacons + veg + scenery)
 
             guard self.desired.contains(key) else { self.pending.remove(key); return }
 
             root.addChildNode(terrainNode)
             beacons.forEach { terrainNode.addChildNode($0) }
-            veg.forEach { terrainNode.addChildNode($0) }
+            veg.forEach     { terrainNode.addChildNode($0) }
+            scenery.forEach { terrainNode.addChildNode($0) }
 
             self.loaded[key] = terrainNode
             self.beaconSink(beacons)
-            self.obstacleSink(key, veg + beacons)
+            self.obstacleSink(key, veg + beacons + scenery)
             self.pending.remove(key)
         }
     }
@@ -193,7 +196,6 @@ final class ChunkStreamer3D {
     @MainActor
     func warmupInitial(at center: simd_float3, radius: Int = 1) {
         guard let root else { return }
-
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
 
         for dy in -radius...radius {
@@ -203,30 +205,29 @@ final class ChunkStreamer3D {
 
                 // Build terrain synchronously so there’s no visible void
                 let data = TerrainMeshBuilder.makeData(
-                    originChunkX: key.x,
-                    originChunkY: key.y,
-                    tilesX: cfg.tilesX,
-                    tilesZ: cfg.tilesZ,
-                    tileSize: cfg.tileSize,
-                    heightScale: cfg.heightScale,
-                    noise: noise,
-                    recipe: recipe
+                    originChunkX: key.x, originChunkY: key.y,
+                    tilesX: cfg.tilesX, tilesZ: cfg.tilesZ,
+                    tileSize: cfg.tileSize, heightScale: cfg.heightScale,
+                    noise: noise, recipe: recipe
                 )
                 let terrainNode = TerrainChunkNode.node(from: data)
                 root.addChildNode(terrainNode)
                 loaded[key] = terrainNode
 
-                // Place set-pieces and vegetation so centre area feels complete
+                // Place set-pieces, vegetation, and scenery so centre area feels complete
                 let beacons = BeaconPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
-                let veg = VegetationPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+                let veg     = VegetationPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+                let scenery = SceneryPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+
                 beacons.forEach { terrainNode.addChildNode($0) }
-                veg.forEach { terrainNode.addChildNode($0) }
+                veg.forEach     { terrainNode.addChildNode($0) }
+                scenery.forEach { terrainNode.addChildNode($0) }
 
                 beaconSink(beacons)
-                obstacleSink(key, veg + beacons)
+                obstacleSink(key, veg + beacons + scenery)
             }
         }
-    }
+    } 
 }
 
 // MARK: - Background mesh builder (actor) — pure math only, with skirts and stitched UVs.
