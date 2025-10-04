@@ -4,13 +4,11 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates an atlas of soft **cumulus puff** sprites.
-//  Design goals:
-//   • All puffs share the same visual language (rounded, fluffy, soft edge)
-//     with small, natural variations — so clouds feel consistent like the ref.
-//   • Premultiplied alpha for .aOne blending (no halos).
-//   • Wide **radial** apron so rotated billboards never show squares.
-//   • Very subtle top‑light; no hard base clipping inside the sprite.
+// Atlas of soft **cumulus puff** sprites.
+//  – SDF metaballs (smooth union of circles) for a cotton‑wool silhouette.
+//  – Wide radial apron so rotated billboards never show square edges.
+//  – Subtle top‑light; bright, cohesive look like the reference.
+//  – Premultiplied alpha for .aOne blending (no halos).
 //
 
 import UIKit
@@ -18,165 +16,147 @@ import CoreGraphics
 import simd
 
 enum CloudSpriteTexture {
-    struct Atlas {
-        let images: [UIImage]
-        let size: Int
-    }
+    struct Atlas { let images: [UIImage]; let size: Int }
 
-    static func makeAtlas(
-        size: Int = 512,
-        seed: UInt32 = 0x0C10D5,
-        count: Int = 4
-    ) async -> Atlas {
+    static func makeAtlas(size: Int = 512, seed: UInt32 = 0xC10D5, count: Int = 4) async -> Atlas {
         let n = max(1, min(8, count))
         let s = max(256, size)
-
         let images: [UIImage] = await MainActor.run {
-            var out: [UIImage] = []
-            out.reserveCapacity(n)
-            for i in 0..<n {
-                out.append(Self.buildImage(s, seed: seed &+ UInt32(i &* 7_919)))
-            }
-            return out
+            (0..<n).map { Self.buildImage(s, seed: seed &+ UInt32($0 &* 7919)) }
         }
-
         return Atlas(images: images, size: s)
     }
 }
 
-// MARK: - Implementation -------------------------------------------------------
+// MARK: - Implementation
 
 private extension CloudSpriteTexture {
 
-    // Fast 2D value noise + 3‑octave FBM (branchless).
-    static func h(_ x: Float, _ y: Float) -> Float {
-        var n = sinf(x * 127.1 + y * 311.7) * 43758.5453
-        n = n - floorf(n)
-        return n
+    // Fast integer hash -> 0..1
+    static func hash2(_ x: Int32, _ y: Int32) -> Float {
+        let n = sinf(Float(x) * 127.1 + Float(y) * 311.7) * 43758.5453
+        return n - floorf(n)
     }
     static func vnoise(_ x: Float, _ y: Float) -> Float {
         let ix = floorf(x), iy = floorf(y)
         let fx = x - ix,   fy = y - iy
-        let a = h(ix,     iy)
-        let b = h(ix + 1, iy)
-        let c = h(ix,     iy + 1)
-        let d = h(ix + 1, iy + 1)
+        let a = hash2(Int32(ix),     Int32(iy))
+        let b = hash2(Int32(ix + 1), Int32(iy))
+        let c = hash2(Int32(ix),     Int32(iy + 1))
+        let d = hash2(Int32(ix + 1), Int32(iy + 1))
         let u = fx*fx*(3 - 2*fx)
         let v = fy*fy*(3 - 2*fy)
         return a*(1-u)*(1-v) + b*u*(1-v) + c*(1-u)*v + d*u*v
     }
     static func fbm(_ x: Float, _ y: Float) -> Float {
         var f: Float = 0, a: Float = 0.5, s: Float = 1
-        for _ in 0..<3 {
-            f += a * vnoise(x * s, y * s)
-            s *= 2; a *= 0.5
-        }
+        for _ in 0..<3 { f += a * vnoise(x*s, y*s); s *= 2; a *= 0.5 }
         return f
+    }
+
+    // Smooth min (metaball blend) – stable, nice lobes.
+    @inline(__always)
+    static func smin(_ a: Float, _ b: Float, _ k: Float) -> Float {
+        // Exponential smooth min
+        let res = -log(exp(-k*a) + exp(-k*b)) / k
+        return res.isFinite ? res : min(a, b)
     }
 
     @MainActor
     static func buildImage(_ size: Int, seed: UInt32) -> UIImage {
         let W = size, H = size
-        let bytesPerRow = W * 4
+        let stride = W * 4
         var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-        // RNG for lobe placements
-        var state = (seed == 0) ? 1 : seed
-        @inline(__always) func urand() -> Float {
-            state = 1_664_525 &* state &+ 1_013_904_223
-            return Float(state >> 8) * (1.0 / 16_777_216.0)
+        // RNG (deterministic)
+        var state = seed == 0 ? 1 : Int(seed)
+        @inline(__always) func frand() -> Float {
+            state = 1664525 &* state &+ 1013904223
+            return Float((state >> 8) & 0xFFFFFF) * (1.0 / 16777216.0)
         }
 
-        // Elliptical Gaussian lobes (slightly wider than tall).
-        struct Lobe { var cx: Float; var cy: Float; var rx: Float; var ry: Float; var w: Float }
-        var lobes: [Lobe] = []
-        let count = 7 + Int(urand() * 3) // 7–9 similar lobes for consistent look
-        for i in 0..<count {
-            let spreadX: Float = (i < 2) ? 0.36 : 0.26
-            let spreadY: Float = (i < 2) ? 0.20 : 0.18
-            let cx = 0.5 + (urand() - 0.5) * spreadX
-            let cy = 0.50 + (urand() - 0.3) * spreadY  // tiny upward bias, but no hard base cut
-            // Base size with small per‑lobe variation
-            let s  = 0.23 + urand() * 0.22
-            let rx = s * (1.10 + (urand() - 0.5) * 0.20)
-            let ry = s * (0.92 + (urand() - 0.5) * 0.18)
-            let w  = 0.55 + urand() * 0.35
-            lobes.append(Lobe(cx: cx, cy: cy, rx: rx, ry: ry, w: w))
+        // --- Metaball layout (in UV space 0..1) ---
+        // One dominant core + 4–6 small lobes clustered around the upper half;
+        // no hard cut at the base – flatness comes from how puffs stack in world.
+        struct Ball { var c: simd_float2; var r: Float }
+        var balls: [Ball] = []
+
+        // Core
+        let coreR: Float = 0.28 + frand() * 0.05
+        balls.append(Ball(c: simd_float2(0.50, 0.52 + frand()*0.03), r: coreR))
+
+        // Cap lobes
+        let capN = 4 + Int(frand() * 3) // 4–6
+        for i in 0..<capN {
+            let ang = (Float(i) / Float(capN)) * (.pi) + (frand()-0.5) * 0.3   // mostly top half
+            let dist: Float = coreR * (0.65 + frand()*0.25)
+            let r: Float = coreR * (0.55 + frand()*0.18)
+            let cx = 0.50 + cos(ang) * dist
+            let cy = 0.52 + sin(ang) * dist * 0.85
+            balls.append(Ball(c: simd_float2(cx, cy), r: r))
         }
 
-        var density = [Float](repeating: 0, count: W * H)
+        // Occasional side lobe
+        if frand() < 0.5 {
+            let sideR = coreR * (0.45 + frand()*0.10)
+            let sideX = 0.50 + (frand() < 0.5 ? -1.0 : 1.0) * (coreR * (0.65 + frand()*0.2))
+            balls.append(Ball(c: simd_float2(sideX, 0.50 + frand()*0.02), r: sideR))
+        }
 
-        // Radial apron (circular) – keeps samples well away from texture edge.
+        // Radial apron (ensures safe rotation on a clamped sampler).
         let apronInner: Float = 0.86
-        let apronOuter: Float = 0.995
+        let apronOuter: Float = 0.996
 
-        // Centre for a slight vertical “cap” bias without cutting the base.
-        let capBiasY: Float = 0.52
+        // Field softness & rim noise
+        let kBlend: Float = 10.0         // higher = tighter union
+        let edgeSoft: Float = 0.02       // SDF feather to alpha
+        let noiseAmt: Float = 0.08       // subtle irregular rim
+
+        func sdf(_ p: simd_float2) -> Float {
+            var d: Float = .greatestFiniteMagnitude
+            for b in balls {
+                let l = length(p - b.c) - b.r
+                d = smin(d, l, kBlend)
+            }
+            return d
+        }
 
         for y in 0..<H {
             let fy = (Float(y) + 0.5) / Float(H)
             for x in 0..<W {
                 let fx = (Float(x) + 0.5) / Float(W)
+                let p = simd_float2(fx, fy)
 
-                // Soft union of lobes using multiplicative complement:
-                //   union = 1 - Π(1 - w_i * gaussian)
-                var keep: Float = 1.0
-                for l in lobes {
-                    let dx = (fx - l.cx)
-                    let dy = (fy - l.cy)
-                    let g = expf(-0.5 * ((dx*dx)/(l.rx*l.rx) + (dy*dy)/(l.ry*l.ry)))
-                    keep *= (1.0 - l.w * g)
-                }
-                var d = 1.0 - keep
-                d = min(1, max(0, d))
+                // Raw SDF and soft alpha
+                var d = sdf(p)
 
-                // Slight cap thickening above the centre (no hard cut).
-                // Adds a “puffed top” feeling like cumulus without making a bowl.
-                let capBoost = max(0, (fy - capBiasY)) * 0.25
-                d = min(1, d * (1.0 + capBoost))
+                // Add a tiny rim noise to break perfect circularity.
+                let n = fbm(fx * 8.0, fy * 8.0)    // 0..~1
+                d -= (n - 0.5) * noiseAmt
 
-                // Tiny rim noise to break perfect circularity (consistent style).
-                let n = fbm(fx * 9.0, fy * 9.0)  // 0..~1
-                let edge = 1 - d
-                d += (n - 0.5) * 0.10 * edge      // stronger near edge, subtle overall
-                d = min(1, max(0, d))
+                // Map SDF -> density 0..1 (inside -> 1).
+                var a = 1.0 - smoothstep(0.0, edgeSoft, d)
+                a = max(0, min(1, a))
 
-                // Radial apron mask.
-                let rdx = (fx - 0.5) / 0.5
-                let rdy = (fy - 0.5) / 0.5
-                let rr  = min(1.5, sqrtf(rdx*rdx + rdy*rdy))
-                let rimCut = smoothstep(apronInner, apronOuter, min(1.0, rr))
-                let mask   = 1.0 - rimCut
+                // Radial apron mask (circular)
+                let dx = (fx - 0.5) / 0.5
+                let dy = (fy - 0.5) / 0.5
+                let r = min(1.5, sqrtf(dx*dx + dy*dy))
+                let apron = 1.0 - smoothstep(apronInner, apronOuter, min(1.0, r))
+                a *= apron
 
-                density[y * W + x] = d * mask
-            }
-        }
-
-        // Gentle top‑light shading using gradient of density.
-        let lightDir = simd_normalize(simd_float2(0.0, -1.0)) // light from above
-
-        for y in 0..<H {
-            for x in 0..<W {
-                let i = y * W + x
-                let d = density[i]
-
-                let xm = density[i + (x > 0 ? -1 : 0)]
-                let xp = density[i + (x < W - 1 ? 1 : 0)]
-                let ym = density[i + (y > 0 ? -W : 0)]
-                let yp = density[i + (y < H - 1 ? W : 0)]
-
-                let nx = (xm - xp)
-                let ny = (ym - yp)
-
-                // Soft shading only; keep clouds bright & cottony.
-                var shade = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 0.55 + 0.95))
-                shade = shade * (0.92 + 0.08 * d)
+                // Very gentle top‑light using the SDF gradient.
+                // Central difference (2 texels apart to keep stable on small sprites).
+                let eps: Float = 2.0 / Float(W)
+                let nx = sdf(simd_float2(fx + eps, fy)) - sdf(simd_float2(fx - eps, fy))
+                let ny = sdf(simd_float2(fx, fy + eps)) - sdf(simd_float2(fx, fy - eps))
+                let L = simd_normalize(simd_float2(0.0, -1.0))
+                var shade = max(0.0, min(1.0, (-(nx*L.x + ny*L.y)) * 0.6 + 0.92))
+                shade = shade * (0.92 + 0.08 * a)
 
                 // Premultiplied alpha.
-                let a = min(1.0, d)
                 let c = min(1.0, a * shade)
-
-                let o = i * 4
+                let o = (y * W + x) * 4
                 buf[o + 0] = UInt8(c * 255.0 + 0.5)
                 buf[o + 1] = UInt8(c * 255.0 + 0.5)
                 buf[o + 2] = UInt8(c * 255.0 + 0.5)
@@ -190,7 +170,7 @@ private extension CloudSpriteTexture {
         let cg = CGImage(
             width: W, height: H,
             bitsPerComponent: 8, bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
+            bytesPerRow: stride,
             space: cs,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
             provider: provider, decode: nil,
