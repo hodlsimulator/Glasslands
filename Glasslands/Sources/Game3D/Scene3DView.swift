@@ -20,6 +20,7 @@ struct Scene3DView: UIViewRepresentable {
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
 
+        // Performance-first defaults (especially when the sky fills the screen)
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
@@ -30,12 +31,8 @@ struct Scene3DView: UIViewRepresentable {
 
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
-            metal.wantsExtendedDynamicRangeContent = true
-            if #available(iOS 14.0, *) {
-                metal.pixelFormat = .bgr10_xr_srgb
-            } else {
-                metal.pixelFormat = .bgr10_xr
-            }
+            metal.wantsExtendedDynamicRangeContent = false
+            metal.pixelFormat = .bgra8Unorm
             metal.maximumDrawableCount = 3
         }
 

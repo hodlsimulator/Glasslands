@@ -15,17 +15,16 @@ import UIKit
 
 struct VegetationPlacer3D {
 
-    static func place(
-        inChunk ci: IVec2,
-        cfg: FirstPersonEngine.Config,
-        noise: NoiseFields,
-        recipe: BiomeRecipe
-    ) -> [SCNNode] {
+    static func place(inChunk ci: IVec2,
+                      cfg: FirstPersonEngine.Config,
+                      noise: NoiseFields,
+                      recipe: BiomeRecipe) -> [SCNNode] {
         let originTile = IVec2(ci.x * cfg.tilesX, ci.y * cfg.tilesZ)
 
         let ux = UInt64(bitPattern: Int64(ci.x))
         let uy = UInt64(bitPattern: Int64(ci.y))
         let seed = recipe.seed64 ^ (ux &* 0x9E3779B97F4A7C15) ^ (uy &* 0xBF58476D1CE4E5B9)
+
         let rng = GKMersenneTwisterRandomSource(seed: seed)
         var ra = RandomAdaptor(rng)
 
@@ -52,6 +51,7 @@ struct VegetationPlacer3D {
 
                 let jx = (rng.nextUniform() - 0.5) * 0.9
                 let jz = (rng.nextUniform() - 0.5) * 0.9
+
                 let wx = (Float(tileX) + Float(jx)) * cfg.tileSize
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
@@ -60,6 +60,7 @@ struct VegetationPlacer3D {
                     palette: AppColours.uiColors(from: recipe.paletteHex),
                     rng: rng
                 )
+
                 tree.position = SCNVector3(wx, wy, wz)
                 tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
                 tree.castsShadow = true
@@ -70,24 +71,20 @@ struct VegetationPlacer3D {
         return nodes
     }
 
-    // MARK: - Varied low-poly conifer
+    // MARK: - Varied low-poly conifer (no round spheres)
 
-    private static func makeTreeNode(
-        palette: [UIColor],
-        rng: GKMersenneTwisterRandomSource
-    ) -> (SCNNode, Float, CGFloat) {
+    private static func makeTreeNode(palette: [UIColor],
+                                     rng: GKMersenneTwisterRandomSource) -> (SCNNode, Float, CGFloat) {
         var r = RandomAdaptor(rng)
 
-        let tall    = rng.nextUniform() > 0.35
-        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r)
-                                   : CGFloat.random(in: 0.75...1.15, using: &r)
-        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r)
-                                   : CGFloat.random(in: 0.05...0.08, using: &r)
+        // Keep shapes related (subtle changes), avoid drastic silhouette changes
+        let tall = rng.nextUniform() > 0.35
+        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r) : CGFloat.random(in: 0.75...1.15, using: &r)
+        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r) : CGFloat.random(in: 0.05...0.08, using: &r)
 
-        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r)
-                                     : CGFloat.random(in: 1.10...1.60, using: &r)
-        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r)
-                                     : CGFloat.random(in: 0.45...0.70, using: &r)
+        // Canopy as truncated cone; optionally stacked two-piece variant for variety
+        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r) : CGFloat.random(in: 1.10...1.60, using: &r)
+        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r) : CGFloat.random(in: 0.45...0.70, using: &r)
         let canopyTopR1: CGFloat = CGFloat.random(in: 0.06...0.16, using: &r)
 
         let twoStage = rng.nextUniform() > 0.55
@@ -108,41 +105,52 @@ struct VegetationPlacer3D {
                           satBy: CGFloat.random(in: -0.10...0.10, using: &r),
                           briBy: CGFloat.random(in: -0.06...0.06, using: &r))
 
+        // Trunk
         let trunk = SCNCylinder(radius: trunkR, height: trunkH)
         let trunkMat = SCNMaterial()
-        trunkMat.lightingModel = .lambert
+        trunkMat.lightingModel = .physicallyBased
         trunkMat.diffuse.contents = bark
+        trunkMat.roughness.contents = 0.95
+        trunkMat.metalness.contents = 0.0
         trunk.materials = [trunkMat]
 
+        // Canopy piece 1
         let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
         canopy1.radialSegmentCount = 12
         let leafMat = SCNMaterial()
-        leafMat.lightingModel = .lambert
+        leafMat.lightingModel = .physicallyBased
         leafMat.diffuse.contents = leaf
+        leafMat.roughness.contents = 0.75
+        leafMat.metalness.contents = 0.0
+        canopy1.materials = [leafMat]
 
+        // Optional canopy piece 2
+        let canopy2: SCNGeometry? = twoStage ? {
+            let g = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
+            g.radialSegmentCount = 10
+            g.materials = [leafMat]
+            return g
+        }() : nil
+
+        // Build node
         let node = SCNNode()
 
         let trunkNode = SCNNode(geometry: trunk)
         trunkNode.position = SCNVector3(0, trunkH / 2.0, 0)
-        trunkNode.castsShadow = true
-        node.addChildNode(trunkNode)
 
         let canopyNode1 = SCNNode(geometry: canopy1)
         canopyNode1.position = SCNVector3(0, trunkH + canopyH1 * 0.5 - 0.02, 0)
-        canopyNode1.castsShadow = true
-        canopyNode1.geometry?.materials = [leafMat]
+
+        node.addChildNode(trunkNode)
         node.addChildNode(canopyNode1)
 
-        if twoStage {
-            let g2 = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
-            g2.radialSegmentCount = 10
-            g2.materials = [leafMat]
+        if let g2 = canopy2 {
             let cn2 = SCNNode(geometry: g2)
             cn2.position = SCNVector3(0, trunkH + canopyH1 + canopyH2 * 0.45, 0)
-            cn2.castsShadow = true
             node.addChildNode(cn2)
         }
 
+        // Gentle natural imperfections
         node.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &r)
         node.eulerAngles.z = Float.random(in: -0.04...0.04, using: &r)
 

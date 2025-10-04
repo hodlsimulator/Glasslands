@@ -19,7 +19,7 @@ struct TerrainChunkData: Sendable {
     let tileSize: Float
     let positions: [simd_float3]
     let normals: [simd_float3]
-    let colors: [simd_float4] // kept for compatibility; not used here
+    let colors: [simd_float4]     // kept for compatibility; not used here
     let uvs: [simd_float2]
     let indices: [UInt32]
 }
@@ -45,8 +45,7 @@ enum TerrainChunkNode {
         return node(from: data, cfg: cfg)
     }
 
-    @MainActor
-    static func node(from data: TerrainChunkData) -> SCNNode {
+    @MainActor static func node(from data: TerrainChunkData) -> SCNNode {
         node(from: data, cfg: FirstPersonEngine.Config())
     }
 
@@ -64,35 +63,33 @@ enum TerrainChunkNode {
         let posSrc = SCNGeometrySource(
             data: posData, semantic: .vertex, vectorCount: data.positions.count,
             usesFloatComponents: true, componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
-            dataStride: MemoryLayout<SIMD3<Float>>.stride
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride
         )
         let nrmSrc = SCNGeometrySource(
             data: nrmData, semantic: .normal, vectorCount: data.normals.count,
             usesFloatComponents: true, componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
-            dataStride: MemoryLayout<SIMD3<Float>>.stride
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride
         )
         let uvSrc = SCNGeometrySource(
             data: uvData, semantic: .texcoord, vectorCount: data.uvs.count,
             usesFloatComponents: true, componentsPerVector: 2,
-            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
-            dataStride: MemoryLayout<SIMD2<Float>>.stride
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: MemoryLayout<SIMD2<Float>>.stride
         )
         let element = SCNGeometryElement(
-            data: idxData, primitiveType: .triangles,
-            primitiveCount: data.indices.count / 3,
+            data: idxData, primitiveType: .triangles, primitiveCount: data.indices.count / 3,
             bytesPerIndex: MemoryLayout<UInt32>.size
         )
 
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
-        // Matte, bright green ground. Receives shadows; no HDR emission.
+        // Receive shadows (physically based). Keep the simple green for now.
         let mat = SCNMaterial()
-        mat.lightingModel = .lambert
-        mat.diffuse.contents = UIColor(red: 0.40, green: 0.75, blue: 0.38, alpha: 1.0)
+        mat.lightingModel = .physicallyBased
+        let green = UIColor(red: 0.32, green: 0.62, blue: 0.34, alpha: 1.0)
+        mat.diffuse.contents = green
+        mat.roughness.contents = 0.95
+        mat.metalness.contents = 0.0
         mat.emission.contents = UIColor.black
-
         mat.isDoubleSided = true
         mat.cullMode = .back
         mat.readsFromDepthBuffer = true
@@ -101,7 +98,7 @@ enum TerrainChunkNode {
         geom.materials = [mat]
         node.geometry = geom
 
-        // Ground receives shadows; doesn’t cast onto itself.
+        // Terrain should receive shadows; it doesn’t need to cast them onto other terrain.
         node.castsShadow = false
 
         // Tag for ground-height raycasts.
