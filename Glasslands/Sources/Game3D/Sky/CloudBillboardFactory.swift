@@ -7,15 +7,11 @@
 //  Converts cluster specs + atlas into a SceneKit node.
 //
 
-//
-//  CloudBillboardFactory.swift
-//  Glasslands
-//
-
 import SceneKit
 import UIKit
 
 enum CloudBillboardFactory {
+    @MainActor
     static func makeNode(
         from clusters: [CloudClusterSpec],
         atlas: CloudSpriteTexture.Atlas
