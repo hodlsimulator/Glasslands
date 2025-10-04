@@ -15,7 +15,9 @@ import GameplayKit
 
 @MainActor
 final class FirstPersonEngine {
-    // Public API
+
+    // MARK: Public API
+
     init(onScore: @escaping (Int) -> Void) {
         self.onScore = onScore
     }
@@ -33,23 +35,22 @@ final class FirstPersonEngine {
         scnView?.isPlaying = !paused
     }
 
-    func setMoveInput(_ vec: SIMD2<Float>) {
+    func setMoveInput(_ vec: SIMD2<Float>) { // MoveStickView
         moveAxis = vec
     }
 
-    func applyLookDelta(points delta: SIMD2<Float>) {
+    func applyLookDelta(points delta: SIMD2<Float>) { // LookPadView
         look.applyDelta(points: delta)
         look.apply(to: playerNode, pitchNode: pitchNode)
     }
 
     func apply(recipe newRecipe: BiomeRecipe) {
         clearWorld()
-
         recipe = newRecipe
         noise = NoiseFields(recipe: newRecipe)
 
         makeLighting()
-        makeSkyDome()
+        makeSkyBillboards()       // ← billboard impostors (Sky/*), not the dome
 
         terrainRoot = SCNNode()
         terrainRoot.name = "TerrainRoot"
@@ -90,17 +91,17 @@ final class FirstPersonEngine {
         playerPos.y = startY
         updateTransforms()
 
+        // Build a 3×3 immediately so there are no visible “voids”.
         streamer.warmupInitial(at: SIMD3(playerPos.x, 0, playerPos.z), radius: 1)
         streamer.updateVisible(center: SIMD3(playerPos.x, 0, playerPos.z))
     }
 
-    func snapshot() -> UIImage? {
-        scnView?.snapshot()
-    }
+    func snapshot() -> UIImage? { scnView?.snapshot() }
 
     // Render-thread callback via RendererProxy
     func stepUpdateMain(at t: TimeInterval) {
         guard !isPaused else { lastTime = t; return }
+
         let dt: Float
         if let last = lastTime {
             dt = Float(max(0, min(0.050, t - last)))
@@ -113,9 +114,11 @@ final class FirstPersonEngine {
         let gy = TerrainMath.heightWorld(
             x: playerPos.x, z: playerPos.z, cfg: config, noise: noise
         )
+
         let groundY = { [noise, cfg = config] (x: Float, z: Float) -> Float in
             TerrainMath.heightWorld(x: x, z: z, cfg: cfg, noise: noise)
         }
+
         let near = obstacles.nearby(to: playerPos, within: 4.0)
 
         playerPos = mover.step(
@@ -129,6 +132,8 @@ final class FirstPersonEngine {
         playerPos.y = groundY(playerPos.x, playerPos.z) + config.eyeHeight
 
         updateTransforms()
+        updateSunBillboardPosition()
+
         streamer?.updateVisible(center: SIMD3(playerPos.x, 0, playerPos.z))
         tallyBeacons()
     }
@@ -137,31 +142,48 @@ final class FirstPersonEngine {
 
     private let scene = SCNScene()
     private weak var scnView: SCNView?
+
     private var sceneRendererFallback: SCNSceneRenderer { sceneRendererView }
     private let sceneRendererView = SCNView(frame: .zero)
 
     private let sceneRoot = SCNNode()
+
     private let playerNode = SCNNode()
     private let pitchNode = SCNNode()
+
     private let cameraNode: SCNNode = {
         let cam = SCNCamera()
         cam.zNear = 0.01
         cam.zFar = 2000
+
+        // HDR + bloom for the sun disc
         cam.wantsHDR = true
         cam.wantsExposureAdaptation = true
+        cam.minimumExposure = -2.0
+        cam.maximumExposure =  2.0
+        cam.exposureOffset = 0.0
+        cam.exposureAdaptationBrighteningSpeedFactor = 1.0
+        cam.exposureAdaptationDarkeningSpeedFactor  = 1.0
+
+        cam.bloomIntensity  = 1.2
+        cam.bloomThreshold  = 0.90
+        cam.bloomBlurRadius = 18.0
+
         let n = SCNNode()
         n.camera = cam
         return n
     }()
 
     private var terrainRoot = SCNNode()
-    private var skyNode: SCNNode?
-    private var sunNode: SCNNode?
+    private var skyNode: SCNNode?              // billboard cloud layer (Sky/)
+    private var sunBillboard: SCNNode?         // HDR sun sprite (Sky/)
 
     private var streamer: ChunkStreamer3D?
+
     private var recipe: BiomeRecipe?
+
     private var noise = NoiseFields(recipe: BiomeRecipe(
-        height: .init(base: "perlin", octaves: 5, amplitude: 1, scale: 30),
+        height: .init(base: "perlin",  octaves: 5, amplitude: 1, scale: 30),
         moisture: .init(base: "perlin", octaves: 4, amplitude: 1, scale: 20),
         paletteHex: ["#75AADB","#85C16A","#A8D0A6","#F3E9D2","#6B4F3B"],
         faunaTags: [],
@@ -172,15 +194,19 @@ final class FirstPersonEngine {
     ))
 
     private var config = Config()
+
     private var moveAxis = SIMD2<Float>(repeating: 0)
+
     private var look = FirstPersonLookController(
         sensitivity: Config().lookSensitivityRadPerPoint,
         maxPitch: Config().maxPitchRadians
     )
+
     private var mover = FirstPersonMover(
         speed: Config().moveSpeed,
         radius: Config().playerRadius
     )
+
     private var isPaused = false
 
     private var score: Int = 0 { didSet { onScore(score) } }
@@ -188,10 +214,13 @@ final class FirstPersonEngine {
 
     private var lastTime: TimeInterval?
     private var playerPos = SIMD3<Float>(0, 0, 0)
+
     private var beacons: [ChunkKey: [SCNNode]] = [:]
     private var obstacles = FirstPersonObstacleField(cfg: Config())
 
     private var lookYaw: Float { look.yaw }
+
+    // MARK: Setup
 
     private func setupView(_ v: SCNView) {
         v.scene = scene
@@ -200,6 +229,13 @@ final class FirstPersonEngine {
         v.antialiasingMode = .none
         v.rendersContinuously = true
         v.backgroundColor = .black
+
+        // IBL so PBR/matte materials aren’t black on the unlit side.
+        let ibl = SceneKitHelpers.skyEquirectGradient(width: 512, height: 256)
+        scene.lightingEnvironment.contents = ibl
+        scene.lightingEnvironment.intensity = 1.0
+        // Also use as background so gaps never look like voids.
+        scene.background.contents = ibl
     }
 
     private func setupSceneIfNeeded() {
@@ -207,6 +243,7 @@ final class FirstPersonEngine {
             scene.rootNode.addChildNode(sceneRoot)
             sceneRoot.name = "WorldRoot"
         }
+
         if playerNode.parent == nil {
             scene.rootNode.addChildNode(playerNode)
             playerNode.addChildNode(pitchNode)
@@ -216,45 +253,76 @@ final class FirstPersonEngine {
         }
     }
 
+    // MARK: Lighting + HDR sun
+
     private func makeLighting() {
-        sunNode?.removeFromParentNode()
+        // Directional sunlight kept moderate; HDR look comes from the sun sprite.
         let light = SCNLight()
         light.type = .directional
         light.color = UIColor.white
-        light.intensity = 500
+        light.intensity = 1400
+
         light.castsShadow = true
         light.shadowMode = .deferred
-        light.shadowRadius = 3.0
+        light.shadowRadius = 2.0
         light.shadowSampleCount = 4
+        light.shadowMapSize = CGSize(width: 1024, height: 1024)
+        light.shadowBias = 0.02
+
         let sun = SCNNode()
         sun.light = light
 
-        let deg2rad: (Float) -> Float = { $0 * .pi / 180 }
         let az = deg2rad(config.sunAzimuthDeg)
         let el = deg2rad(config.sunElevationDeg)
         sun.eulerAngles = SCNVector3(el, az, 0)
         scene.rootNode.addChildNode(sun)
-        sunNode = sun
+
+        // Soft ambient fill so backsides aren’t black.
+        let amb = SCNLight()
+        amb.type = .ambient
+        amb.intensity = 400
+        amb.color = UIColor(white: 1.0, alpha: 1.0)
+        scene.rootNode.addChildNode(SCNNode()).light = amb
+
+        // Visible HDR sun disc (billboard sprite from Sky/)
+        sunBillboard?.removeFromParentNode()
+        let sprite = SunBillboard.makeNode(
+            diameterWorld: 24,
+            emissionIntensity: 10.0 // ensures bloom
+        )
+        scene.rootNode.addChildNode(sprite)
+        sunBillboard = sprite
+        updateSunBillboardPosition()
     }
 
-    private func makeSkyDome() {
+    // MARK: Sky (billboard impostors; all logic in Sky/)
+
+    private func makeSkyBillboards() {
         skyNode?.removeFromParentNode()
-        let radius: CGFloat = 800
-        CloudDome.makeAsync(
+
+        let radius: CGFloat = 1200
+        CloudBillboardLayer.makeAsync(
             radius: radius,
-            coverage: config.skyCoverage,
-            edgeSoftness: config.skyEdgeSoftness,
-            seed: 424242,
-            width: config.skyTextureWidth,
-            height: config.skyTextureHeight,
-            sunAzimuthDeg: config.sunAzimuthDeg,
-            sunElevationDeg: config.sunElevationDeg
-        ) { [weak self] dome in
+            minAltitudeY: 0.12,
+            clusterCount: 140,
+            seed: 0xC10D5
+        ) { [weak self] node in
             guard let self else { return }
-            self.skyNode = dome
-            self.scene.rootNode.addChildNode(dome)
+
+            // Pass sun direction to the cloud materials for backlight.
+            let d = self.sunDirection()
+            node.enumerateChildNodes { c, _ in
+                if let g = c.geometry, let m = g.firstMaterial {
+                    m.setValue(SCNVector3(d.x, d.y, d.z), forKey: "sunDirWorld")
+                }
+            }
+
+            self.skyNode = node
+            self.scene.rootNode.addChildNode(node)
         }
     }
+
+    // MARK: Lifecycle helpers
 
     private func clearWorld() {
         streamer = nil
@@ -265,8 +333,11 @@ final class FirstPersonEngine {
         for n in terrainRoot.childNodes { n.removeFromParentNode() }
         terrainRoot.removeFromParentNode()
 
-        if let sky = skyNode { sky.removeFromParentNode() }
+        skyNode?.removeFromParentNode()
         skyNode = nil
+
+        sunBillboard?.removeFromParentNode()
+        sunBillboard = nil
     }
 
     private func updateTransforms() {
@@ -277,9 +348,11 @@ final class FirstPersonEngine {
     private func tallyBeacons() {
         let rPlayer = config.playerRadius
         var gained = 0
+
         for (k, arr) in beacons {
             var keep: [SCNNode] = []
             keep.reserveCapacity(arr.count)
+
             for n in arr {
                 let w = n.worldPosition
                 let dx = Float(w.x) - playerPos.x
@@ -295,15 +368,71 @@ final class FirstPersonEngine {
             }
             beacons[k] = keep
         }
-        if gained > 0 {
-            score += gained
-        }
+        if gained > 0 { score += gained }
     }
 
     private func keyFor(position p: SCNVector3) -> ChunkKey {
         let tX = Int(floor(Double(p.x) / Double(config.tileSize)))
         let tZ = Int(floor(Double(p.z) / Double(config.tileSize)))
-        func floorDiv(_ a: Int, _ b: Int) -> Int { a >= 0 ? a / b : ((a + 1) / b - 1) }
+
+        func floorDiv(_ a: Int, _ b: Int) -> Int {
+            a >= 0 ? a / b : ((a + 1) / b - 1)
+        }
         return ChunkKey(x: floorDiv(tX, config.tilesX), y: floorDiv(tZ, config.tilesZ))
     }
+
+    // MARK: Sun helpers
+
+    private func sunDirection() -> simd_float3 {
+        let az = deg2rad(config.sunAzimuthDeg)
+        let el = deg2rad(config.sunElevationDeg)
+        let d = simd_float3(sinf(az) * cosf(el), sinf(el), cosf(az) * cosf(el))
+        return simd_normalize(d)
+    }
+
+    private func updateSunBillboardPosition() {
+        guard let sunBillboard else { return }
+        let d = sunDirection()
+        let dist: Float = 1400
+        let pos = SIMD3<Float>(
+            playerPos.x + d.x * dist,
+            playerPos.y + d.y * dist,
+            playerPos.z + d.z * dist
+        )
+        sunBillboard.position = SCNVector3(pos)
+    }
+
+    @inline(__always) private func deg2rad(_ v: Float) -> Float { v * .pi / 180 }
 }
+
+// MARK: - Tuning
+
+extension FirstPersonEngine {
+    struct Config {
+        // World grid
+        var tileSize: Float = 1.5
+        var tilesX: Int = 24
+        var tilesZ: Int = 24
+        var heightScale: Float = 3.8
+
+        // Streaming
+        var preloadRadius: Int = 2
+        var tasksPerFrame: Int = 2
+
+        // Camera/player
+        var eyeHeight: Float = 1.62
+        var playerRadius: Float = 0.22
+        var moveSpeed: Float = 3.2
+        var lookSensitivityRadPerPoint: Float = 0.0030
+        var maxPitchRadians: Float = .pi * 0.42
+
+        // Sky/sun
+        var skyTextureWidth: Int = 1024
+        var skyTextureHeight: Int = 512
+        var skyCoverage: Float = 0.34
+        var skyEdgeSoftness: Float = 0.22
+        var sunAzimuthDeg: Float = 30
+        var sunElevationDeg: Float = 55
+    }
+}
+ 

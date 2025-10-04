@@ -15,16 +15,17 @@ import UIKit
 
 struct VegetationPlacer3D {
 
-    static func place(inChunk ci: IVec2,
-                      cfg: FirstPersonEngine.Config,
-                      noise: NoiseFields,
-                      recipe: BiomeRecipe) -> [SCNNode] {
+    static func place(
+        inChunk ci: IVec2,
+        cfg: FirstPersonEngine.Config,
+        noise: NoiseFields,
+        recipe: BiomeRecipe
+    ) -> [SCNNode] {
         let originTile = IVec2(ci.x * cfg.tilesX, ci.y * cfg.tilesZ)
 
         let ux = UInt64(bitPattern: Int64(ci.x))
         let uy = UInt64(bitPattern: Int64(ci.y))
         let seed = recipe.seed64 ^ (ux &* 0x9E3779B97F4A7C15) ^ (uy &* 0xBF58476D1CE4E5B9)
-
         let rng = GKMersenneTwisterRandomSource(seed: seed)
         var ra = RandomAdaptor(rng)
 
@@ -51,7 +52,6 @@ struct VegetationPlacer3D {
 
                 let jx = (rng.nextUniform() - 0.5) * 0.9
                 let jz = (rng.nextUniform() - 0.5) * 0.9
-
                 let wx = (Float(tileX) + Float(jx)) * cfg.tileSize
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
@@ -60,7 +60,6 @@ struct VegetationPlacer3D {
                     palette: AppColours.uiColors(from: recipe.paletteHex),
                     rng: rng
                 )
-
                 tree.position = SCNVector3(wx, wy, wz)
                 tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
                 tree.castsShadow = true
@@ -71,17 +70,24 @@ struct VegetationPlacer3D {
         return nodes
     }
 
-    // MARK: - Varied low-poly conifer (no round spheres)
+    // MARK: - Varied low-poly conifer
 
-    private static func makeTreeNode(palette: [UIColor], rng: GKMersenneTwisterRandomSource) -> (SCNNode, Float, CGFloat) {
+    private static func makeTreeNode(
+        palette: [UIColor],
+        rng: GKMersenneTwisterRandomSource
+    ) -> (SCNNode, Float, CGFloat) {
         var r = RandomAdaptor(rng)
 
-        let tall = rng.nextUniform() > 0.35
-        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r) : CGFloat.random(in: 0.75...1.15, using: &r)
-        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r) : CGFloat.random(in: 0.05...0.08, using: &r)
+        let tall    = rng.nextUniform() > 0.35
+        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r)
+                                   : CGFloat.random(in: 0.75...1.15, using: &r)
+        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r)
+                                   : CGFloat.random(in: 0.05...0.08, using: &r)
 
-        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r) : CGFloat.random(in: 1.10...1.60, using: &r)
-        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r) : CGFloat.random(in: 0.45...0.70, using: &r)
+        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r)
+                                     : CGFloat.random(in: 1.10...1.60, using: &r)
+        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r)
+                                     : CGFloat.random(in: 0.45...0.70, using: &r)
         let canopyTopR1: CGFloat = CGFloat.random(in: 0.06...0.16, using: &r)
 
         let twoStage = rng.nextUniform() > 0.55
@@ -91,10 +97,12 @@ struct VegetationPlacer3D {
 
         let barkBase = palette.indices.contains(4) ? palette[4] : .brown
         let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
+
         let bark = barkBase
             .adjustingHue(by: CGFloat.random(in: -0.02...0.02, using: &r),
                           satBy: CGFloat.random(in: -0.08...0.08, using: &r),
                           briBy: CGFloat.random(in: -0.05...0.05, using: &r))
+
         let leaf = leafBase
             .adjustingHue(by: CGFloat.random(in: -0.03...0.03, using: &r),
                           satBy: CGFloat.random(in: -0.10...0.10, using: &r),
@@ -102,19 +110,15 @@ struct VegetationPlacer3D {
 
         let trunk = SCNCylinder(radius: trunkR, height: trunkH)
         let trunkMat = SCNMaterial()
-        trunkMat.lightingModel = .physicallyBased
+        trunkMat.lightingModel = .lambert
         trunkMat.diffuse.contents = bark
-        trunkMat.roughness.contents = 0.95
-        trunkMat.metalness.contents = 0.0
         trunk.materials = [trunkMat]
 
         let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
         canopy1.radialSegmentCount = 12
         let leafMat = SCNMaterial()
-        leafMat.lightingModel = .physicallyBased
+        leafMat.lightingModel = .lambert
         leafMat.diffuse.contents = leaf
-        leafMat.roughness.contents = 0.75
-        leafMat.metalness.contents = 0.0
 
         let node = SCNNode()
 
@@ -145,7 +149,7 @@ struct VegetationPlacer3D {
         let treeHeight = trunkH + canopyH1 + canopyH2
         let hitRadius = Float(max(canopyR1 * 0.65, trunkR * 1.6))
         return (node, hitRadius, treeHeight)
-    } 
+    }
 
     private static func applyLOD(to tree: SCNNode) {
         let far: CGFloat = 120

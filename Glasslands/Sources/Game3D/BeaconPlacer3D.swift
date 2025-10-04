@@ -13,11 +13,13 @@ import GameplayKit
 import UIKit
 
 struct BeaconPlacer3D {
-    static func place(inChunk ci: IVec2,
-                      cfg: FirstPersonEngine.Config,
-                      noise: NoiseFields,
-                      recipe: BiomeRecipe) -> [SCNNode] {
 
+    static func place(
+        inChunk ci: IVec2,
+        cfg: FirstPersonEngine.Config,
+        noise: NoiseFields,
+        recipe: BiomeRecipe
+    ) -> [SCNNode] {
         let tilesX = cfg.tilesX, tilesZ = cfg.tilesZ
         let originTile = IVec2(ci.x * tilesX, ci.y * tilesZ)
 
@@ -25,14 +27,15 @@ struct BeaconPlacer3D {
         let tilesPerChunk = tilesX * tilesZ
         let expected = max(0, Int(round(Double(tilesPerChunk) * rarity)))
 
-        let seed = recipe.seed64 &+ UInt64(bitPattern: Int64(ci.x)) &* 0x9E3779B97F4A7C15
-                                 &+ UInt64(bitPattern: Int64(ci.y))
+        let seed = recipe.seed64
+            &+ UInt64(bitPattern: Int64(ci.x))
+            &* 0x9E3779B97F4A7C15
+            &+ UInt64(bitPattern: Int64(ci.y))
 
         let rng = GKMersenneTwisterRandomSource(seed: seed)
 
         var out: [SCNNode] = []
         var placed = 0, attempts = 0
-
         while placed < expected && attempts < tilesPerChunk * 2 {
             attempts += 1
 
@@ -58,7 +61,6 @@ struct BeaconPlacer3D {
                 n.position = SCNVector3(wx, wy, wz)
                 n.name = "beacon"
 
-                // No physics body. We still expose a radius for obstacle list.
                 let radius: CGFloat = 0.18
                 n.setValue(radius, forKey: "hitRadius")
 
@@ -72,9 +74,9 @@ struct BeaconPlacer3D {
     private static func beaconGeometry() -> SCNGeometry {
         let cyl = SCNCapsule(capRadius: 0.18, height: 0.46)
         let m = SCNMaterial()
-        m.emission.contents = UIColor.white.withAlphaComponent(0.85)
-        m.diffuse.contents  = UIColor.white.withAlphaComponent(0.2)
-        m.lightingModel = .physicallyBased
+        m.lightingModel = .lambert
+        m.diffuse.contents = UIColor(white: 1.0, alpha: 0.92)
+        m.emission.contents = UIColor.white.withAlphaComponent(0.08) // faint hint only
         cyl.materials = [m]
         return cyl
     }
