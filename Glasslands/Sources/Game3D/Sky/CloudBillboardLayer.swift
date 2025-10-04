@@ -5,7 +5,8 @@
 //  Created by . . on 10/3/25.
 //
 //  Billboarded cumulus built from soft sprites. Uses premultiplied alpha,
-//  radial apron sprites, and a tiny fragment cutoff to avoid any halos.
+//  angle‑safe UV transforms (no clamping crop), and a tiny fragment cutoff
+//  to avoid any halo from far mips.
 //
 
 @preconcurrency import SceneKit
@@ -49,7 +50,7 @@ enum CloudBillboardLayer {
 
                 var s = seed == 0 ? 1 : seed
 
-                // Hemisphere directions above horizon; bias toward horizon.
+                // Directions above the horizon, biased toward horizon.
                 @inline(__always)
                 func sampleDir(_ s: inout UInt32, minY: Float) -> simd_float3 {
                     let u = rand(&s), v = rand(&s)
@@ -60,7 +61,7 @@ enum CloudBillboardLayer {
                     return simd_normalize(simd_float3(sinf(az) * cx, y, cosf(az) * cx))
                 }
 
-                // Poisson‑ish angular spacing between cluster centres.
+                // Poisson‑ish angular spacing to avoid cluster overlaps.
                 let minSepDeg: Float = 6.0
                 let minCos = cosf(minSepDeg * .pi / 180)
                 var rays: [simd_float3] = []
@@ -167,47 +168,57 @@ enum CloudBillboardLayer {
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990
 
+        // Tiny discard to remove any residual far‑mip noise.
+        let fragment = """
+        #pragma transparent
+        #pragma body
+        if (_output.color.a < 0.004) { discard_fragment(); }
+        """
+
         // Shared material variants (premultiplied alpha).
         var materials: [SCNMaterial] = []
         materials.reserveCapacity(atlas.images.count)
 
-        // Shader modifier: drop fragments that are effectively fully transparent.
-        // Prevents any faint “square” from far mip levels.
-        let cutoff: Float = 0.004
-        let fragment = """
-        #pragma transparent
-        #pragma body
-        if (_output.color.a < \(cutoff)) { discard_fragment(); }
-        """
-
         for img in atlas.images {
             let m = SCNMaterial()
             m.lightingModel = .constant
-            m.diffuse.contents = img
-            m.transparent.contents = img
 
-            m.transparencyMode = .aOne   // premultiplied
+            // Colour+alpha are in the diffuse (premultiplied).
+            m.diffuse.contents = img
+            m.transparencyMode = .aOne
             m.blendMode = .alpha
 
-            m.isDoubleSided = false
-            m.readsFromDepthBuffer = true     // terrain/horizon can occlude
+            // No extra mask — avoids double‑masking artefacts.
+            m.transparent.contents = nil
+
+            // Depth: read so terrain can occlude; don’t write.
+            m.readsFromDepthBuffer = true
             m.writesToDepthBuffer = false
 
-            m.diffuse.wrapS = .clamp;      m.diffuse.wrapT = .clamp
-            m.transparent.wrapS = .clamp;  m.transparent.wrapT = .clamp
+            // Clamp is fine because we keep rotated UVs inside [0,1].
+            m.diffuse.wrapS = .clamp
+            m.diffuse.wrapT = .clamp
             m.diffuse.mipFilter = .linear
-            m.transparent.mipFilter = .linear
             m.diffuse.minificationFilter = .linear
-            m.transparent.minificationFilter = .linear
             m.diffuse.magnificationFilter = .linear
-            m.transparent.magnificationFilter = .linear
 
+            m.isDoubleSided = false
             m.shaderModifiers = [.fragment: fragment]
             materials.append(m)
         }
 
+        // Angle‑safe UV transform: for a given roll angle θ, the largest
+        // scale that *guarantees* the rotated square stays inside [0,1]
+        // is 1 / (|cosθ| + |sinθ|). We add a small margin (0.98).
         @inline(__always)
-        func centredUVTransform(angle: Float, inset: Float = 0.78) -> SCNMatrix4 {
+        func insetForAngle(_ a: Float) -> Float {
+            let denom = max(1.0, abs(cos(a)) + abs(sin(a)))   // 1 .. √2
+            let s = 0.98 / denom                               // ~0.98 .. ~0.693
+            return max(0.65, min(0.98, s))
+        }
+
+        @inline(__always)
+        func centredUVTransform(angle: Float, inset: Float) -> SCNMatrix4 {
             let t1 = SCNMatrix4MakeTranslation(0.5, 0.5, 0)
             let r  = SCNMatrix4MakeRotation(angle, 0, 0, 1)
             let s  = SCNMatrix4MakeScale(inset, inset, 1)
@@ -228,9 +239,10 @@ enum CloudBillboardLayer {
                 n.constraints = [bb]
 
                 let mat = (materials[(p.atlasIndex % max(1, materials.count))]).copy() as! SCNMaterial
-                let tform = centredUVTransform(angle: p.roll, inset: 0.78)
+
+                let inset = insetForAngle(p.roll) // <<< the fix
+                let tform = centredUVTransform(angle: p.roll, inset: inset)
                 mat.diffuse.contentsTransform = tform
-                mat.transparent.contentsTransform = tform
                 mat.transparency = CGFloat(p.opacity)
 
                 plane.firstMaterial = mat
