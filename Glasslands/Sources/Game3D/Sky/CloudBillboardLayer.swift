@@ -5,11 +5,12 @@
 //  Created by . . on 10/3/25.
 //
 //  Billboarded cumulus built from soft sprites.
-//  • Horizon‑biased distribution (more far, fewer near).
-//  • Variable Poisson spacing (tight near horizon, wide near zenith).
-//  • Distance acceptance (prefer far intersections).
-//  • Angle‑safe UV transforms (no clamp cropping).
-//  • Premultiplied‑alpha diffuse with tiny halo cutoff.
+//  – Horizon‑biased distribution (more far, fewer near).
+//  – Variable Poisson spacing (tight near horizon, wide near zenith).
+//  – Distance acceptance (prefer farther intersections).
+//  – Angle‑safe UV transforms (no clamp cropping).
+//  – Premultiplied‑alpha diffuse with tiny halo cutoff.
+//  – FIX: warning about 'd' never mutated (now 'let').
 //
 
 @preconcurrency import SceneKit
@@ -31,12 +32,12 @@ enum CloudBillboardLayer {
     nonisolated static func makeAsync(
         radius: CGFloat,
         minAltitudeY: Float = 0.14,
-        clusterCount: Int = 210,
+        clusterCount: Int = 200,
         seed: UInt32 = 0xC10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
-        let layerHeight: Float = max(1100, min(Float(radius) * 0.34, 1800))  // cloud base (m)
-        let farCap: Float = max(layerHeight + 2200, Float(radius) * 2.8)     // max view distance
+        let layerHeight: Float = max(1100, min(Float(radius) * 0.34, 1800))
+        let farCap: Float = max(layerHeight + 2200, Float(radius) * 2.8)
 
         Task.detached(priority: .userInitiated) {
 
@@ -59,29 +60,25 @@ enum CloudBillboardLayer {
 
                 @inline(__always) func saturate(_ x: Float) -> Float { max(0, min(1, x)) }
 
-                // Horizon‑biased y sampler: many more samples near minY (horizon).
                 @inline(__always)
                 func biasedY(_ v: Float, minY: Float, k: Float = 3.4) -> Float {
                     let lo = minY, hi: Float = 0.985
-                    return lo + (hi - lo) * powf(v, k) // v∈[0,1] -> mostly small y
+                    return lo + (hi - lo) * powf(v, k)
                 }
 
-                // Variable Poisson spacing: tight near horizon, wide near zenith.
                 @inline(__always)
                 func minSepCos(forY y: Float, minY: Float) -> Float {
-                    let t = saturate((y - minY) / (0.985 - minY)) // 0 at horizon -> 1 at zenith
-                    let deg = 3.0 + (15.0 - 3.0) * t              // 3° .. 15°
+                    let t = saturate((y - minY) / (0.985 - minY))
+                    let deg = 3.0 + (15.0 - 3.0) * t   // 3° .. 15°
                     return cosf(deg * .pi / 180)
                 }
 
-                // Acceptance vs distance: prefer farther intersections.
                 @inline(__always)
                 func acceptProbability(distance d: Float, height h: Float, farCap: Float) -> Float {
                     let t = saturate((d - h) / (farCap - h))   // 0 near .. 1 far
-                    return powf(t, 0.85) * 0.88 + 0.08        // small chance for near
+                    return powf(t, 0.85) * 0.88 + 0.08
                 }
 
-                // Generate weighted/Poisson rays.
                 var rays: [simd_float3] = []
                 var tries = 0
                 let hardCap = n * 900
@@ -89,26 +86,22 @@ enum CloudBillboardLayer {
                 while rays.count < n && tries < hardCap {
                     tries += 1
 
-                    // Uniform azimuth.
+                    // Uniform azimuth; horizon‑biased elevation (more far).
                     let u = rand(&s)
                     let az = (u - 0.5) * (2 * .pi)
 
-                    // Horizon‑biased elevation.
                     let y = biasedY(rand(&s), minY: minY, k: 3.4)
                     let cx = sqrtf(max(0, 1 - y*y))
-                    let d = simd_normalize(simd_float3(sinf(az) * cx, y, cosf(az) * cx)) // <- let fixes warning
+                    let d = simd_normalize(simd_float3(sinf(az) * cx, y, cosf(az) * cx)) // <- let (no warning)
 
-                    // Intersect the plane y=height.
                     let t = height / max(0.001, d.y)
                     if !t.isFinite || t <= 0 { continue }
                     let dist = min(t, farCap)
 
-                    // Distance acceptance.
                     if rand(&s) > acceptProbability(distance: dist, height: height, farCap: farCap) {
                         continue
                     }
 
-                    // Variable Poisson spacing.
                     let cosThresh = minSepCos(forY: y, minY: minY)
                     var ok = true
                     for c in rays where simd_dot(c, d) > cosThresh { ok = false; break }
@@ -117,7 +110,7 @@ enum CloudBillboardLayer {
                     rays.append(d)
                 }
 
-                // Build clusters where rays hit the plane.
+                // Build clusters at plane intersections.
                 var clusters: [Cluster] = []
                 clusters.reserveCapacity(rays.count)
 
@@ -129,19 +122,19 @@ enum CloudBillboardLayer {
                     let anchor = d * t
                     let dist = length(anchor)
 
-                    // Slight fade very close to far cap.
                     let farFade: Float = dist > (0.94 * farCap)
                         ? max(0.25, 1 - (dist - 0.94 * farCap) / (0.06 * farCap))
                         : 1
 
-                    // Base cluster scale (metres); increase gently with distance.
+                    // Slight size compensation with distance so far clouds
+                    // don’t feel tiny.
                     let base = (520.0 + 380.0 * rand(&s)) *
                                (0.92 + 0.18 * saturate((dist - height) / (farCap - height)))
                     let thickness: Float = 260.0 + 220.0 * rand(&s)
 
                     var puffs: [PuffSpec] = []
 
-                    // ---- LAYER 1: Flat‑ish base (wide) ---------------------------------
+                    // ---- LAYER 1: Base (wide, large puffs) -------------------------
                     let baseLift: Float = 30.0
                     let baseCount = 5 + Int(rand(&s) * 3.9) // 5..8
                     for _ in 0..<baseCount {
@@ -154,11 +147,11 @@ enum CloudBillboardLayer {
                             size: size,
                             roll: rand(&s) * .pi * 2,
                             atlasIndex: Int(rand(&s) * 4),
-                            opacity: farFade * (0.84 + rand(&s) * 0.16)
+                            opacity: farFade * (0.86 + rand(&s) * 0.14)
                         ))
                     }
 
-                    // ---- LAYER 2: Middle fill -------------------------------------------
+                    // ---- LAYER 2: Middle fill ---------------------------------------
                     let midCount = 4 + Int(rand(&s) * 4.9) // 4..8
                     for _ in 0..<midCount {
                         let ox = (rand(&s) - 0.5) * base * 1.2
@@ -174,7 +167,7 @@ enum CloudBillboardLayer {
                         ))
                     }
 
-                    // ---- LAYER 3: Cap (small topping puffs) -----------------------------
+                    // ---- LAYER 3: Cap (small topping puffs) -------------------------
                     let capCount = 3 + Int(rand(&s) * 2.9) // 3..5
                     for _ in 0..<capCount {
                         let ox = (rand(&s) - 0.5) * base * 0.8
@@ -237,8 +230,8 @@ enum CloudBillboardLayer {
             m.blendMode = .alpha
             m.transparent.contents = nil        // no double mask
 
-            // Read from depth so horizon can occlude; never write so sprites
-            // don’t occlude one another.
+            // Depth: read so horizon can occlude; don’t write so sprites
+            // don’t Z‑fight each other.
             m.readsFromDepthBuffer = true
             m.writesToDepthBuffer = false
 
@@ -300,4 +293,3 @@ enum CloudBillboardLayer {
         return root
     }
 }
-

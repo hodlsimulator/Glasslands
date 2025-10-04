@@ -4,11 +4,13 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates a small atlas of soft cumulus puff sprites.
-//  – Premultiplied alpha (for .aOne blending).
-//  – Wide **radial** apron (edge‑safe rotation).
-//  – Flat base weighting + lumpy cap via 3‑octave FBM value noise.
-//  – Gentle top‑light; no ring artefacts.
+//  Generates an atlas of soft **cumulus puff** sprites.
+//  Design goals:
+//   • All puffs share the same visual language (rounded, fluffy, soft edge)
+//     with small, natural variations — so clouds feel consistent like the ref.
+//   • Premultiplied alpha for .aOne blending (no halos).
+//   • Wide **radial** apron so rotated billboards never show squares.
+//   • Very subtle top‑light; no hard base clipping inside the sprite.
 //
 
 import UIKit
@@ -85,61 +87,58 @@ private extension CloudSpriteTexture {
             return Float(state >> 8) * (1.0 / 16_777_216.0)
         }
 
-        // Elliptical lobes, slightly wider than tall.
-        struct Ell { var cx: Float; var cy: Float; var rx: Float; var ry: Float; var w: Float }
-        var els: [Ell] = []
-        let count = 9 + Int(urand() * 3) // 9–11
+        // Elliptical Gaussian lobes (slightly wider than tall).
+        struct Lobe { var cx: Float; var cy: Float; var rx: Float; var ry: Float; var w: Float }
+        var lobes: [Lobe] = []
+        let count = 7 + Int(urand() * 3) // 7–9 similar lobes for consistent look
         for i in 0..<count {
-            let spreadX: Float = (i < 3) ? 0.40 : 0.28
-            let spreadY: Float = (i < 3) ? 0.22 : 0.18
+            let spreadX: Float = (i < 2) ? 0.36 : 0.26
+            let spreadY: Float = (i < 2) ? 0.20 : 0.18
             let cx = 0.5 + (urand() - 0.5) * spreadX
-            let cy = 0.56 + (urand() - 0.5) * spreadY
-            let s  = 0.24 + urand() * 0.28
-            let rx = s * (1.10 + (urand() - 0.5) * 0.25)
-            let ry = s * (0.85 + (urand() - 0.5) * 0.18)
-            let w  = 0.55 + urand() * 0.45  // lobe weight
-            els.append(Ell(cx: cx, cy: cy, rx: rx, ry: ry, w: w))
+            let cy = 0.50 + (urand() - 0.3) * spreadY  // tiny upward bias, but no hard base cut
+            // Base size with small per‑lobe variation
+            let s  = 0.23 + urand() * 0.22
+            let rx = s * (1.10 + (urand() - 0.5) * 0.20)
+            let ry = s * (0.92 + (urand() - 0.5) * 0.18)
+            let w  = 0.55 + urand() * 0.35
+            lobes.append(Lobe(cx: cx, cy: cy, rx: rx, ry: ry, w: w))
         }
 
         var density = [Float](repeating: 0, count: W * H)
 
         // Radial apron (circular) – keeps samples well away from texture edge.
-        let apronInner: Float = 0.82
-        let apronOuter: Float = 0.99
+        let apronInner: Float = 0.86
+        let apronOuter: Float = 0.995
 
-        // Base line for a flatter cumulus base (UV space).
-        let baseY: Float = 0.56
+        // Centre for a slight vertical “cap” bias without cutting the base.
+        let capBiasY: Float = 0.52
 
         for y in 0..<H {
             let fy = (Float(y) + 0.5) / Float(H)
             for x in 0..<W {
                 let fx = (Float(x) + 0.5) / Float(W)
 
-                // Soft union of ellipses using multiplicative complement:
-                //   union = 1 - Π(1 - v_i)
-                // Each lobe uses a smoothstep on the normalised ellipse radius.
+                // Soft union of lobes using multiplicative complement:
+                //   union = 1 - Π(1 - w_i * gaussian)
                 var keep: Float = 1.0
-                for e in els {
-                    let dx = (fx - e.cx) / e.rx
-                    let dy = (fy - e.cy) / e.ry
-                    let q  = sqrtf(dx*dx + dy*dy)
-                    // 1 inside .. 0 outside with soft edge
-                    let v  = (1.0 - smoothstep(0.82, 1.05, q)) * e.w
-                    keep *= (1.0 - v)
+                for l in lobes {
+                    let dx = (fx - l.cx)
+                    let dy = (fy - l.cy)
+                    let g = expf(-0.5 * ((dx*dx)/(l.rx*l.rx) + (dy*dy)/(l.ry*l.ry)))
+                    keep *= (1.0 - l.w * g)
                 }
                 var d = 1.0 - keep
                 d = min(1, max(0, d))
 
-                // Crisp, flat-ish base: soft mask that fades rapidly below baseY.
-                let baseMask = smoothstep(baseY - 0.02, baseY + 0.10, fy)
-                d *= baseMask
+                // Slight cap thickening above the centre (no hard cut).
+                // Adds a “puffed top” feeling like cumulus without making a bowl.
+                let capBoost = max(0, (fy - capBiasY)) * 0.25
+                d = min(1, d * (1.0 + capBoost))
 
-                // Lumpy cap via FBM noise near the rim and above the base.
-                let nx = fx * 9.0, ny = fy * 9.0
-                let n  = fbm(nx, ny)                         // 0..~1
-                let rim = (1 - d)                            // stronger near edge
-                let cap = smoothstep(0.0, 0.3, baseY - (fy - 0.02)) // only above base
-                d += (n - 0.5) * 0.20 * rim * cap
+                // Tiny rim noise to break perfect circularity (consistent style).
+                let n = fbm(fx * 9.0, fy * 9.0)  // 0..~1
+                let edge = 1 - d
+                d += (n - 0.5) * 0.10 * edge      // stronger near edge, subtle overall
                 d = min(1, max(0, d))
 
                 // Radial apron mask.
@@ -169,11 +168,11 @@ private extension CloudSpriteTexture {
                 let nx = (xm - xp)
                 let ny = (ym - yp)
 
-                // Very subtle shading to avoid ring artefacts.
-                var shade = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 0.6 + 0.94))
-                shade = shade * (0.90 + 0.10 * d)
+                // Soft shading only; keep clouds bright & cottony.
+                var shade = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 0.55 + 0.95))
+                shade = shade * (0.92 + 0.08 * d)
 
-                // Premultiplied alpha. Keep clouds bright; shade is gentle.
+                // Premultiplied alpha.
                 let a = min(1.0, d)
                 let c = min(1.0, a * shade)
 
