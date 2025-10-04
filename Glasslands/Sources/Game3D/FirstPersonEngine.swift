@@ -341,7 +341,7 @@ final class FirstPersonEngine: NSObject {
         }
 
         // Visible sun disc (emissive sprite).
-        let discSize: CGFloat = 56
+        let discSize: CGFloat = 256
         let disc = SCNPlane(width: discSize, height: discSize)
         let mat = SCNMaterial()
         mat.lightingModel = .constant
