@@ -12,11 +12,11 @@ import UIKit
 
 enum CloudBillboardFactory {
 
-    @MainActor static func makeNode(
+    @MainActor
+    static func makeNode(
         from clusters: [CloudClusterSpec],
         atlas: CloudSpriteTexture.Atlas
     ) -> SCNNode {
-
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990
@@ -28,7 +28,8 @@ enum CloudBillboardFactory {
             for p in cl.puffs {
                 let bb = SCNNode()
                 bb.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
-                let bc = SCNBillboardConstraint(); bc.freeAxes = .all
+                let bc = SCNBillboardConstraint()
+                bc.freeAxes = .all
                 bb.constraints = [bc]
 
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
@@ -37,7 +38,7 @@ enum CloudBillboardFactory {
                 sprite.castsShadow = false
 
                 let m = template.copy() as! SCNMaterial
-                if atlas.images.isEmpty == false {
+                if !atlas.images.isEmpty {
                     m.diffuse.contents = atlas.images[p.atlasIndex % atlas.images.count]
                 }
                 m.transparency = CGFloat(max(0, min(1, p.opacity)))
@@ -56,6 +57,7 @@ enum CloudBillboardFactory {
             }
             root.addChildNode(group)
         }
+
         return root
     }
 }
