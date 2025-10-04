@@ -6,11 +6,17 @@
 //
 //  Billboarded cumulus built from soft sprites.
 //
-//  Key points:
-//  • Billboarding is on the parent node; the plane is a child rotated around Z for roll.
-//    (No UV rotation, so no edge clamping artefacts.)
-//  • Diffuse wrap uses .clampToBorder with a clear border; depth writes disabled.
-//  • Horizon‑biased distribution and natural clustering.
+//  Distribution:
+//  • Near disk (overhead fill, sparse).
+//  • Bridge annulus (fills the previous gap).
+//  • Mid annulus (main body).
+//  • Far annulus (more density than before).
+//  • Ultra-far annulus (hugs the horizon).
+//
+//  Rendering:
+//  • Parent node billboards; child plane rotates around Z for roll.
+//  • Premultiplied alpha; depth writes disabled; clamp sampling.
+//  • Sprites have a hard transparent frame (see CloudSpriteTexture).
 //
 
 @preconcurrency import SceneKit
@@ -29,169 +35,226 @@ enum CloudBillboardLayer {
 
     private struct Cluster { var puffs: [PuffSpec] }
 
-    /// Builds the billboard layer off the main thread, then delivers the node on the main actor.
+    // MARK: Build
+
     nonisolated static func makeAsync(
         radius: CGFloat,
-        minAltitudeY: Float = 0.12,     // cos(elevation); 0.0 = horizon, 1.0 = straight up
-        clusterCount: Int = 110,        // fewer, larger clusters = closer to reference
+        minAltitudeY: Float = 0.12,   // kept for API compatibility (unused in planar bands)
+        clusterCount: Int = 120,
         seed: UInt32 = 0xC10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
-        let layerHeight: Float = max(1100, min(Float(radius) * 0.34, 1800))
-        let farCap: Float = max(layerHeight + 2200, Float(radius) * 2.8)
+        let layerY: Float = max(1100, min(Float(radius) * 0.34, 1800))
+
+        // -------- Radial bands (XZ around the camera) --------
+        let rNearDisk: Float = max(520,  Float(radius) * 0.22)    // overhead fill (sparse)
+        let rBridge0:  Float = rNearDisk * 1.08
+        let rBridge1:  Float = rNearDisk + max(900, Float(radius) * 0.45)
+
+        let rMid0:     Float = rBridge1 - 120                      // small overlap with bridge ⇒ no gap
+        let rMid1:     Float = rMid0 + max(2300, Float(radius) * 1.20)
+
+        let rFar0:     Float = rMid1 + max(800,  Float(radius) * 0.36)
+        let rFar1:     Float = rFar0 + max(2400, Float(radius) * 1.05)
+
+        let rUltra0:   Float = rFar1 + max(900,  Float(radius) * 0.40)
+        let rUltra1:   Float = rUltra0 + max(1600, Float(radius) * 0.60)  // hugs the horizon
+
+        // -------- Allocation (fewer overhead, more distant) --------
+        let N = max(20, clusterCount)
+        let nearC   = max(6,  Int(Float(N) * 0.08))   // ~8%
+        let bridgeC = max(10, Int(Float(N) * 0.12))   // ~12%
+        let midC    = max(28, Int(Float(N) * 0.44))   // ~44% (main body)
+        let farC    = max(16, Int(Float(N) * 0.26))   // ~26%
+        let ultraC  = max(6,  N - nearC - bridgeC - midC - farC) // ~10%
 
         Task.detached(priority: .userInitiated) {
 
-            func makeSpecs(
-                _ n: Int, minY: Float, height: Float, farCap: Float, seed: UInt32
-            ) -> [Cluster] {
+            // RNG + helpers
+            @inline(__always) func rand(_ s: inout UInt32) -> Float {
+                s = 1_664_525 &* s &+ 1_013_904_223
+                return Float(s >> 8) * (1.0 / 16_777_216.0)
+            }
+            @inline(__always) func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * t }
+            @inline(__always) func sat(_ x: Float) -> Float { max(0, min(1, x)) }
 
-                @inline(__always) func rand(_ s: inout UInt32) -> Float {
-                    s = 1_664_525 &* s &+ 1_013_904_223
-                    return Float(s >> 8) * (1.0 / 16_777_216.0)
-                }
+            var s = seed == 0 ? 1 : seed
 
-                var s = seed == 0 ? 1 : seed
-
-                @inline(__always) func sat(_ x: Float) -> Float { max(0, min(1, x)) }
-
-                @inline(__always)
-                func biasedY(_ v: Float, minY: Float, k: Float = 3.6) -> Float {
-                    let lo = minY, hi: Float = 0.985
-                    return lo + (hi - lo) * powf(v, k)
-                }
-
-                @inline(__always)
-                func minSepCos(forY y: Float, minY: Float) -> Float {
-                    let t = sat((y - minY) / (0.985 - minY))
-                    let deg = 4.0 + (18.0 - 4.0) * t
-                    return cosf(deg * .pi / 180)
-                }
-
-                @inline(__always)
-                func accept(distance d: Float, height h: Float, farCap: Float) -> Float {
-                    let t = sat((d - h) / (farCap - h))
-                    return powf(t, 0.85) * 0.9 + 0.06
-                }
-
-                var rays: [simd_float3] = []
+            // Poisson in disk
+            func poissonDisk(_ n: Int, R: Float, minSepNear: Float, minSepFar: Float, seed: inout UInt32) -> [simd_float2] {
+                var pts: [simd_float2] = []
+                pts.reserveCapacity(n)
+                let maxTries = n * 2600
                 var tries = 0
-                let hardCap = n * 900
-
-                while rays.count < n && tries < hardCap {
+                while pts.count < n && tries < maxTries {
                     tries += 1
+                    let t = rand(&seed)
+                    let r = sqrt(t) * R
+                    let a = rand(&seed) * (.pi * 2)
+                    let p = simd_float2(cosf(a) * r, sinf(a) * r)
 
-                    let u = rand(&s)
-                    let az = (u - 0.5) * (2 * .pi)
-                    let y  = biasedY(rand(&s), minY: minY)
-
-                    let cx = sqrtf(max(0, 1 - y*y))
-                    let d  = simd_normalize(simd_float3(sinf(az)*cx, y, cosf(az)*cx))
-
-                    let t  = height / max(0.001, d.y)
-                    if !t.isFinite || t <= 0 { continue }
-
-                    let dist = min(t, farCap)
-                    if rand(&s) > accept(distance: dist, height: height, farCap: farCap) {
-                        continue
-                    }
-
-                    let cosThresh = minSepCos(forY: y, minY: minY)
+                    let sep = lerp(minSepNear, minSepFar, r / R)
                     var ok = true
-                    for c in rays where simd_dot(c, d) > cosThresh { ok = false; break }
-                    if ok { rays.append(d) }
+                    for q in pts where distance(p, q) < sep { ok = false; break }
+                    if ok { pts.append(p) }
                 }
-
-                var clusters: [Cluster] = []
-                clusters.reserveCapacity(rays.count)
-
-                for d in rays {
-                    let y = max(minY, d.y)
-                    let t = height / y
-                    if !t.isFinite || t <= 0 || t > farCap { continue }
-
-                    let anchor = d * t
-                    let dist   = length(anchor)
-
-                    let farFade: Float = dist > (0.94 * farCap)
-                        ? max(0.25, 1 - (dist - 0.94 * farCap) / (0.06 * farCap))
-                        : 1
-
-                    let base = (560.0 + 420.0 * rand(&s))
-                             * (0.92 + 0.20 * max(0, min(1, (dist - height) / (farCap - height))))
-
-                    let thickness: Float = 300.0 + 240.0 * rand(&s)
-
-                    var puffs: [PuffSpec] = []
-
-                    let baseLift: Float = 30.0
-                    let baseCount = 4 + Int(rand(&s) * 3.5)
-                    for _ in 0..<baseCount {
-                        let ang = (rand(&s) - 0.5) * (.pi * 0.9)
-                        let rad = base * (0.35 + 0.65 * rand(&s))
-                        let off = simd_float3(cosf(ang) * rad, 0, sinf(ang) * rad)
-                        let pos = anchor + off + simd_float3(0, baseLift, 0)
-                        let size = (260.0 + 240.0 * rand(&s)) * (0.85 + 0.30 * rand(&s))
-                        let roll = (rand(&s) - 0.5) * (.pi * 2)
-                        puffs.append(PuffSpec(pos: pos, size: size, roll: roll,
-                                              atlasIndex: Int(rand(&s) * 32.0),
-                                              opacity: farFade))
-                    }
-
-                    let capCount = 3 + Int(rand(&s) * 2.7)
-                    for _ in 0..<capCount {
-                        let ang = (rand(&s) - 0.5) * (.pi * 0.7)
-                        let rad = base * (0.18 + 0.52 * rand(&s))
-                        let off = simd_float3(cosf(ang) * rad, 0, sinf(ang) * rad)
-                        let pos = anchor + off + simd_float3(0, baseLift + 0.55 * thickness, 0)
-                        let size = (190.0 + 180.0 * rand(&s)) * (0.84 + 0.30 * rand(&s))
-                        let roll = (rand(&s) - 0.5) * (.pi * 2)
-                        puffs.append(PuffSpec(pos: pos, size: size, roll: roll,
-                                              atlasIndex: Int(rand(&s) * 32.0),
-                                              opacity: farFade))
-                    }
-
-                    if rand(&s) > 0.45 {
-                        let skirtCount = 1 + Int(rand(&s) * 2.2)
-                        for _ in 0..<skirtCount {
-                            let ang = (rand(&s) - 0.5) * (.pi * 1.1)
-                            let rad = base * (0.55 + 0.85 * rand(&s))
-                            let off = simd_float3(cosf(ang) * rad, 0, sinf(ang) * rad)
-                            let pos = anchor + off
-                            let size = (210.0 + 220.0 * rand(&s)) * (0.75 + 0.25 * rand(&s))
-                            let roll = (rand(&s) - 0.5) * (.pi * 2)
-                            puffs.append(PuffSpec(pos: pos, size: size, roll: roll,
-                                                  atlasIndex: Int(rand(&s) * 32.0),
-                                                  opacity: farFade * 0.92))
-                        }
-                    }
-
-                    clusters.append(Cluster(puffs: puffs))
-                }
-
-                return clusters
+                return pts
             }
 
-            let specs = makeSpecs(
-                max(6, min(600, clusterCount)),
-                minY: minAltitudeY,
-                height: layerHeight,
-                farCap: farCap,
-                seed: seed
-            )
+            // Poisson in annulus
+            func poissonAnnulus(_ n: Int, r0: Float, r1: Float, minSepNear: Float, minSepFar: Float, seed: inout UInt32) -> [simd_float2] {
+                var pts: [simd_float2] = []
+                pts.reserveCapacity(n)
+                let maxTries = n * 3200
+                var tries = 0
+                while pts.count < n && tries < maxTries {
+                    tries += 1
+                    let t  = rand(&seed)
+                    let r  = sqrt(lerp(r0*r0, r1*r1, t))
+                    let a  = rand(&seed) * (.pi * 2)
+                    let p  = simd_float2(cosf(a) * r, sinf(a) * r)
 
-            let atlas = await CloudSpriteTexture.makeAtlas(
-                size: 512, seed: seed ^ 0x5A5A_0314, count: 4
-            )
+                    let tr = sat((r - r0) / (r1 - r0))
+                    let sep = lerp(minSepNear, minSepFar, powf(tr, 0.8))
+                    var ok = true
+                    for q in pts where distance(p, q) < sep { ok = false; break }
+                    if ok { pts.append(p) }
+                }
+                return pts
+            }
+
+            // Build one cluster worth of puffs (scale/opacity multipliers per band).
+            func buildCluster(at anchorXZ: simd_float2,
+                              baseY: Float,
+                              dist: Float,
+                              scaleMul: Float,
+                              opacityMul: Float,
+                              seed: inout UInt32) -> Cluster
+            {
+                // Map to 0..1 over the whole span to stabilise scaling.
+                let lo: Float = rNearDisk
+                let hi: Float = rUltra1
+                let tR = sat((dist - lo) / (hi - lo))
+
+                // Slightly increase world size with distance, then apply band multiplier.
+                let scale = (0.92 + 0.28 * tR) * scaleMul
+
+                // Footprint and thickness
+                let base = (560.0 + 420.0 * rand(&seed)) * scale
+                let thickness: Float = (300.0 + 240.0 * rand(&seed)) * scale
+                let baseLift: Float = 30.0 + (rand(&seed) - 0.5) * 20.0
+
+                var puffs: [PuffSpec] = []
+
+                // Base layer (3–4 when close, 4–5 when far)
+                let baseCount = (tR < 0.25) ? (3 + Int(rand(&seed) * 1.5))
+                                            : (4 + Int(rand(&seed) * 1.5))
+                for _ in 0..<baseCount {
+                    let ang = (rand(&seed) - 0.5) * (.pi * 1.00)
+                    let rx  = base * (0.40 + 0.75 * rand(&seed))
+                    let rz  = base * (0.28 + 0.55 * rand(&seed))
+                    let off = simd_float3(cosf(ang) * rx, 0, sinf(ang) * rz)
+
+                    let yJit: Float = (rand(&seed) - 0.5) * 110.0
+                    let pos  = simd_float3(anchorXZ.x, baseY + yJit, anchorXZ.y) + off + simd_float3(0, baseLift, 0)
+                    let size = (270.0 + 240.0 * rand(&seed)) * (0.88 + 0.30 * rand(&seed)) * scale
+                    let roll = (rand(&seed) - 0.5) * (.pi * 2)
+
+                    puffs.append(PuffSpec(
+                        pos: pos,
+                        size: size,
+                        roll: roll,
+                        atlasIndex: Int(rand(&seed) * 32.0),
+                        opacity: (0.78 + 0.20 * tR) * opacityMul
+                    ))
+                }
+
+                // Cap layer (2–4)
+                let capCount = 2 + Int(rand(&seed) * 2.5)
+                for _ in 0..<capCount {
+                    let ang = (rand(&seed) - 0.5) * (.pi * 0.9)
+                    let rx  = base * (0.18 + 0.45 * rand(&seed))
+                    let rz  = base * (0.18 + 0.45 * rand(&seed))
+                    let off = simd_float3(cosf(ang) * rx, 0, sinf(ang) * rz)
+
+                    let pos  = simd_float3(anchorXZ.x, baseY, anchorXZ.y) + off + simd_float3(0, baseLift + 0.55 * thickness, 0)
+                    let size = (180.0 + 180.0 * rand(&seed)) * (0.86 + 0.28 * rand(&seed)) * scale
+                    let roll = (rand(&seed) - 0.5) * (.pi * 2)
+
+                    puffs.append(PuffSpec(
+                        pos: pos,
+                        size: size,
+                        roll: roll,
+                        atlasIndex: Int(rand(&seed) * 32.0),
+                        opacity: (0.74 + 0.18 * tR) * opacityMul
+                    ))
+                }
+
+                // Optional skirt (adds width)
+                if rand(&seed) > 0.58 {
+                    let skirtCount = 1 + Int(rand(&seed) * 2.0)
+                    for _ in 0..<skirtCount {
+                        let ang = (rand(&seed) - 0.5) * (.pi * 1.2)
+                        let rx  = base * (0.60 + 0.95 * rand(&seed))
+                        let rz  = base * (0.35 + 0.70 * rand(&seed))
+                        let off = simd_float3(cosf(ang) * rx, 0, sinf(ang) * rz)
+
+                        let pos  = simd_float3(anchorXZ.x, baseY, anchorXZ.y) + off
+                        let size = (210.0 + 220.0 * rand(&seed)) * (0.80 + 0.25 * rand(&seed)) * scale
+                        let roll = (rand(&seed) - 0.5) * (.pi * 2)
+
+                        puffs.append(PuffSpec(
+                            pos: pos,
+                            size: size,
+                            roll: roll,
+                            atlasIndex: Int(rand(&seed) * 32.0),
+                            opacity: (0.68 + 0.16 * tR) * opacityMul
+                        ))
+                    }
+                }
+
+                return Cluster(puffs: puffs)
+            }
+
+            // ---- Anchors per band ----
+            let nearAnch = poissonDisk(nearC, R: rNearDisk,
+                                       minSepNear: 360, minSepFar: 480, seed: &s)
+
+            let bridgeAnch = poissonAnnulus(bridgeC, r0: rBridge0, r1: rBridge1,
+                                            minSepNear: 360, minSepFar: 640, seed: &s)
+
+            let midAnch = poissonAnnulus(midC, r0: rMid0, r1: rMid1,
+                                         minSepNear: 420, minSepFar: 820, seed: &s)
+
+            let farAnch = poissonAnnulus(farC, r0: rFar0, r1: rFar1,
+                                         minSepNear: 640, minSepFar: 980, seed: &s)
+
+            let ultraAnch = poissonAnnulus(ultraC, r0: rUltra0, r1: rUltra1,
+                                           minSepNear: 840, minSepFar: 1240, seed: &s)
+
+            // ---- Build clusters ----
+            var clusters: [Cluster] = []
+            clusters.reserveCapacity(nearAnch.count + bridgeAnch.count + midAnch.count + farAnch.count + ultraAnch.count)
+
+            for a in nearAnch   { clusters.append(buildCluster(at: a, baseY: layerY, dist: length(a), scaleMul: 0.78, opacityMul: 0.92, seed: &s)) }
+            for a in bridgeAnch { clusters.append(buildCluster(at: a, baseY: layerY, dist: length(a), scaleMul: 0.90, opacityMul: 0.96, seed: &s)) }
+            for a in midAnch    { clusters.append(buildCluster(at: a, baseY: layerY, dist: length(a), scaleMul: 1.00, opacityMul: 1.00, seed: &s)) }
+            for a in farAnch    { clusters.append(buildCluster(at: a, baseY: layerY, dist: length(a), scaleMul: 1.08, opacityMul: 0.96, seed: &s)) }
+            for a in ultraAnch  { clusters.append(buildCluster(at: a, baseY: layerY, dist: length(a), scaleMul: 0.88, opacityMul: 0.90, seed: &s)) } // small, horizon-hugging
+
+            // Texture atlas
+            let atlas = await CloudSpriteTexture.makeAtlas(size: 512,
+                                                           seed: seed ^ 0x5A5A_0314,
+                                                           count: 4)
 
             await MainActor.run {
-                let root = buildNodes(specs: specs, atlas: atlas)
-                completion(root)
+                let node = buildNodes(specs: clusters, atlas: atlas)
+                completion(node)
             }
         }
     }
 
-    // MARK: - SceneKit assembly (MainActor)
+    // MARK: SceneKit assembly
 
     @MainActor
     private static func buildNodes(specs: [Cluster], atlas: CloudSpriteTexture.Atlas) -> SCNNode {
@@ -199,6 +262,7 @@ enum CloudBillboardLayer {
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990
 
+        // Trim ultra-low alphas early to avoid far-mip fogging.
         let fragment = """
         #pragma transparent
         #pragma body
@@ -214,7 +278,7 @@ enum CloudBillboardLayer {
         template.isDoubleSided = false
         template.shaderModifiers = [.fragment: fragment]
 
-        // Use clamp (not clampToBorder) to avoid deprecated borderColor.
+        // Clamp sampling; sprites have a hard transparent frame.
         template.diffuse.wrapS = .clamp
         template.diffuse.wrapT = .clamp
         template.diffuse.mipFilter = .linear
@@ -226,14 +290,14 @@ enum CloudBillboardLayer {
             let group = SCNNode()
 
             for p in cl.puffs {
-                // Billboard on a parent node…
+                // Parent that faces the camera…
                 let bb = SCNNode()
                 bb.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
                 let b = SCNBillboardConstraint()
                 b.freeAxes = .all
                 bb.constraints = [b]
 
-                // …with a child plane that rotates around Z to vary orientation.
+                // …child plane rotated around Z for roll.
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
                 let sprite = SCNNode(geometry: plane)
                 sprite.eulerAngles.z = p.roll

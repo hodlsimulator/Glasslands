@@ -5,7 +5,11 @@
 //  Created by . . on 10/3/25.
 //
 //  Soft cumulus puff sprites (premultiplied alpha).
-//  Ensures a *hard* transparent 2‑pixel border so clampToBorder works perfectly.
+//
+//  Changes in this iteration:
+//  • Simplified, brighter shading (no inner crescent lines).
+//  • Hard transparent 2-px frame; clamp-safe and mip-safe.
+//  • Same metaball silhouette for fluffy edges.
 //
 
 import UIKit
@@ -29,10 +33,10 @@ enum CloudSpriteTexture {
         let s = max(256, size)
 
         let images: [UIImage] = await MainActor.run {
-            let c: UInt32 = 0x9E37_79B9 // Weyl-like increment
+            let c: UInt32 = 0x9E37_79B9
             return (0..<n).map { i in
                 let k = UInt32(i &+ 1)
-                let imgSeed = seed &+ (c &* k)  // all UInt32 math (no traps)
+                let imgSeed = seed &+ (c &* k)  // UInt32 math only
                 return buildImage(s, seed: imgSeed)
             }
         }
@@ -82,7 +86,7 @@ enum CloudSpriteTexture {
         var balls: [Ball] = []
 
         // Core + lobes → cauliflower silhouette
-        let coreR: Float = 0.29 + frand() * 0.05
+        let coreR: Float = 0.30 + frand() * 0.05
         balls.append(Ball(c: simd_float2(0.50, 0.53 + frand()*0.03), r: coreR))
 
         let capN = 4 + Int(frand() * 3)
@@ -117,38 +121,38 @@ enum CloudSpriteTexture {
             return d
         }
 
-        // Edge softness and apron
+        // Edge softness; bright, simple “overcast” shading to avoid inner crescents.
         let edgeSoft: Float = 0.055 + 0.015 * frand()
+        let topBias:  Float = 0.03 + 0.02 * frand()   // slight brightening near the top
 
         for y in 0..<H {
             let fy = (Float(y) + 0.5) / Float(H)
             for x in 0..<W {
                 let fx = (Float(x) + 0.5) / Float(W)
 
-                // Radial apron to zero (transparent) beyond unit circle
+                // Hard circular apron: outside → fully transparent.
                 let dx = (fx - 0.5) / 0.5
                 let dy = (fy - 0.5) / 0.5
-                let r = sqrtf(dx*dx + dy*dy)
+                let r = dx*dx + dy*dy
                 if r >= 1.0 {
                     let o = (y * W + x) * 4
                     buf[o + 0] = 0; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = 0
                     continue
                 }
 
-                // Density 0..1 (inside → 1)
                 let d = sdf(simd_float2(fx, fy))
                 var a = 1.0 - smoothstep(0.0, edgeSoft, d)
                 a = max(0, min(1, a))
 
-                // Gentle top‑light using SDF gradient (cheap normal)
-                let eps: Float = 2.0 / Float(W)
-                let nx = sdf(simd_float2(fx + eps, fy)) - sdf(simd_float2(fx - eps, fy))
-                let ny = sdf(simd_float2(fx, fy + eps)) - sdf(simd_float2(fx, fy - eps))
-                let L = simd_normalize(simd_float2(0.0, -1.0)) // from top
-                var shade = max(0.0, min(1.0, (-(nx*L.x + ny*L.y)) * 0.6 + 0.92))
-                shade = shade * (0.92 + 0.08 * a)
+                // Very gentle vertical tint: a touch brighter at the top.
+                let vert = 1.0 + topBias * (0.5 - (fy - 0.5))  // ~1.0..1.03
 
-                // Premultiplied alpha RGB
+                // Micro-variation to avoid perfectly flat white (no visible bands).
+                let n = (vnoise(fx * 32, fy * 32) - 0.5) * 0.02
+
+                // Final shade (premultiplied): bright, almost flat.
+                let shade = min(1.0, 0.97 * vert + n)
+
                 let c = min(1.0, a * shade)
                 let o = (y * W + x) * 4
                 buf[o + 0] = UInt8(c * 255.0 + 0.5)
@@ -158,7 +162,7 @@ enum CloudSpriteTexture {
             }
         }
 
-        // Force a *hard* transparent 2‑pixel frame (prevents any edge pickup).
+        // Hard transparent frame (2 px) for clamp/mip safety.
         if W >= 4 && H >= 4 {
             for y in 0..<H {
                 for x in 0..<W {
