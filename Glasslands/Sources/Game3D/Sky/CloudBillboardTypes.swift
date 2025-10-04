@@ -9,16 +9,15 @@
 
 import simd
 
-/// One sprite within a cumulus cluster.
 struct CloudPuffSpec {
-    var pos: simd_float3     // world position
-    var size: Float          // square sprite size in world units
-    var roll: Float          // Z rotation in radians
-    var atlasIndex: Int      // selects a sprite from the atlas
-    var opacity: Float       // 0..1 (premultiplied)
+    var pos: simd_float3
+    var size: Float
+    var roll: Float
+    var atlasIndex: Int
+    var opacity: Float            // 0..1 (premultiplied)
+    var tint: simd_float3?        // optional multiply tint; nil = white
 }
 
-/// One cluster composed of several overlapping puffs.
 struct CloudClusterSpec {
     var puffs: [CloudPuffSpec]
 }

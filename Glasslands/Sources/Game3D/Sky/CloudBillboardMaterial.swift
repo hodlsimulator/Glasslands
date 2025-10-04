@@ -12,7 +12,6 @@ import SceneKit
 enum CloudBillboardMaterial {
 
     @MainActor static func makeTemplate() -> SCNMaterial {
-        // Trim ultra‑low alphas early to avoid far‑mip fogging.
         let fragment = """
         #pragma transparent
         #pragma body
@@ -21,14 +20,13 @@ enum CloudBillboardMaterial {
 
         let m = SCNMaterial()
         m.lightingModel = .constant
-        m.transparencyMode = .aOne        // premultiplied alpha
+        m.transparencyMode = .aOne
         m.blendMode = .alpha
         m.readsFromDepthBuffer = true
         m.writesToDepthBuffer = false
         m.isDoubleSided = false
         m.shaderModifiers = [.fragment: fragment]
 
-        // Clamp sampling; sprites carry a hard transparent frame to be clamp/mip safe.
         m.diffuse.wrapS = .clamp
         m.diffuse.wrapT = .clamp
         m.diffuse.mipFilter = .linear

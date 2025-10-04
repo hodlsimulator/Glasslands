@@ -7,11 +7,11 @@
 //  Billboarded cumulus built from soft sprites.
 //
 //  Distribution:
-//  • Near disk (overhead fill, sparse).
-//  • Bridge annulus (fills the previous gap).
-//  • Mid annulus (main body).
-//  • Far annulus (more density than before).
-//  • Ultra-far annulus (hugs the horizon).
+//  • Ultra-far annulus: thin, hazy line at the horizon.
+//  • Far annulus: dense “distance belt” that carries most of the read.
+//  • Mid annulus: moderate; bridges to the distance.
+//  • Bridge annulus: light; avoids gaps as it approaches overhead.
+//  • Near annulus (with zenith hole): only a few directly overhead.
 //
 //  Rendering:
 //  • Parent node billboards; child plane rotates around Z for roll.
@@ -29,61 +29,68 @@ enum CloudBillboardLayer {
     static func makeAsync(
         radius: CGFloat,
         minAltitudeY: Float = 0.12,
-        clusterCount: Int = 120,
+        clusterCount: Int = 140,
         seed: UInt32 = 0xC10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
         let layerY: Float = max(1100, min(Float(radius) * 0.34, 1800))
 
-        // Radial bands (XZ around the camera)
-        let rNearDisk: Float = max(520,  Float(radius) * 0.22)
-        let rBridge0:  Float = rNearDisk * 1.08
-        let rBridge1:  Float = rNearDisk + max(900,  Float(radius) * 0.45)
-        let rMid0:     Float = rBridge1 - 120
-        let rMid1:     Float = rMid0 + max(2300, Float(radius) * 1.20)
-        let rFar0:     Float = rMid1 + max(800,  Float(radius) * 0.36)
-        let rFar1:     Float = rFar0 + max(2400, Float(radius) * 1.05)
-        let rUltra0:   Float = rFar1 + max(900,  Float(radius) * 0.40)
-        let rUltra1:   Float = rUltra0 + max(1600, Float(radius) * 0.60)
+        // Radial bands (XZ around the camera). Tuned so the far belt is widest/densest.
+        let rNearMax: Float = max(560,  Float(radius) * 0.22)                 // near annulus outer radius
+        let rNearHole: Float = rNearMax * 0.34                                 // zenith hole to prevent overcast overhead
 
-        // Allocation per band
-        let N = max(20, clusterCount)
-        let nearC   = max(6,  Int(Float(N) * 0.08))
-        let bridgeC = max(10, Int(Float(N) * 0.12))
-        let midC    = max(28, Int(Float(N) * 0.44))
-        let farC    = max(16, Int(Float(N) * 0.26))
-        let ultraC  = max(6,  N - nearC - bridgeC - midC - farC)
+        let rBridge0:  Float = rNearMax * 1.06
+        let rBridge1:  Float = rBridge0 + max(900,  Float(radius) * 0.42)
+
+        let rMid0:     Float = rBridge1 - 100
+        let rMid1:     Float = rMid0 + max(2100, Float(radius) * 1.05)        // moderate
+
+        let rFar0:     Float = rMid1 + max(650,  Float(radius) * 0.34)
+        let rFar1:     Float = rFar0 + max(3000, Float(radius) * 1.40)        // main “distance belt”
+
+        let rUltra0:   Float = rFar1 + max(700,  Float(radius) * 0.40)
+        let rUltra1:   Float = rUltra0 + max(1600, Float(radius) * 0.60)      // thin horizon line
+
+        // Allocation per band (most goes to FAR, fewest NEAR).
+        let N = max(30, clusterCount)
+        let nearC   = max(2,  Int(Float(N) * 0.04))    // ~4% (sparse overhead)
+        let bridgeC = max(6,  Int(Float(N) * 0.10))    // ~10%
+        let midC    = max(24, Int(Float(N) * 0.30))    // ~30%
+        let farC    = max(36, Int(Float(N) * 0.44))    // ~44% (dense belt)
+        let ultraC  = max(6,  N - nearC - bridgeC - midC - farC) // ~12%
 
         Task.detached(priority: .userInitiated) {
             var s = (seed == 0) ? 1 : seed
 
-            // NOTE: These calls are main-actor isolated by the compiler;
-            // hop with `await` to satisfy isolation.
-            let nearPts  = await CloudBillboardPlacement.poissonDisk(
-                nearC, radius: rNearDisk, minSepNear: 380, minSepFar: 540, seed: &s
+            // Blue-noise-ish placements. Larger separations near the viewer so the zenith stays open.
+            // NOTE: helper calls appear main-actor isolated under Swift's global-actor inference; hop with `await`.
+            let nearPts  = await CloudBillboardPlacement.poissonAnnulus(
+                nearC, r0: rNearHole, r1: rNearMax, minSepNear: 820, minSepFar: 980, seed: &s
             )
             let bridgePts = await CloudBillboardPlacement.poissonAnnulus(
-                bridgeC, r0: rBridge0, r1: rBridge1, minSepNear: 520, minSepFar: 700, seed: &s
+                bridgeC, r0: rBridge0, r1: rBridge1, minSepNear: 620, minSepFar: 780, seed: &s
             )
             let midPts   = await CloudBillboardPlacement.poissonAnnulus(
-                midC, r0: rMid0, r1: rMid1, minSepNear: 560, minSepFar: 780, seed: &s
+                midC, r0: rMid0, r1: rMid1, minSepNear: 520, minSepFar: 700, seed: &s
             )
             let farPts   = await CloudBillboardPlacement.poissonAnnulus(
-                farC, r0: rFar0, r1: rFar1, minSepNear: 520, minSepFar: 720, seed: &s
+                farC, r0: rFar0, r1: rFar1, minSepNear: 380, minSepFar: 560, seed: &s
             )
             let ultraPts = await CloudBillboardPlacement.poissonAnnulus(
-                ultraC, r0: rUltra0, r1: rUltra1, minSepNear: 420, minSepFar: 640, seed: &s
+                ultraC, r0: rUltra0, r1: rUltra1, minSepNear: 360, minSepFar: 520, seed: &s
             )
 
             var specs: [CloudClusterSpec] = []
             specs.reserveCapacity(N)
-            let bandSpan = (rNearDisk, rUltra1)
+            let bandSpan = (rNearHole, rUltra1)
 
+            // Per-band size/opacity/tint: ultra = hazy; far = dense but a touch dimmer; near = smallest & few.
             for p in nearPts {
                 specs.append(
                     await CloudBillboardPlacement.buildCluster(
                         at: p, baseY: layerY, bandSpan: bandSpan,
-                        scaleMul: 1.20, opacityMul: 0.96, seed: &s
+                        scaleMul: 0.90, opacityMul: 0.88,
+                        tint: nil, seed: &s
                     )
                 )
             }
@@ -91,7 +98,8 @@ enum CloudBillboardLayer {
                 specs.append(
                     await CloudBillboardPlacement.buildCluster(
                         at: p, baseY: layerY, bandSpan: bandSpan,
-                        scaleMul: 1.08, opacityMul: 0.95, seed: &s
+                        scaleMul: 0.98, opacityMul: 0.93,
+                        tint: simd_float3(0.98, 0.99, 1.00), seed: &s
                     )
                 )
             }
@@ -99,7 +107,8 @@ enum CloudBillboardLayer {
                 specs.append(
                     await CloudBillboardPlacement.buildCluster(
                         at: p, baseY: layerY, bandSpan: bandSpan,
-                        scaleMul: 1.00, opacityMul: 0.94, seed: &s
+                        scaleMul: 1.00, opacityMul: 0.94,
+                        tint: simd_float3(0.97, 0.99, 1.00), seed: &s
                     )
                 )
             }
@@ -107,7 +116,8 @@ enum CloudBillboardLayer {
                 specs.append(
                     await CloudBillboardPlacement.buildCluster(
                         at: p, baseY: layerY, bandSpan: bandSpan,
-                        scaleMul: 0.88, opacityMul: 0.92, seed: &s
+                        scaleMul: 0.88, opacityMul: 0.92,
+                        tint: simd_float3(0.95, 0.98, 1.00), seed: &s
                     )
                 )
             }
@@ -115,7 +125,9 @@ enum CloudBillboardLayer {
                 specs.append(
                     await CloudBillboardPlacement.buildCluster(
                         at: p, baseY: layerY, bandSpan: bandSpan,
-                        scaleMul: 0.82, opacityMul: 0.90, seed: &s
+                        scaleMul: 0.74, opacityMul: 0.78,
+                        // blue-leaning multiply tint to read as hazy against sky
+                        tint: simd_float3(0.90, 0.93, 1.00), seed: &s
                     )
                 )
             }

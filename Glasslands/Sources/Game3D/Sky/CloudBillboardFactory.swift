@@ -26,25 +26,29 @@ enum CloudBillboardFactory {
         for cl in clusters {
             let group = SCNNode()
             for p in cl.puffs {
-                // Parent that faces the camera…
                 let bb = SCNNode()
                 bb.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
-                let bc = SCNBillboardConstraint()
-                bc.freeAxes = .all
+                let bc = SCNBillboardConstraint(); bc.freeAxes = .all
                 bb.constraints = [bc]
 
-                // …child plane rotated around Z for roll.
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
                 let sprite = SCNNode(geometry: plane)
                 sprite.eulerAngles.z = p.roll
                 sprite.castsShadow = false
 
-                // Per‑instance material (copy the immutable template).
                 let m = template.copy() as! SCNMaterial
                 if atlas.images.isEmpty == false {
                     m.diffuse.contents = atlas.images[p.atlasIndex % atlas.images.count]
                 }
                 m.transparency = CGFloat(max(0, min(1, p.opacity)))
+                if let t = p.tint {
+                    m.multiply.contents = UIColor(
+                        red: CGFloat(max(0, min(1, t.x))),
+                        green: CGFloat(max(0, min(1, t.y))),
+                        blue: CGFloat(max(0, min(1, t.z))),
+                        alpha: 1
+                    )
+                }
                 plane.firstMaterial = m
 
                 bb.addChildNode(sprite)
