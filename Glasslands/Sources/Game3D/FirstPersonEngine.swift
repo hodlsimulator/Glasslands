@@ -93,9 +93,18 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
-        let dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
+        var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
+
+        // Ensure the sun is in front of the camera at spawn (handy for screenshots/debug).
+        if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
+            // Camera “look” direction is -worldFront in SceneKit.
+            let look = -pov.presentation.simdWorldFront
+            if simd_dot(dir, look) < 0 { dir = -dir }
+        }
+
         sunDirWorld = dir
 
+        // Aim the directional light.
         if let sunLightNode {
             let origin = yawNode.presentation.position
             let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
@@ -103,8 +112,10 @@ final class FirstPersonEngine: NSObject {
             sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
         }
 
+        // Place the visible sun disc.
         if let disc = sunDiscNode {
-            let dist = max(10, CGFloat(cfg.skyDistance - 180))
+            // Bring the disc closer so it’s unmissable; still attached to the sky anchor.
+            let dist: CGFloat = 1200   // was ~skyDistance; this guarantees it’s on-screen
             disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
         }
 
@@ -322,12 +333,10 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Background gradient; no IBL.
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Cloud billboards (kept modest for perf).
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.18,
@@ -335,17 +344,14 @@ final class FirstPersonEngine: NSObject {
             seed: 0x2025_1003
         ) { [weak self] layer in
             guard let self else { return }
-            self.skyAnchor.childNodes
-                .filter { $0.name == "CumulusBillboardLayer" }
-                .forEach { $0.removeFromParentNode() }
-
+            self.skyAnchor.childNodes.filter { $0.name == "CumulusBillboardLayer" }.forEach { $0.removeFromParentNode() }
             self.skyAnchor.addChildNode(layer)
-            if let v = self.scnView { v.prepare([layer]) { _ in } }
+            self.scnView?.prepare([layer]) { _ in }
             self.applyCloudSunUniforms()
         }
 
-        // Visible sun disc (always drawn above clouds).
-        let discSize: CGFloat = 256
+        // Big, obvious disc drawn above clouds.
+        let discSize: CGFloat = 360
         let disc = SCNPlane(width: discSize, height: discSize)
 
         let mat = SCNMaterial()
