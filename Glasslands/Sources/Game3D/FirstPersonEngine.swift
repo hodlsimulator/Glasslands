@@ -290,37 +290,43 @@ final class FirstPersonEngine: NSObject {
         DispatchQueue.main.async { [score, onScore] in onScore(score) }
     }
 
+    @MainActor
     private func buildLighting() {
+        // Clear existing lights
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Soft ambient so sun/shadows read.
+        // Ambient fill (category mask on ambient is benign even if ignored)
         let amb = SCNLight()
         amb.type = .ambient
         amb.intensity = 400
         amb.color = UIColor(white: 1.0, alpha: 1.0)
+        amb.categoryBitMask = 0x00000401
+
         let ambNode = SCNNode()
         ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
-        // Directional sun with shadows.
+        // Directional sun with shadows that affect terrain (0x00000400) and default (1)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1100
         sun.color = UIColor.white
         sun.castsShadow = true
-        sun.shadowMapSize = CGSize(width: 512, height: 512)   // perf-friendly
+        sun.shadowMapSize = CGSize(width: 512, height: 512)
         sun.shadowSampleCount = 4
         sun.shadowRadius = 2.0
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
         sun.automaticallyAdjustsShadowProjection = true
+        sun.categoryBitMask = 0x00000401
 
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
 
+        // Aim the sun
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
@@ -329,14 +335,17 @@ final class FirstPersonEngine: NSObject {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
+        // Reset sky anchor
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
+        // Gradient sky; disable IBL
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
+        // Clouds layer
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.18,
@@ -350,27 +359,30 @@ final class FirstPersonEngine: NSObject {
             self.applyCloudSunUniforms()
         }
 
-        // Big, obvious disc drawn above clouds.
-        let discSize: CGFloat = 360
-        let disc = SCNPlane(width: discSize, height: discSize)
+        // Visible sun disc (round plane, emissive, always faces camera)
+        let discSize: CGFloat = 220
+        let plane = SCNPlane(width: discSize, height: discSize)
+        plane.cornerRadius = discSize * 0.5
 
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: Int(discSize))
-        mat.diffuse.contents = UIColor.clear
-        mat.isDoubleSided = false
+        mat.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
+        mat.emission.contents = UIColor(white: 1.0, alpha: 1.0)
         mat.readsFromDepthBuffer = false
         mat.writesToDepthBuffer = false
-        disc.firstMaterial = mat
+        mat.isDoubleSided = true
+        plane.firstMaterial = mat
 
-        let discNode = SCNNode(geometry: disc)
-        discNode.name = "SunDisc"
-        let bc = SCNBillboardConstraint(); bc.freeAxes = .all
-        discNode.constraints = [bc]
-        discNode.renderingOrder = 9999
-        skyAnchor.addChildNode(discNode)
-        self.sunDiscNode = discNode
+        let disc = SCNNode(geometry: plane)
+        disc.name = "SunDisc"
+        disc.castsShadow = false
+        disc.constraints = [SCNBillboardConstraint()]
+        disc.renderingOrder = 1000  // draw after clouds
 
+        skyAnchor.addChildNode(disc)
+        self.sunDiscNode = disc
+
+        // Place light + disc consistently
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
     }
 
