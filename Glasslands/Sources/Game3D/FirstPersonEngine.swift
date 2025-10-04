@@ -280,15 +280,14 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func buildLighting() {
-        // Clear existing lights.
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Soft ambient so the sun actually matters.
+        // Soft ambient so sun/shadows read.
         let amb = SCNLight()
         amb.type = .ambient
-        amb.intensity = 450
+        amb.intensity = 400
         amb.color = UIColor(white: 1.0, alpha: 1.0)
         let ambNode = SCNNode()
         ambNode.light = amb
@@ -297,22 +296,20 @@ final class FirstPersonEngine: NSObject {
         // Directional sun with shadows.
         let sun = SCNLight()
         sun.type = .directional
-        sun.intensity = 1200
+        sun.intensity = 1100
         sun.color = UIColor.white
-
-        // Shadows on (trees already set castsShadow = true in VegetationPlacer3D).
         sun.castsShadow = true
-        sun.shadowMapSize = CGSize(width: 1024, height: 1024)
-        sun.shadowSampleCount = 8
-        sun.shadowRadius = 3.0
+        sun.shadowMapSize = CGSize(width: 512, height: 512)   // perf-friendly
+        sun.shadowSampleCount = 4
+        sun.shadowRadius = 2.0
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
+        sun.automaticallyAdjustsShadowProjection = true
 
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
 
-        // Aim the sun and place the disc.
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
@@ -325,16 +322,16 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Seam-free background; no IBL.
+        // Background gradient; no IBL.
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Cloud billboards.
+        // Cloud billboards (kept modest for perf).
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.18,
-            clusterCount: 140,
+            clusterCount: 100,
             seed: 0x2025_1003
         ) { [weak self] layer in
             guard let self else { return }
@@ -347,8 +344,8 @@ final class FirstPersonEngine: NSObject {
             self.applyCloudSunUniforms()
         }
 
-        // Visible sun disc (forces visibility in front of clouds).
-        let discSize: CGFloat = 256   // obvious on screen; tweak as needed
+        // Visible sun disc (always drawn above clouds).
+        let discSize: CGFloat = 256
         let disc = SCNPlane(width: discSize, height: discSize)
 
         let mat = SCNMaterial()
@@ -362,10 +359,9 @@ final class FirstPersonEngine: NSObject {
 
         let discNode = SCNNode(geometry: disc)
         discNode.name = "SunDisc"
-        let bc = SCNBillboardConstraint()
-        bc.freeAxes = .all                 // <- critical: face the camera from any direction
+        let bc = SCNBillboardConstraint(); bc.freeAxes = .all
         discNode.constraints = [bc]
-        discNode.renderingOrder = 9999     // draw on top of clouds
+        discNode.renderingOrder = 9999
         skyAnchor.addChildNode(discNode)
         self.sunDiscNode = discNode
 
