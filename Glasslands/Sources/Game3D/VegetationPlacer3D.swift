@@ -107,6 +107,14 @@ struct VegetationPlacer3D {
                           satBy: CGFloat.random(in: -0.10...0.10, using: &r),
                           briBy: CGFloat.random(in: -0.06...0.06, using: &r))
 
+        // Clamp ONLY downward-facing fragments to SDR so the flat underside can’t go HDR.
+        let ldrClampDownFrag = """
+        #pragma body
+        if (_surface.normal.y < 0.05) {
+            _output.color.rgb = min(_output.color.rgb, float3(0.98)) * 0.92;
+        }
+        """
+
         let trunk = SCNCylinder(radius: trunkR, height: trunkH)
         let trunkMat = SCNMaterial()
         trunkMat.lightingModel = .physicallyBased
@@ -117,21 +125,25 @@ struct VegetationPlacer3D {
 
         let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
         canopy1.radialSegmentCount = 12
+
         let leafMat = SCNMaterial()
         leafMat.lightingModel = .physicallyBased
         leafMat.diffuse.contents = leaf
-        leafMat.roughness.contents = 0.95    // soften specular so it won’t hit bloom
+        leafMat.roughness.contents = 0.95
         leafMat.metalness.contents = 0.0
+        leafMat.isDoubleSided = false
+        leafMat.shaderModifiers = [.fragment: ldrClampDownFrag]
         canopy1.materials = [leafMat]
 
         let canopy2: SCNGeometry? = twoStage ? {
             let g = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
             g.radialSegmentCount = 10
-            g.materials = [leafMat]
+            g.materials = [leafMat]   // shares the same downward clamp
             return g
         }() : nil
 
         let node = SCNNode()
+
         let trunkNode = SCNNode(geometry: trunk)
         trunkNode.position = SCNVector3(0, trunkH / 2.0, 0)
 
