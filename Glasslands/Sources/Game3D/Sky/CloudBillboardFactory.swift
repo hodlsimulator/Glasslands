@@ -11,12 +11,11 @@ import SceneKit
 import UIKit
 
 enum CloudBillboardFactory {
-
-    @MainActor static func makeNode(
+    @MainActor
+    static func makeNode(
         from clusters: [CloudClusterSpec],
         atlas: CloudSpriteTexture.Atlas
     ) -> SCNNode {
-
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990

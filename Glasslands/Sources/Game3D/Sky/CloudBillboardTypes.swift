@@ -14,10 +14,8 @@ struct CloudPuffSpec {
     var size: Float
     var roll: Float
     var atlasIndex: Int
-    var opacity: Float            // 0..1 (premultiplied)
-    var tint: simd_float3?        // optional multiply tint; nil = white
+    var opacity: Float   // premultiplied alpha
+    var tint: simd_float3?
 }
 
-struct CloudClusterSpec {
-    var puffs: [CloudPuffSpec]
-}
+struct CloudClusterSpec { var puffs: [CloudPuffSpec] }

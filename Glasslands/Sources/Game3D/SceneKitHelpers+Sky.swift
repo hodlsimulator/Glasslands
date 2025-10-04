@@ -7,50 +7,27 @@
 //  Convenience for producing a UIImage sky on the main actor.
 //
 
-import Foundation
-import CoreGraphics
 import UIKit
 
-enum SkyGen {
-    static let defaultCoverage: Float = 0.34
+extension SceneKitHelpers {
+    static func skyEquirectGradient(width: Int, height: Int) -> UIImage {
+        let w = max(64, width), h = max(32, height)
+        let size = CGSize(width: w, height: h)
 
-    @MainActor
-    static func skyWithCloudsImage(
-        width: Int = 1536,
-        height: Int = 768,
-        coverage: Float = defaultCoverage,
-        edgeSoftness: Float = 0.20,
-        seed: UInt32 = 424242,
-        sunAzimuthDeg: Float = 35,
-        sunElevationDeg: Float = 63
-    ) -> UIImage {
-        let px = computeCumulusPixels(
-            width: width,
-            height: height,
-            coverage: coverage,
-            edgeSoftness: edgeSoftness,
-            seed: seed,
-            sunAzimuthDeg: sunAzimuthDeg,
-            sunElevationDeg: sunElevationDeg
-        )
+        UIGraphicsBeginImageContextWithOptions(size, true, 1.0)
+        defer { UIGraphicsEndImageContext() }
+        guard let ctx = UIGraphicsGetCurrentContext() else { return UIImage() }
 
-        let bpr = px.width * 4
-        let data = CFDataCreate(nil, px.rgba, px.rgba.count)!
-        let provider = CGDataProvider(data: data)!
-        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        let cg = CGImage(
-            width: px.width,
-            height: px.height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bpr,
-            space: cs,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        )!
-        return UIImage(cgImage: cg)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let colors: [CGColor] = [
+            UIColor(red: 0.62, green: 0.74, blue: 0.92, alpha: 1).cgColor,
+            UIColor(red: 0.70, green: 0.82, blue: 0.96, alpha: 1).cgColor,
+            UIColor(red: 0.78, green: 0.88, blue: 0.98, alpha: 1).cgColor,
+            UIColor(red: 0.86, green: 0.92, blue: 0.99, alpha: 1).cgColor
+        ]
+        let locs: [CGFloat] = [0.0, 0.35, 0.70, 1.0]
+        let grad = CGGradient(colorsSpace: cs, colors: colors as CFArray, locations: locs)!
+        ctx.drawLinearGradient(grad, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
+        return UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
     }
 }

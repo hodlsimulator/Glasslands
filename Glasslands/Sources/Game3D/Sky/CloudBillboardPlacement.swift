@@ -11,8 +11,6 @@ import simd
 import Foundation
 
 enum CloudBillboardPlacement {
-
-    // MARK: - RNG/helpers
     @inline(__always) private static func frand(_ s: inout UInt32) -> Float {
         s = 1_664_525 &* s &+ 1_013_904_223
         return Float(s >> 8) * (1.0 / 16_777_216.0)
@@ -20,8 +18,11 @@ enum CloudBillboardPlacement {
     @inline(__always) private static func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * t }
     @inline(__always) private static func sat(_ x: Float) -> Float { max(0, min(1, x)) }
 
-    // MARK: - Blue-noise-ish placements
-    static func poissonDisk(_ n: Int, radius R: Float, minSepNear: Float, minSepFar: Float, seed: inout UInt32) -> [simd_float2] {
+    static func poissonDisk(
+        _ n: Int, radius R: Float,
+        minSepNear: Float, minSepFar: Float,
+        seed: inout UInt32
+    ) -> [simd_float2] {
         var pts: [simd_float2] = []
         pts.reserveCapacity(n)
         let maxTries = n * 2600
@@ -40,7 +41,11 @@ enum CloudBillboardPlacement {
         return pts
     }
 
-    static func poissonAnnulus(_ n: Int, r0: Float, r1: Float, minSepNear: Float, minSepFar: Float, seed: inout UInt32) -> [simd_float2] {
+    static func poissonAnnulus(
+        _ n: Int, r0: Float, r1: Float,
+        minSepNear: Float, minSepFar: Float,
+        seed: inout UInt32
+    ) -> [simd_float2] {
         var pts: [simd_float2] = []
         pts.reserveCapacity(n)
         let maxTries = n * 3200
@@ -60,8 +65,6 @@ enum CloudBillboardPlacement {
         return pts
     }
 
-    // MARK: - Cluster construction
-
     static func buildCluster(
         at anchorXZ: simd_float2,
         baseY: Float,
@@ -71,7 +74,6 @@ enum CloudBillboardPlacement {
         tint: simd_float3? = nil,
         seed: inout UInt32
     ) -> CloudClusterSpec {
-
         let (lo, hi) = bandSpan
         let dist = length(anchorXZ)
         let tR = sat((dist - lo) / max(1, hi - lo))  // 0 near → 1 far
@@ -88,74 +90,34 @@ enum CloudBillboardPlacement {
         let baseCount = 3 + Int(frand(&seed) * 2.8)
         for _ in 0..<baseCount {
             let ang = frand(&seed) * (.pi * 2)
-            let rad = base * (0.28 + 0.28 * frand(&seed))
-            let sz  = base * (0.82 + 0.18 * frand(&seed))
-            let cx = anchorXZ.x + cosf(ang) * rad
-            let cz = anchorXZ.y + sinf(ang) * rad
-            let cy = baseY + baseLift + (frand(&seed) - 0.5) * (thickness * 0.18)
+            let rad = 110.0 + frand(&seed) * 90.0
+            let sz  = 420.0 + frand(&seed) * 220.0
+            let x = anchorXZ.x + cosf(ang) * rad
+            let z = anchorXZ.y + sinf(ang) * rad
+            let y = baseY + base + baseLift
+            let op = 0.92 - 0.15 * tR
             puffs.append(CloudPuffSpec(
-                pos: simd_float3(cx, cy, cz),
-                size: sz,
-                roll: (frand(&seed) - 0.5) * 0.6,
-                atlasIndex: Int(frand(&seed) * 7.0),
-                opacity: (0.92 + 0.06 * frand(&seed)) * opacityMul,
+                pos: simd_float3(x, y, z), size: sz, roll: frand(&seed) * .pi,
+                atlasIndex: Int(frand(&seed) * 1000) % 6,
+                opacity: max(0.0, min(1.0, op)) * opacityMul,
                 tint: tint
             ))
         }
 
-        // Cap (1–2)
-        let capCount = 1 + Int(frand(&seed) * 1.5)
+        // Top cap (smaller, lifting the silhouette)
+        let capCount = 2 + Int(frand(&seed) * 2.0)
         for _ in 0..<capCount {
             let ang = frand(&seed) * (.pi * 2)
-            let rad = base * (0.10 + 0.12 * frand(&seed))
-            let sz  = base * (0.90 + 0.16 * frand(&seed))
-            let cx = anchorXZ.x + cosf(ang) * rad
-            let cz = anchorXZ.y + sinf(ang) * rad
-            let cy = baseY + baseLift + thickness * (0.45 + 0.25 * frand(&seed))
+            let rad = 60.0 + frand(&seed) * 70.0
+            let sz  = 260.0 + frand(&seed) * 180.0
+            let x = anchorXZ.x + cosf(ang) * rad
+            let z = anchorXZ.y + sinf(ang) * rad
+            let y = baseY + base + thickness
+            let op = 0.86 - 0.18 * tR
             puffs.append(CloudPuffSpec(
-                pos: simd_float3(cx, cy, cz),
-                size: sz,
-                roll: (frand(&seed) - 0.5) * 0.6,
-                atlasIndex: Int(frand(&seed) * 7.0),
-                opacity: (0.90 + 0.06 * frand(&seed)) * opacityMul,
-                tint: tint
-            ))
-        }
-
-        // Middle fillers (1–3)
-        let midCount = 1 + Int(frand(&seed) * 2.5)
-        for _ in 0..<midCount {
-            let ang = frand(&seed) * (.pi * 2)
-            let rad = base * (0.08 + 0.36 * frand(&seed))
-            let sz  = base * (0.70 + 0.20 * frand(&seed))
-            let cx = anchorXZ.x + cosf(ang) * rad
-            let cz = anchorXZ.y + sinf(ang) * rad
-            let cy = baseY + baseLift + thickness * (0.12 + 0.40 * frand(&seed))
-            puffs.append(CloudPuffSpec(
-                pos: simd_float3(cx, cy, cz),
-                size: sz,
-                roll: (frand(&seed) - 0.5) * 0.6,
-                atlasIndex: Int(frand(&seed) * 7.0),
-                opacity: (0.88 + 0.06 * frand(&seed)) * opacityMul,
-                tint: tint
-            ))
-        }
-
-        // Skirt (0–2)
-        let skirtCount = Int(frand(&seed) * 2.2)
-        for _ in 0..<skirtCount {
-            let ang = frand(&seed) * (.pi * 2)
-            let rad = base * (0.44 + 0.30 * frand(&seed))
-            let sz  = base * (0.52 + 0.16 * frand(&seed))
-            let cx = anchorXZ.x + cosf(ang) * rad
-            let cz = anchorXZ.y + sinf(ang) * rad
-            let cy = baseY + baseLift + (frand(&seed) - 0.5) * (thickness * 0.12)
-            puffs.append(CloudPuffSpec(
-                pos: simd_float3(cx, cy, cz),
-                size: sz,
-                roll: (frand(&seed) - 0.5) * 0.6,
-                atlasIndex: Int(frand(&seed) * 7.0),
-                opacity: (0.80 + 0.05 * frand(&seed)) * opacityMul,
+                pos: simd_float3(x, y, z), size: sz, roll: frand(&seed) * .pi,
+                atlasIndex: Int(frand(&seed) * 1000) % 6,
+                opacity: max(0.0, min(1.0, op)) * opacityMul,
                 tint: tint
             ))
         }

@@ -27,9 +27,10 @@ struct FirstPersonMover {
     ) -> SIMD3<Float> {
         var p = pos
 
-        // SceneKit camera faces -Z at yaw=0 → forward is -Z
+        // SceneKit camera faces -Z at yaw=0 → forward is -Z.
         let forward = SIMD2<Float>(-sinf(yaw), -cosf(yaw))
-        let right   = SIMD2<Float>( forward.y, -forward.x )
+        // FIX: strafe sign so pushing the stick right actually moves right.
+        let right   = SIMD2<Float>(-forward.y, forward.x)
 
         var wish = right * moveAxis.x + forward * moveAxis.y
         let len = max(1e-4, simd_length(wish))
@@ -58,7 +59,7 @@ struct FirstPersonMover {
                 let dx = p.x - obs.centreXZ.x
                 let dz = p.z - obs.centreXZ.y
                 let d2 = dx*dx + dz*dz
-                let rr = (playerR + obs.radius)
+                let rr = playerR + obs.radius
                 if d2 < rr*rr {
                     let d = max(1e-4, sqrt(d2))
                     let nx = dx / d, nz = dz / d
