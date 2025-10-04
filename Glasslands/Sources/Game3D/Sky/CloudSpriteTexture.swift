@@ -4,9 +4,11 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates a small atlas of soft “puff” sprites with subtle variants.
-//  Pixels are premultiplied‑alpha and include a wide **radial** transparent apron
-//  so no square silhouettes can appear.
+//  Generates a small atlas of soft cumulus **puff** sprites.
+//  • Premultiplied alpha (for .aOne blending).
+//  • Wide **radial** apron (edge‑safe rotation).
+//  • Flat base weighting + lumpy cap via FBM value noise.
+//  • Baked top‑light shading.
 //
 
 import UIKit
@@ -44,69 +46,107 @@ enum CloudSpriteTexture {
 
 private extension CloudSpriteTexture {
 
+    // --- tiny 2D value noise + 3‑octave FBM (fast, branchless) ---
+    static func h(_ x: Float, _ y: Float) -> Float {
+        // hash to 0..1
+        var n = sinf(x * 127.1 + y * 311.7) * 43758.5453
+        n = n - floorf(n)
+        return n
+    }
+    static func vnoise(_ x: Float, _ y: Float) -> Float {
+        let ix = floorf(x), iy = floorf(y)
+        let fx = x - ix,   fy = y - iy
+        let a = h(ix,     iy)
+        let b = h(ix + 1, iy)
+        let c = h(ix,     iy + 1)
+        let d = h(ix + 1, iy + 1)
+        let u = fx*fx*(3 - 2*fx)
+        let v = fy*fy*(3 - 2*fy)
+        return a*(1-u)*(1-v) + b*u*(1-v) + c*(1-u)*v + d*u*v
+    }
+    static func fbm(_ x: Float, _ y: Float) -> Float {
+        var f: Float = 0, a: Float = 0.5, s: Float = 1
+        for _ in 0..<3 {
+            f += a * vnoise(x * s, y * s)
+            s *= 2; a *= 0.5
+        }
+        return f
+    }
+
     @MainActor
     static func buildImage(_ size: Int, seed: UInt32) -> UIImage {
         let W = size, H = size
         let bytesPerRow = W * 4
         var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-        // Deterministic RNG.
+        // RNG for disc placements
         var state = (seed == 0) ? 1 : seed
         @inline(__always) func urand() -> Float {
             state = 1_664_525 &* state &+ 1_013_904_223
             return Float(state >> 8) * (1.0 / 16_777_216.0)
         }
 
-        // Irregular silhouette from overlapping soft “discs”.
-        struct Disc { var cx: Float; var cy: Float; var r: Float; var a: Float }
-        var discs: [Disc] = []
-        let discCount = 8 + Int(floorf(urand() * 3.0)) // 8–10
-        for _ in 0..<discCount {
-            // Slight bias upwards; gentle horizontal spread.
-            let cx = 0.5 + (urand() - 0.5) * 0.32
-            let cy = 0.52 + (urand() - 0.5) * 0.26
-            let r  = 0.24 + urand() * 0.30
+        // Silhouette from overlapping ellipses (slightly wider than tall).
+        struct Ell { var cx: Float; var cy: Float; var rx: Float; var ry: Float; var a: Float }
+        var els: [Ell] = []
+        let count = 9 + Int(urand() * 3) // 9–11
+        for i in 0..<count {
+            let spreadX: Float = (i < 3) ? 0.40 : 0.28
+            let spreadY: Float = (i < 3) ? 0.22 : 0.18
+            let cx = 0.5 + (urand() - 0.5) * spreadX
+            let cy = 0.56 + (urand() - 0.5) * spreadY
+            let s  = 0.24 + urand() * 0.28
+            let rx = s * (1.10 + (urand() - 0.5) * 0.25)
+            let ry = s * (0.85 + (urand() - 0.5) * 0.18)
             let a  = 0.55 + urand() * 0.45
-            discs.append(Disc(cx: cx, cy: cy, r: r, a: a))
+            els.append(Ell(cx: cx, cy: cy, rx: rx, ry: ry, a: a))
         }
 
-        // Density field with a **radial** apron (not edge‑based).
         var density = [Float](repeating: 0, count: W * H)
-        let apronInner: Float = 0.80   // radius where mask is fully on
-        let apronOuter: Float = 0.98   // radius where mask is fully off
+
+        // Radial apron (circular) – keeps samples well away from texture edge.
+        let apronInner: Float = 0.80
+        let apronOuter: Float = 0.98
 
         for y in 0..<H {
             let fy = (Float(y) + 0.5) / Float(H)
             for x in 0..<W {
                 let fx = (Float(x) + 0.5) / Float(W)
+
+                // Union of soft ellipses (lorentzian‑ish falloff).
                 var d: Float = 0
-
-                for disc in discs {
-                    let dx = (fx - disc.cx) / disc.r
-                    let dy = (fy - disc.cy) / (disc.r * 0.82) // slightly squashed vertically
+                for e in els {
+                    let dx = (fx - e.cx) / e.rx
+                    let dy = (fy - e.cy) / e.ry
                     let q = sqrtf(dx*dx + dy*dy)
-                    if q > 1.6 { continue }
-                    // Lorentzian‑ish falloff -> puffier core.
-                    let k: Float = 1.6
-                    d += disc.a * (1.0 / ((1.0 + k*q) * (1.0 + k*q)))
+                    if q > 1.8 { continue }
+                    let k: Float = 1.45
+                    d += e.a * (1.0 / ((1.0 + k*q) * (1.0 + k*q)))
                 }
+                d = min(1, d)
 
-                d = max(0, min(1, d))
+                // Flat base weighting: damp density below the centre slightly.
+                let baseTilt = max(0, (fy - 0.54) * 2.1)   // >0 below ~0.54
+                d *= (1.0 - baseTilt * 0.22)
 
-                // --- Radial apron (circular), keeps samples away from texture edge ---
-                // r = 0 at centre, r = 1 at image edge along X/Y, >=1 toward corners.
+                // Lumpy cap via FBM noise near the rim.
+                let nx = fx * 10.0, ny = fy * 10.0
+                let n = fbm(nx, ny)                        // 0..~1
+                let rimPush = (n - 0.5) * 0.22             // ±0.11
+                d = max(0, d + rimPush * (1 - d))          // only strong near the edge
+
+                // Radial apron mask.
                 let dx = (fx - 0.5) / 0.5
                 let dy = (fy - 0.5) / 0.5
-                let r = min(1.5, sqrtf(dx*dx + dy*dy))    // 0 .. ~1.414
+                let r = min(1.5, sqrtf(dx*dx + dy*dy))
                 let rim = smoothstep(apronInner, apronOuter, min(1.0, r))
-                let mask = 1.0 - rim                      // 1 in centre -> 0 at edge
+                let mask = 1.0 - rim
 
-                // Slight self‑brightening in thicker bits.
-                density[y * W + x] = d * (0.72 + 0.28 * d) * mask
+                density[y * W + x] = d * mask
             }
         }
 
-        // Baked top‑light shading using the gradient of density.
+        // Top‑light shading using gradient of density.
         let lightDir = simd_normalize(simd_float2(0.0, -1.0)) // light from above
 
         for y in 0..<H {
@@ -122,8 +162,8 @@ private extension CloudSpriteTexture {
                 let nx = (xm - xp)
                 let ny = (ym - yp)
 
-                var shade = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 1.05 + 0.88))
-                shade = shade * (0.85 + 0.15 * d)
+                var shade = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 1.1 + 0.88))
+                shade = shade * (0.84 + 0.16 * d)
 
                 // Premultiplied alpha.
                 let a = min(1.0, d)
@@ -140,7 +180,6 @@ private extension CloudSpriteTexture {
         let data = CFDataCreate(nil, buf, buf.count)!
         let provider = CGDataProvider(data: data)!
         let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-
         let cg = CGImage(
             width: W, height: H,
             bitsPerComponent: 8, bitsPerPixel: 32,
@@ -150,7 +189,6 @@ private extension CloudSpriteTexture {
             provider: provider, decode: nil,
             shouldInterpolate: true, intent: .defaultIntent
         )!
-
         return UIImage(cgImage: cg, scale: 1, orientation: .up)
     }
 

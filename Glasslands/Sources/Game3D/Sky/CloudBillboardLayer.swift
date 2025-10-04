@@ -4,9 +4,12 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Billboarded cumulus built from soft sprites. Uses premultiplied alpha,
-//  angle‑safe UV transforms (no clamping crop), and a tiny fragment cutoff
-//  to avoid any halo from far mips.
+//  Billboarded cumulus built from soft sprites.
+//  • Horizon‑biased distribution (more far, fewer near).
+//  • Variable Poisson spacing (tight near horizon, wide near zenith).
+//  • Distance acceptance (prefer far intersections).
+//  • Angle‑safe UV transforms (no clamp cropping).
+//  • Premultiplied‑alpha diffuse with tiny halo cutoff.
 //
 
 @preconcurrency import SceneKit
@@ -32,10 +35,13 @@ enum CloudBillboardLayer {
         seed: UInt32 = 0xC10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
-        let layerHeight: Float = max(1100, min(Float(radius) * 0.34, 1800))
-        let farCap: Float = max(layerHeight + 2000, Float(radius) * 2.6)
+        let layerHeight: Float = max(1100, min(Float(radius) * 0.34, 1800))  // cloud base (m)
+        let farCap: Float = max(layerHeight + 2200, Float(radius) * 2.8)     // max view distance on the layer
 
         Task.detached(priority: .userInitiated) {
+
+            // MARK: Layout
+
             func makeSpecs(
                 _ n: Int,
                 minY: Float,
@@ -43,6 +49,7 @@ enum CloudBillboardLayer {
                 farCap: Float,
                 seed: UInt32
             ) -> [Cluster] {
+
                 @inline(__always) func rand(_ s: inout UInt32) -> Float {
                     s = 1_664_525 &* s &+ 1_013_904_223
                     return Float(s >> 8) * (1.0 / 16_777_216.0)
@@ -50,30 +57,69 @@ enum CloudBillboardLayer {
 
                 var s = seed == 0 ? 1 : seed
 
-                // Directions above the horizon, biased toward horizon.
+                @inline(__always) func saturate(_ x: Float) -> Float { max(0, min(1, x)) }
+
+                // Horizon‑biased y sampler:
+                //   y in [minY, 0.985], with many more samples near minY (horizon).
+                //   k > 1 gives the bias we want.
                 @inline(__always)
-                func sampleDir(_ s: inout UInt32, minY: Float) -> simd_float3 {
-                    let u = rand(&s), v = rand(&s)
-                    let az = (u - 0.5) * (2 * .pi)
-                    let k: Float = 3.0
-                    let y = min(0.985, max(minY, 1 - powf(1 - v, k)))
-                    let cx = sqrtf(max(0, 1 - y*y))
-                    return simd_normalize(simd_float3(sinf(az) * cx, y, cosf(az) * cx))
+                func biasedY(_ v: Float, minY: Float, k: Float = 3.2) -> Float {
+                    let lo = minY, hi: Float = 0.985
+                    return lo + (hi - lo) * powf(v, k)    // v∈[0,1] -> mostly small y
                 }
 
-                // Poisson‑ish angular spacing to avoid cluster overlaps.
-                let minSepDeg: Float = 6.0
-                let minCos = cosf(minSepDeg * .pi / 180)
+                // For Poisson spacing, vary required angular separation with elevation:
+                //   tiny near horizon (pack more), big near zenith (pack fewer).
+                @inline(__always)
+                func minSepCos(forY y: Float, minY: Float) -> Float {
+                    let t = saturate((y - minY) / (0.985 - minY)) // 0 at horizon -> 1 at zenith
+                    let deg = 3.0 + (14.0 - 3.0) * t              // 3° .. 14°
+                    return cosf(deg * .pi / 180)
+                }
+
+                // Acceptance vs distance along the layer plane: favour far (> mid range).
+                @inline(__always)
+                func acceptProbability(distance d: Float, height h: Float, farCap: Float) -> Float {
+                    let t = saturate((d - h) / (farCap - h))   // 0 near base .. 1 far
+                    return powf(t, 0.8) * 0.85 + 0.10          // keep a small chance for near
+                }
+
+                // Generate weighted/Poisson rays.
                 var rays: [simd_float3] = []
                 var tries = 0
-                while rays.count < n && tries < n * 300 {
+                let hardCap = n * 900
+
+                while rays.count < n && tries < hardCap {
                     tries += 1
-                    let d = sampleDir(&s, minY: minY)
+
+                    // Sample azimuth uniformly.
+                    let u = rand(&s)
+                    let az = (u - 0.5) * (2 * .pi)
+
+                    // Horizon‑biased y.
+                    let y = biasedY(rand(&s), minY: minY, k: 3.2)
+                    let cx = sqrtf(max(0, 1 - y*y))
+                    var d = simd_normalize(simd_float3(sinf(az) * cx, y, cosf(az) * cx))
+
+                    // Intersection distance on the plane (y = height).
+                    let t = height / max(0.001, d.y)
+                    if !t.isFinite || t <= 0 { continue }
+                    let dist = min(t, farCap)
+
+                    // Distance acceptance: prefer the far.
+                    let accept = acceptProbability(distance: dist, height: height, farCap: farCap)
+                    if rand(&s) > accept { continue }
+
+                    // Variable Poisson spacing check.
+                    let cosThresh = minSepCos(forY: y, minY: minY)
                     var ok = true
-                    for c in rays where simd_dot(c, d) > minCos { ok = false; break }
-                    if ok { rays.append(d) }
+                    for c in rays where simd_dot(c, d) > cosThresh { ok = false; break }
+                    if !ok { continue }
+
+                    rays.append(d)
                 }
 
+                // Build clusters at the plane intersections.
                 var clusters: [Cluster] = []
                 clusters.reserveCapacity(rays.count)
 
@@ -84,39 +130,43 @@ enum CloudBillboardLayer {
 
                     let anchor = d * t
                     let dist = length(anchor)
-                    let farFade: Float = dist > (0.9 * farCap)
-                        ? max(0.2, 1 - (dist - 0.9 * farCap) / (0.1 * farCap))
+
+                    // Slight fade very near the far cap.
+                    let farFade: Float = dist > (0.94 * farCap)
+                        ? max(0.2, 1 - (dist - 0.94 * farCap) / (0.06 * farCap))
                         : 1
 
-                    let base = (520.0 + 380.0 * rand(&s))
+                    // Base cluster scale (metres). Varies gently with distance so far clusters
+                    // are a touch larger to keep perceived size from shrinking too much.
+                    let base = (520.0 + 380.0 * rand(&s)) * (0.92 + 0.18 * saturate((dist - height) / (farCap - height)))
                     let thickness: Float = 260.0 + 220.0 * rand(&s)
 
                     var puffs: [PuffSpec] = []
 
-                    // Base
-                    let baseLift: Float = 40.0
-                    let baseCount = 4 + Int(rand(&s) * 3.9)
+                    // ---- LAYER 1: Flat-ish base (wide) ----
+                    let baseLift: Float = 30.0
+                    let baseCount = 5 + Int(rand(&s) * 3.9) // 5..8
                     for _ in 0..<baseCount {
-                        let ox = (rand(&s) - 0.5) * base * 1.4
-                        let oz = (rand(&s) - 0.5) * base
-                        let oy = -thickness * 0.2 + rand(&s) * (thickness * 0.5)
-                        let size = base * (0.7 + rand(&s) * 0.5) * 0.9
+                        let ox = (rand(&s) - 0.5) * base * 1.6
+                        let oz = (rand(&s) - 0.5) * base * 1.1
+                        let oy = -thickness * 0.18 + rand(&s) * (thickness * 0.36)
+                        let size = base * (0.72 + rand(&s) * 0.48)
                         puffs.append(PuffSpec(
                             pos: anchor + simd_float3(ox, baseLift + oy, oz),
                             size: size,
                             roll: rand(&s) * .pi * 2,
                             atlasIndex: Int(rand(&s) * 4),
-                            opacity: farFade * (0.88 + rand(&s) * 0.12)
+                            opacity: farFade * (0.84 + rand(&s) * 0.16)
                         ))
                     }
 
-                    // Fill
-                    let midCount = 4 + Int(rand(&s) * 4.9)
+                    // ---- LAYER 2: Middle fill (keystone) ----
+                    let midCount = 4 + Int(rand(&s) * 4.9) // 4..8
                     for _ in 0..<midCount {
-                        let ox = (rand(&s) - 0.5) * base * 1.1
-                        let oz = (rand(&s) - 0.5) * base * 0.9
-                        let oy = rand(&s) * (thickness * 0.7)
-                        let size = base * (0.55 + rand(&s) * 0.4)
+                        let ox = (rand(&s) - 0.5) * base * 1.2
+                        let oz = (rand(&s) - 0.5) * base * 1.0
+                        let oy = 0 + rand(&s) * (thickness * 0.62)
+                        let size = base * (0.52 + rand(&s) * 0.42)
                         puffs.append(PuffSpec(
                             pos: anchor + simd_float3(ox, baseLift + oy, oz),
                             size: size,
@@ -126,13 +176,13 @@ enum CloudBillboardLayer {
                         ))
                     }
 
-                    // Cap
-                    let capCount = 2 + Int(rand(&s) * 3.0)
+                    // ---- LAYER 3: Cap (small topping puffs) ----
+                    let capCount = 3 + Int(rand(&s) * 2.9) // 3..5
                     for _ in 0..<capCount {
-                        let ox = (rand(&s) - 0.5) * base * 0.7
-                        let oz = (rand(&s) - 0.5) * base * 0.6
-                        let oy = thickness * 0.6 + rand(&s) * (thickness * 0.5)
-                        let size = base * (0.40 + rand(&s) * 0.35)
+                        let ox = (rand(&s) - 0.5) * base * 0.8
+                        let oz = (rand(&s) - 0.5) * base * 0.7
+                        let oy = thickness * 0.58 + rand(&s) * (thickness * 0.52)
+                        let size = base * (0.36 + rand(&s) * 0.33)
                         puffs.append(PuffSpec(
                             pos: anchor + simd_float3(ox, baseLift + oy, oz),
                             size: size,
@@ -150,7 +200,7 @@ enum CloudBillboardLayer {
 
             let layout = makeSpecs(
                 clusterCount,
-                minY: max(0.0, minAltitudeY),
+                minY: max(0.02, minAltitudeY),   // allow very low y for distant horizon
                 height: layerHeight,
                 farCap: farCap,
                 seed: seed &+ 17
@@ -161,6 +211,8 @@ enum CloudBillboardLayer {
             await completion(node)
         }
     }
+
+    // MARK: SceneKit node assembly
 
     @MainActor
     private static func buildLayerNode(specs: [Cluster], atlas: CloudSpriteTexture.Atlas) -> SCNNode {
@@ -182,20 +234,14 @@ enum CloudBillboardLayer {
         for img in atlas.images {
             let m = SCNMaterial()
             m.lightingModel = .constant
-
-            // Colour+alpha are in the diffuse (premultiplied).
-            m.diffuse.contents = img
+            m.diffuse.contents = img            // premultiplied‑alpha image
             m.transparencyMode = .aOne
             m.blendMode = .alpha
+            m.transparent.contents = nil        // no double mask
 
-            // No extra mask — avoids double‑masking artefacts.
-            m.transparent.contents = nil
-
-            // Depth: read so terrain can occlude; don’t write.
-            m.readsFromDepthBuffer = true
+            m.readsFromDepthBuffer = true       // horizon occludes
             m.writesToDepthBuffer = false
 
-            // Clamp is fine because we keep rotated UVs inside [0,1].
             m.diffuse.wrapS = .clamp
             m.diffuse.wrapT = .clamp
             m.diffuse.mipFilter = .linear
@@ -207,13 +253,11 @@ enum CloudBillboardLayer {
             materials.append(m)
         }
 
-        // Angle‑safe UV transform: for a given roll angle θ, the largest
-        // scale that *guarantees* the rotated square stays inside [0,1]
-        // is 1 / (|cosθ| + |sinθ|). We add a small margin (0.98).
+        // Angle‑safe UV inset for a given rotation (no clamp cropping).
         @inline(__always)
         func insetForAngle(_ a: Float) -> Float {
-            let denom = max(1.0, abs(cos(a)) + abs(sin(a)))   // 1 .. √2
-            let s = 0.98 / denom                               // ~0.98 .. ~0.693
+            let denom = max(1.0, abs(cos(a)) + abs(sin(a))) // 1 .. √2
+            let s = 0.98 / denom                            // ~0.98 .. 0.693
             return max(0.65, min(0.98, s))
         }
 
@@ -239,8 +283,7 @@ enum CloudBillboardLayer {
                 n.constraints = [bb]
 
                 let mat = (materials[(p.atlasIndex % max(1, materials.count))]).copy() as! SCNMaterial
-
-                let inset = insetForAngle(p.roll) // <<< the fix
+                let inset = insetForAngle(p.roll)
                 let tform = centredUVTransform(angle: p.roll, inset: inset)
                 mat.diffuse.contentsTransform = tform
                 mat.transparency = CGFloat(p.opacity)
