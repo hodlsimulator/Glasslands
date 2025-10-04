@@ -5,12 +5,13 @@
 //  Created by . . on 10/3/25.
 //
 //  Billboarded cumulus built from soft sprites.
-//  – Horizon‑biased distribution (more far, fewer near).
-//  – Variable Poisson spacing (tight near horizon, wide near zenith).
-//  – Distance acceptance (prefer farther intersections).
-//  – Angle‑safe UV transforms (no clamp cropping).
-//  – Premultiplied‑alpha diffuse; **depth writes disabled per‑instance**
-//    (prevents rectangular clipping between billboards).
+//
+//  • Horizon‑biased distribution (more far, fewer near).
+//  • Variable Poisson spacing (tight near horizon, wide near zenith).
+//  • Distance acceptance (prefer farther intersections).
+//  • Angle‑safe UV transforms (no clamp cropping).
+//  • Premultiplied‑alpha diffuse; depth writes **disabled** per instance
+//    to prevent rectangular clipping where billboards overlap.
 //
 
 @preconcurrency import SceneKit
@@ -29,9 +30,10 @@ enum CloudBillboardLayer {
 
     private struct Cluster { var puffs: [PuffSpec] }
 
+    /// Builds the billboard layer off the main thread, then delivers the node on the main actor.
     nonisolated static func makeAsync(
         radius: CGFloat,
-        minAltitudeY: Float = 0.12,
+        minAltitudeY: Float = 0.12,     // cos(elevation); 0.0 = horizon, 1.0 = straight up
         clusterCount: Int = 200,
         seed: UInt32 = 0xC10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
@@ -41,24 +43,34 @@ enum CloudBillboardLayer {
 
         Task.detached(priority: .userInitiated) {
 
-            func makeSpecs(_ n: Int, minY: Float, height: Float, farCap: Float, seed: UInt32) -> [Cluster] {
+            func makeSpecs(
+                _ n: Int, minY: Float, height: Float, farCap: Float, seed: UInt32
+            ) -> [Cluster] {
+
                 @inline(__always) func rand(_ s: inout UInt32) -> Float {
                     s = 1_664_525 &* s &+ 1_013_904_223
                     return Float(s >> 8) * (1.0 / 16_777_216.0)
                 }
+
                 var s = seed == 0 ? 1 : seed
 
                 @inline(__always) func sat(_ x: Float) -> Float { max(0, min(1, x)) }
-                @inline(__always) func biasedY(_ v: Float, minY: Float, k: Float = 3.6) -> Float {
+
+                @inline(__always)
+                func biasedY(_ v: Float, minY: Float, k: Float = 3.6) -> Float {
                     let lo = minY, hi: Float = 0.985
                     return lo + (hi - lo) * powf(v, k)
                 }
-                @inline(__always) func minSepCos(forY y: Float, minY: Float) -> Float {
+
+                @inline(__always)
+                func minSepCos(forY y: Float, minY: Float) -> Float {
                     let t = sat((y - minY) / (0.985 - minY))
                     let deg = 3.0 + (15.0 - 3.0) * t
                     return cosf(deg * .pi / 180)
                 }
-                @inline(__always) func accept(distance d: Float, height h: Float, farCap: Float) -> Float {
+
+                @inline(__always)
+                func accept(distance d: Float, height h: Float, farCap: Float) -> Float {
                     let t = sat((d - h) / (farCap - h))
                     return powf(t, 0.85) * 0.9 + 0.06
                 }
@@ -69,16 +81,21 @@ enum CloudBillboardLayer {
 
                 while rays.count < n && tries < hardCap {
                     tries += 1
+
                     let u = rand(&s)
                     let az = (u - 0.5) * (2 * .pi)
-                    let y = biasedY(rand(&s), minY: minY)
-                    let cx = sqrtf(max(0, 1 - y*y))
-                    let d = simd_normalize(simd_float3(sinf(az)*cx, y, cosf(az)*cx)) // let (no warning)
+                    let y  = biasedY(rand(&s), minY: minY)
 
-                    let t = layerHeight / max(0.001, d.y)
+                    let cx = sqrtf(max(0, 1 - y*y))
+                    let d  = simd_normalize(simd_float3(sinf(az)*cx, y, cosf(az)*cx))
+
+                    let t  = height / max(0.001, d.y)
                     if !t.isFinite || t <= 0 { continue }
+
                     let dist = min(t, farCap)
-                    if rand(&s) > accept(distance: dist, height: height, farCap: farCap) { continue }
+                    if rand(&s) > accept(distance: dist, height: height, farCap: farCap) {
+                        continue
+                    }
 
                     let cosThresh = minSepCos(forY: y, minY: minY)
                     var ok = true
@@ -95,64 +112,57 @@ enum CloudBillboardLayer {
                     if !t.isFinite || t <= 0 || t > farCap { continue }
 
                     let anchor = d * t
-                    let dist = length(anchor)
+                    let dist   = length(anchor)
+
                     let farFade: Float = dist > (0.94 * farCap)
                         ? max(0.25, 1 - (dist - 0.94 * farCap) / (0.06 * farCap))
                         : 1
 
-                    let base = (520.0 + 380.0 * rand(&s)) *
-                               (0.92 + 0.18 * sat((dist - height) / (farCap - height)))
+                    let base = (520.0 + 380.0 * rand(&s))
+                             * (0.92 + 0.18 * max(0, min(1, (dist - height) / (farCap - height))))
+
                     let thickness: Float = 260.0 + 220.0 * rand(&s)
 
                     var puffs: [PuffSpec] = []
 
-                    // Base layer
                     let baseLift: Float = 30.0
                     let baseCount = 5 + Int(rand(&s) * 3.9)
                     for _ in 0..<baseCount {
-                        let ox = (rand(&s) - 0.5) * base * 1.6
-                        let oz = (rand(&s) - 0.5) * base * 1.1
-                        let oy = -thickness * 0.18 + rand(&s) * (thickness * 0.36)
-                        let size = base * (0.72 + rand(&s) * 0.48)
-                        puffs.append(PuffSpec(
-                            pos: anchor + simd_float3(ox, baseLift + oy, oz),
-                            size: size,
-                            roll: rand(&s) * .pi * 2,
-                            atlasIndex: Int(rand(&s) * 4),
-                            opacity: farFade * (0.86 + rand(&s) * 0.14)
-                        ))
+                        let ang = (rand(&s) - 0.5) * (.pi * 0.9)
+                        let rad = base * (0.35 + 0.65 * rand(&s))
+                        let off = simd_float3(cosf(ang) * rad, 0, sinf(ang) * rad)
+                        let pos = anchor + off + simd_float3(0, baseLift, 0)
+                        let size = (240.0 + 220.0 * rand(&s)) * (0.80 + 0.35 * rand(&s))
+                        let roll = (rand(&s) - 0.5) * (.pi * 2)
+                        puffs.append(PuffSpec(pos: pos, size: size, roll: roll,
+                                              atlasIndex: Int(rand(&s) * 32.0),
+                                              opacity: farFade))
                     }
 
-                    // Middle fill
-                    let midCount = 4 + Int(rand(&s) * 4.9)
-                    for _ in 0..<midCount {
-                        let ox = (rand(&s) - 0.5) * base * 1.2
-                        let oz = (rand(&s) - 0.5) * base * 1.0
-                        let oy = rand(&s) * (thickness * 0.62)
-                        let size = base * (0.52 + rand(&s) * 0.42)
-                        puffs.append(PuffSpec(
-                            pos: anchor + simd_float3(ox, baseLift + oy, oz),
-                            size: size,
-                            roll: rand(&s) * .pi * 2,
-                            atlasIndex: Int(rand(&s) * 4),
-                            opacity: farFade
-                        ))
-                    }
-
-                    // Cap
-                    let capCount = 3 + Int(rand(&s) * 2.9)
+                    let capCount = 3 + Int(rand(&s) * 3.4)
                     for _ in 0..<capCount {
-                        let ox = (rand(&s) - 0.5) * base * 0.8
-                        let oz = (rand(&s) - 0.5) * base * 0.7
-                        let oy = thickness * 0.58 + rand(&s) * (thickness * 0.52)
-                        let size = base * (0.36 + rand(&s) * 0.33)
-                        puffs.append(PuffSpec(
-                            pos: anchor + simd_float3(ox, baseLift + oy, oz),
-                            size: size,
-                            roll: rand(&s) * .pi * 2,
-                            atlasIndex: Int(rand(&s) * 4),
-                            opacity: farFade * 0.94
-                        ))
+                        let ang = (rand(&s) - 0.5) * (.pi * 0.7)
+                        let rad = base * (0.18 + 0.52 * rand(&s))
+                        let off = simd_float3(cosf(ang) * rad, 0, sinf(ang) * rad)
+                        let pos = anchor + off + simd_float3(0, baseLift + 0.55 * thickness, 0)
+                        let size = (180.0 + 180.0 * rand(&s)) * (0.84 + 0.30 * rand(&s))
+                        let roll = (rand(&s) - 0.5) * (.pi * 2)
+                        puffs.append(PuffSpec(pos: pos, size: size, roll: roll,
+                                              atlasIndex: Int(rand(&s) * 32.0),
+                                              opacity: farFade))
+                    }
+
+                    let skirtCount = Int(rand(&s) * 2.9)
+                    for _ in 0..<skirtCount {
+                        let ang = (rand(&s) - 0.5) * (.pi * 1.1)
+                        let rad = base * (0.55 + 0.85 * rand(&s))
+                        let off = simd_float3(cosf(ang) * rad, 0, sinf(ang) * rad)
+                        let pos = anchor + off
+                        let size = (200.0 + 220.0 * rand(&s)) * (0.75 + 0.25 * rand(&s))
+                        let roll = (rand(&s) - 0.5) * (.pi * 2)
+                        puffs.append(PuffSpec(pos: pos, size: size, roll: roll,
+                                              atlasIndex: Int(rand(&s) * 32.0),
+                                              opacity: farFade * 0.92))
                     }
 
                     clusters.append(Cluster(puffs: puffs))
@@ -161,38 +171,47 @@ enum CloudBillboardLayer {
                 return clusters
             }
 
-            let layout = makeSpecs(clusterCount, minY: max(0.02, minAltitudeY),
-                                   height: layerHeight, farCap: farCap, seed: seed &+ 17)
+            // NOTE: labelled parameters here (fixes the build error).
+            let specs = makeSpecs(
+                max(8, min(600, clusterCount)),
+                minY: minAltitudeY,
+                height: layerHeight,
+                farCap: farCap,
+                seed: seed
+            )
 
-            let atlas = await CloudSpriteTexture.makeAtlas(size: 512, seed: seed &+ 33, count: 4)
-            let node = await buildLayerNode(specs: layout, atlas: atlas)
-            await completion(node)
+            let atlas = await CloudSpriteTexture.makeAtlas(size: 512,
+                                                           seed: seed ^ 0x5A5A_0314,
+                                                           count: 4)
+
+            await MainActor.run {
+                let root = buildNodes(specs: specs, atlas: atlas)
+                completion(root)
+            }
         }
     }
 
-    // MARK: Node assembly
+    // MARK: - SceneKit assembly (MainActor)
 
     @MainActor
-    private static func buildLayerNode(specs: [Cluster], atlas: CloudSpriteTexture.Atlas) -> SCNNode {
+    private static func buildNodes(specs: [Cluster], atlas: CloudSpriteTexture.Atlas) -> SCNNode {
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990
 
-        // Tiny discard to remove any residual far‑mip noise.
         let fragment = """
         #pragma transparent
         #pragma body
         if (_output.color.a < 0.004) { discard_fragment(); }
         """
 
-        // Base material template.
         let template = SCNMaterial()
         template.lightingModel = .constant
         template.transparencyMode = .aOne
         template.blendMode = .alpha
         template.transparent.contents = nil
         template.readsFromDepthBuffer = true
-        template.writesToDepthBuffer = false         // IMPORTANT: avoid rectangular clipping
+        template.writesToDepthBuffer = false
         template.diffuse.wrapS = .clamp
         template.diffuse.wrapT = .clamp
         template.diffuse.mipFilter = .linear
@@ -203,10 +222,11 @@ enum CloudBillboardLayer {
 
         @inline(__always)
         func insetForAngle(_ a: Float) -> Float {
-            let denom = max(1.0, abs(cos(a)) + abs(sin(a))) // 1 .. √2
-            let s = 0.98 / denom                            // ~0.98 .. ~0.693
+            let denom = max(1.0, abs(cos(a)) + abs(sin(a)))
+            let s = 0.98 / denom
             return max(0.65, min(0.98, s))
         }
+
         @inline(__always)
         func centredUVTransform(angle: Float, inset: Float) -> SCNMatrix4 {
             let t1 = SCNMatrix4MakeTranslation(0.5, 0.5, 0)
@@ -216,33 +236,31 @@ enum CloudBillboardLayer {
             return SCNMatrix4Mult(SCNMatrix4Mult(SCNMatrix4Mult(t1, r), s), t2)
         }
 
-        // Create nodes
         for cl in specs {
             let group = SCNNode()
+
             for p in cl.puffs {
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
-                let n = SCNNode(geometry: plane)
-                n.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
+                let node  = SCNNode(geometry: plane)
+                node.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
 
                 let bb = SCNBillboardConstraint()
                 bb.freeAxes = .all
-                n.constraints = [bb]
+                node.constraints = [bb]
 
-                // Instance material from template; re‑assert the depth flags after copy.
                 let m = template.copy() as! SCNMaterial
                 m.diffuse.contents = atlas.images[p.atlasIndex % max(1, atlas.images.count)]
                 m.readsFromDepthBuffer = true
-                m.writesToDepthBuffer = false   // <-- re‑assert (copy can reset on some OS versions)
-
+                m.writesToDepthBuffer = false
                 let inset = insetForAngle(p.roll)
                 m.diffuse.contentsTransform = centredUVTransform(angle: p.roll, inset: inset)
                 m.transparency = CGFloat(p.opacity)
-
                 plane.firstMaterial = m
-                n.castsShadow = false
 
-                group.addChildNode(n)
+                node.castsShadow = false
+                group.addChildNode(node)
             }
+
             root.addChildNode(group)
         }
 
