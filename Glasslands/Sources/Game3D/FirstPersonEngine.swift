@@ -95,9 +95,8 @@ final class FirstPersonEngine: NSObject {
     private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
         var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
 
-        // Ensure the sun is in front of the camera at spawn (handy for screenshots/debug).
+        // Keep the sun in front of the camera’s look direction.
         if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
-            // Camera “look” direction is -worldFront in SceneKit.
             let look = -pov.presentation.simdWorldFront
             if simd_dot(dir, look) < 0 { dir = -dir }
         }
@@ -112,10 +111,9 @@ final class FirstPersonEngine: NSObject {
             sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
         }
 
-        // Place the visible sun disc.
+        // Place the visible sun disc back at sky distance (not “pulled forward”).
         if let disc = sunDiscNode {
-            // Bring the disc closer so it’s unmissable; still attached to the sky anchor.
-            let dist: CGFloat = 1200   // was ~skyDistance; this guarantees it’s on-screen
+            let dist = CGFloat(cfg.skyDistance)
             disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
         }
 
@@ -335,17 +333,17 @@ final class FirstPersonEngine: NSObject {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
-        // Reset sky anchor
+        // Reset sky anchor.
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Gradient sky; disable IBL
+        // Gradient sky; no IBL.
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Clouds layer
+        // Clouds layer.
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.18,
@@ -359,8 +357,8 @@ final class FirstPersonEngine: NSObject {
             self.applyCloudSunUniforms()
         }
 
-        // Visible sun disc (round plane, emissive, always faces camera)
-        let discSize: CGFloat = 220
+        // Visible sun disc (billboarded).
+        let discSize: CGFloat = 500
         let plane = SCNPlane(width: discSize, height: discSize)
         plane.cornerRadius = discSize * 0.5
 
@@ -377,12 +375,14 @@ final class FirstPersonEngine: NSObject {
         disc.name = "SunDisc"
         disc.castsShadow = false
         disc.constraints = [SCNBillboardConstraint()]
-        disc.renderingOrder = 1000  // draw after clouds
+
+        // Draw BEFORE the clouds so they overlay it (sun sits “behind”).
+        disc.renderingOrder = -10_000
 
         skyAnchor.addChildNode(disc)
         self.sunDiscNode = disc
 
-        // Place light + disc consistently
+        // Place light + disc consistently.
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
     }
 
