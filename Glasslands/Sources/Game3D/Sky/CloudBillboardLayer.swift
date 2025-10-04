@@ -55,7 +55,7 @@ enum CloudBillboardLayer {
         Task.detached(priority: .userInitiated) {
             var s = (seed == 0) ? 1 : seed
 
-            // Pure math functions (nonisolated), safe to call off-main:
+            // Pure math, safe off-main:
             let nearPts   = CloudBillboardPlacement.poissonAnnulus(nearC,   r0: rNearHole, r1: rNearMax, minSepNear: 820, minSepFar: 980, seed: &s)
             let bridgePts = CloudBillboardPlacement.poissonAnnulus(bridgeC, r0: rBridge0, r1: rBridge1, minSepNear: 620, minSepFar: 780, seed: &s)
             let midPts    = CloudBillboardPlacement.poissonAnnulus(midC,    r0: rMid0,    r1: rMid1,    minSepNear: 520, minSepFar: 700, seed: &s)
