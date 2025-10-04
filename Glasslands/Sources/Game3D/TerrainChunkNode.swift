@@ -4,13 +4,13 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  Textured terrain using lightweight, tileable grass albedo + normal.
-//  Integer repeats per chunk ensure edges line up across chunks without any splat/blend cost.
+//  Uses prebuilt wrap-aware mipmapped MTLTextures to eliminate tiling seam lines.
 //
 
 import SceneKit
 import simd
 import UIKit
+import Metal
 
 struct TerrainChunkData: Sendable {
     let originChunkX: Int
@@ -20,7 +20,7 @@ struct TerrainChunkData: Sendable {
     let tileSize: Float
     let positions: [simd_float3]
     let normals: [simd_float3]
-    let colors: [simd_float4]   // kept for compatibility
+    let colors: [simd_float4]
     let uvs: [simd_float2]
     let indices: [UInt32]
 }
@@ -98,7 +98,7 @@ enum TerrainChunkNode {
 
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
-        // --- Textured grass material (no custom shaders) ---
+        // --- Material using seamless MTLTextures ---
         let mat = SCNMaterial()
         mat.lightingModel = .physicallyBased
         mat.metalness.contents = 0.0
@@ -109,17 +109,16 @@ enum TerrainChunkNode {
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = true
 
-        // Small, cached textures repeated per-tile.
-        let albedo = SceneKitHelpers.grassAlbedoTexture(size: 512)
-        let normal = SceneKitHelpers.grassNormalTexture(size: 512, strength: 1.6)
-        let macro  = SceneKitHelpers.grassMacroVariationTexture(size: 256)
+        // Prebuilt, wrap-aware mipmapped textures
+        let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
+        let normalMTL = SceneKitHelpers.grassNormalTextureMTL(size: 512, strength: 1.6)
+        let macroMTL  = SceneKitHelpers.grassMacroVariationTextureMTL(size: 256)
 
-        mat.diffuse.contents = albedo
-        mat.normal.contents  = normal
-        mat.multiply.contents = macro     // gentle large-scale variation to break repetition
+        mat.diffuse.contents = albedoMTL
+        mat.normal.contents  = normalMTL
+        mat.multiply.contents = macroMTL
 
-        // Seam-safe repeats: integers per chunk based on tile counts.
-        // With tileSize=16 and grassRepeatsPerTile=4 → 256 repeats across a 64-tile chunk (both axes).
+        // Repeat settings (integer repeats per chunk = seam-safe)
         let repeatsPerTile = SceneKitHelpers.grassRepeatsPerTile
         let repeatsX = CGFloat(data.tilesX) * repeatsPerTile
         let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
@@ -128,6 +127,7 @@ enum TerrainChunkNode {
         mat.normal.wrapS  = .repeat;    mat.normal.wrapT  = .repeat
         mat.multiply.wrapS = .repeat;   mat.multiply.wrapT = .repeat
 
+        // Use linear sampling; our custom mip chain is already seamless.
         mat.diffuse.minificationFilter = .linear
         mat.diffuse.magnificationFilter = .linear
         mat.diffuse.mipFilter = .linear
@@ -138,12 +138,12 @@ enum TerrainChunkNode {
         mat.multiply.magnificationFilter = .linear
         mat.multiply.mipFilter = .linear
 
-        // Scale repeats across the chunk; translation not needed because repeats are integers per chunk.
+        // Scale repeats across the chunk
         let scaleT = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
         mat.diffuse.contentsTransform = scaleT
         mat.normal.contentsTransform  = scaleT
 
-        // Macro variation: a small integer repeat count across the chunk (also seam-safe).
+        // Macro variation repeats a small integer count across the chunk
         let macroRepeats = SceneKitHelpers.grassMacroRepeatsAcrossChunk
         let macroScaleT = SCNMatrix4MakeScale(Float(macroRepeats), Float(macroRepeats), 1)
         mat.multiply.contentsTransform = macroScaleT
@@ -151,9 +151,7 @@ enum TerrainChunkNode {
         geom.materials = [mat]
         node.geometry = geom
 
-        // Receive shadows; no need to cast onto other terrain.
         node.castsShadow = false
-        // Tag for ground-height raycasts.
         node.categoryBitMask = 0x00000400
 
         return node
