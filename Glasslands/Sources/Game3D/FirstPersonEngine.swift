@@ -280,27 +280,39 @@ final class FirstPersonEngine: NSObject {
     }
 
     private func buildLighting() {
-        scene.rootNode.childNodes.filter { $0.light != nil }.forEach { $0.removeFromParentNode() }
+        // Clear existing lights.
+        scene.rootNode.childNodes
+            .filter { $0.light != nil }
+            .forEach { $0.removeFromParentNode() }
 
+        // Soft ambient so the sun actually matters.
         let amb = SCNLight()
         amb.type = .ambient
-        amb.intensity = 650
-        amb.color = UIColor(white: 0.97, alpha: 1.0)
+        amb.intensity = 450
+        amb.color = UIColor(white: 1.0, alpha: 1.0)
         let ambNode = SCNNode()
         ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
+        // Directional sun with shadows.
         let sun = SCNLight()
         sun.type = .directional
-        sun.intensity = 1300
+        sun.intensity = 1200
         sun.color = UIColor.white
-        sun.castsShadow = false
+
+        // Shadows on (trees already set castsShadow = true in VegetationPlacer3D).
+        sun.castsShadow = true
+        sun.shadowMapSize = CGSize(width: 1024, height: 1024)
+        sun.shadowSampleCount = 8
+        sun.shadowRadius = 3.0
+        sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
 
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
 
+        // Aim the sun and place the disc.
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
@@ -309,17 +321,16 @@ final class FirstPersonEngine: NSObject {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
-        // Reset the sky container.
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Background gradient only (no environment lighting).
+        // Seam-free background; no IBL.
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Clouds.
+        // Cloud billboards.
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.18,
@@ -332,38 +343,32 @@ final class FirstPersonEngine: NSObject {
                 .forEach { $0.removeFromParentNode() }
 
             self.skyAnchor.addChildNode(layer)
-
-            // Prewarm to avoid the first-frame hitch.
             if let v = self.scnView { v.prepare([layer]) { _ in } }
-
-            // Feed sun uniforms into the cloud materials.
             self.applyCloudSunUniforms()
         }
 
-        // Visible sun disc (emissive sprite).
-        let discSize: CGFloat = 256
+        // Visible sun disc (forces visibility in front of clouds).
+        let discSize: CGFloat = 256   // obvious on screen; tweak as needed
         let disc = SCNPlane(width: discSize, height: discSize)
+
         let mat = SCNMaterial()
         mat.lightingModel = .constant
         mat.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: Int(discSize))
         mat.diffuse.contents = UIColor.clear
         mat.isDoubleSided = false
-
-        // <<< This is the bit you asked about.
-        mat.readsFromDepthBuffer = false    // don’t be hidden by clouds
-        mat.writesToDepthBuffer = false     // don’t hide clouds
-        // >>>
-
+        mat.readsFromDepthBuffer = false
+        mat.writesToDepthBuffer = false
         disc.firstMaterial = mat
 
         let discNode = SCNNode(geometry: disc)
         discNode.name = "SunDisc"
-        discNode.constraints = [SCNBillboardConstraint()]
-        discNode.renderingOrder = 9999      // draw in front of clouds
+        let bc = SCNBillboardConstraint()
+        bc.freeAxes = .all                 // <- critical: face the camera from any direction
+        discNode.constraints = [bc]
+        discNode.renderingOrder = 9999     // draw on top of clouds
         skyAnchor.addChildNode(discNode)
         self.sunDiscNode = discNode
 
-        // Aim the directional light and position the disc.
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
     }
 
