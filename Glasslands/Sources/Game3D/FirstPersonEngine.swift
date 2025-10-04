@@ -66,6 +66,8 @@ final class FirstPersonEngine: NSObject {
     private var beacons = Set<SCNNode>()
     private var score = 0
     private var onScore: (Int) -> Void
+    
+    private var vegSunLightNode: SCNNode?
 
     private struct Obstacle {
         weak var node: SCNNode?
@@ -95,7 +97,6 @@ final class FirstPersonEngine: NSObject {
     private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
         var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
 
-        // Keep the sun in front of the camera’s look direction.
         if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
             let look = -pov.presentation.simdWorldFront
             if simd_dot(dir, look) < 0 { dir = -dir }
@@ -103,7 +104,6 @@ final class FirstPersonEngine: NSObject {
 
         sunDirWorld = dir
 
-        // Aim the directional light.
         if let sunLightNode {
             let origin = yawNode.presentation.position
             let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
@@ -111,7 +111,13 @@ final class FirstPersonEngine: NSObject {
             sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
         }
 
-        // Place the visible sun disc back at sky distance (not “pulled forward”).
+        if let vegSunLightNode {
+            let origin = yawNode.presentation.position
+            let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
+            vegSunLightNode.position = origin
+            vegSunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
+        }
+
         if let disc = sunDiscNode {
             let dist = CGFloat(cfg.skyDistance)
             disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
@@ -290,23 +296,20 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func buildLighting() {
-        // Clear existing lights
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Ambient fill (category mask on ambient is benign even if ignored)
         let amb = SCNLight()
         amb.type = .ambient
         amb.intensity = 400
         amb.color = UIColor(white: 1.0, alpha: 1.0)
         amb.categoryBitMask = 0x00000401
-
         let ambNode = SCNNode()
         ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
-        // Directional sun with shadows that affect terrain (0x00000400) and default (1)
+        // Main sun for terrain + default nodes (not vegetation).
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1100
@@ -318,13 +321,23 @@ final class FirstPersonEngine: NSObject {
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
         sun.automaticallyAdjustsShadowProjection = true
         sun.categoryBitMask = 0x00000401
-
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
 
-        // Aim the sun
+        // Softer directional just for vegetation (category 0x2).
+        let vegSun = SCNLight()
+        vegSun.type = .directional
+        vegSun.intensity = 650
+        vegSun.color = UIColor.white
+        vegSun.castsShadow = false
+        vegSun.categoryBitMask = 0x00000002
+        let vegNode = SCNNode()
+        vegNode.light = vegSun
+        scene.rootNode.addChildNode(vegNode)
+        self.vegSunLightNode = vegNode
+
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
