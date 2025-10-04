@@ -4,11 +4,11 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Generates a small atlas of soft cumulus **puff** sprites.
-//  • Premultiplied alpha (for .aOne blending).
-//  • Wide **radial** apron (edge‑safe rotation).
-//  • Flat base weighting + lumpy cap via FBM value noise.
-//  • Baked top‑light shading.
+//  Generates a small atlas of soft cumulus puff sprites.
+//  – Premultiplied alpha (for .aOne blending).
+//  – Wide **radial** apron (edge‑safe rotation).
+//  – Flat base weighting + lumpy cap via 3‑octave FBM value noise.
+//  – Gentle top‑light; no ring artefacts.
 //
 
 import UIKit
@@ -42,13 +42,12 @@ enum CloudSpriteTexture {
     }
 }
 
-// MARK: - Implementation
+// MARK: - Implementation -------------------------------------------------------
 
 private extension CloudSpriteTexture {
 
-    // --- tiny 2D value noise + 3‑octave FBM (fast, branchless) ---
+    // Fast 2D value noise + 3‑octave FBM (branchless).
     static func h(_ x: Float, _ y: Float) -> Float {
-        // hash to 0..1
         var n = sinf(x * 127.1 + y * 311.7) * 43758.5453
         n = n - floorf(n)
         return n
@@ -79,15 +78,15 @@ private extension CloudSpriteTexture {
         let bytesPerRow = W * 4
         var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-        // RNG for disc placements
+        // RNG for lobe placements
         var state = (seed == 0) ? 1 : seed
         @inline(__always) func urand() -> Float {
             state = 1_664_525 &* state &+ 1_013_904_223
             return Float(state >> 8) * (1.0 / 16_777_216.0)
         }
 
-        // Silhouette from overlapping ellipses (slightly wider than tall).
-        struct Ell { var cx: Float; var cy: Float; var rx: Float; var ry: Float; var a: Float }
+        // Elliptical lobes, slightly wider than tall.
+        struct Ell { var cx: Float; var cy: Float; var rx: Float; var ry: Float; var w: Float }
         var els: [Ell] = []
         let count = 9 + Int(urand() * 3) // 9–11
         for i in 0..<count {
@@ -98,55 +97,63 @@ private extension CloudSpriteTexture {
             let s  = 0.24 + urand() * 0.28
             let rx = s * (1.10 + (urand() - 0.5) * 0.25)
             let ry = s * (0.85 + (urand() - 0.5) * 0.18)
-            let a  = 0.55 + urand() * 0.45
-            els.append(Ell(cx: cx, cy: cy, rx: rx, ry: ry, a: a))
+            let w  = 0.55 + urand() * 0.45  // lobe weight
+            els.append(Ell(cx: cx, cy: cy, rx: rx, ry: ry, w: w))
         }
 
         var density = [Float](repeating: 0, count: W * H)
 
         // Radial apron (circular) – keeps samples well away from texture edge.
-        let apronInner: Float = 0.80
-        let apronOuter: Float = 0.98
+        let apronInner: Float = 0.82
+        let apronOuter: Float = 0.99
+
+        // Base line for a flatter cumulus base (UV space).
+        let baseY: Float = 0.56
 
         for y in 0..<H {
             let fy = (Float(y) + 0.5) / Float(H)
             for x in 0..<W {
                 let fx = (Float(x) + 0.5) / Float(W)
 
-                // Union of soft ellipses (lorentzian‑ish falloff).
-                var d: Float = 0
+                // Soft union of ellipses using multiplicative complement:
+                //   union = 1 - Π(1 - v_i)
+                // Each lobe uses a smoothstep on the normalised ellipse radius.
+                var keep: Float = 1.0
                 for e in els {
                     let dx = (fx - e.cx) / e.rx
                     let dy = (fy - e.cy) / e.ry
-                    let q = sqrtf(dx*dx + dy*dy)
-                    if q > 1.8 { continue }
-                    let k: Float = 1.45
-                    d += e.a * (1.0 / ((1.0 + k*q) * (1.0 + k*q)))
+                    let q  = sqrtf(dx*dx + dy*dy)
+                    // 1 inside .. 0 outside with soft edge
+                    let v  = (1.0 - smoothstep(0.82, 1.05, q)) * e.w
+                    keep *= (1.0 - v)
                 }
-                d = min(1, d)
+                var d = 1.0 - keep
+                d = min(1, max(0, d))
 
-                // Flat base weighting: damp density below the centre slightly.
-                let baseTilt = max(0, (fy - 0.54) * 2.1)   // >0 below ~0.54
-                d *= (1.0 - baseTilt * 0.22)
+                // Crisp, flat-ish base: soft mask that fades rapidly below baseY.
+                let baseMask = smoothstep(baseY - 0.02, baseY + 0.10, fy)
+                d *= baseMask
 
-                // Lumpy cap via FBM noise near the rim.
-                let nx = fx * 10.0, ny = fy * 10.0
-                let n = fbm(nx, ny)                        // 0..~1
-                let rimPush = (n - 0.5) * 0.22             // ±0.11
-                d = max(0, d + rimPush * (1 - d))          // only strong near the edge
+                // Lumpy cap via FBM noise near the rim and above the base.
+                let nx = fx * 9.0, ny = fy * 9.0
+                let n  = fbm(nx, ny)                         // 0..~1
+                let rim = (1 - d)                            // stronger near edge
+                let cap = smoothstep(0.0, 0.3, baseY - (fy - 0.02)) // only above base
+                d += (n - 0.5) * 0.20 * rim * cap
+                d = min(1, max(0, d))
 
                 // Radial apron mask.
-                let dx = (fx - 0.5) / 0.5
-                let dy = (fy - 0.5) / 0.5
-                let r = min(1.5, sqrtf(dx*dx + dy*dy))
-                let rim = smoothstep(apronInner, apronOuter, min(1.0, r))
-                let mask = 1.0 - rim
+                let rdx = (fx - 0.5) / 0.5
+                let rdy = (fy - 0.5) / 0.5
+                let rr  = min(1.5, sqrtf(rdx*rdx + rdy*rdy))
+                let rimCut = smoothstep(apronInner, apronOuter, min(1.0, rr))
+                let mask   = 1.0 - rimCut
 
                 density[y * W + x] = d * mask
             }
         }
 
-        // Top‑light shading using gradient of density.
+        // Gentle top‑light shading using gradient of density.
         let lightDir = simd_normalize(simd_float2(0.0, -1.0)) // light from above
 
         for y in 0..<H {
@@ -162,12 +169,13 @@ private extension CloudSpriteTexture {
                 let nx = (xm - xp)
                 let ny = (ym - yp)
 
-                var shade = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 1.1 + 0.88))
-                shade = shade * (0.84 + 0.16 * d)
+                // Very subtle shading to avoid ring artefacts.
+                var shade = max(0.0, min(1.0, (nx * lightDir.x + ny * lightDir.y) * 0.6 + 0.94))
+                shade = shade * (0.90 + 0.10 * d)
 
-                // Premultiplied alpha.
+                // Premultiplied alpha. Keep clouds bright; shade is gentle.
                 let a = min(1.0, d)
-                let c = min(1.0, d * shade)
+                let c = min(1.0, a * shade)
 
                 let o = i * 4
                 buf[o + 0] = UInt8(c * 255.0 + 0.5)
