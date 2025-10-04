@@ -4,7 +4,7 @@
 //
 //  Created by . . on 10/4/25.
 //
-//  Soft, emissive sun sprite used for the visible disc.
+//  Soft, emissive sun sprite used for the visible disc (EDR-enabled).
 //
 
 import UIKit
@@ -16,37 +16,40 @@ extension SceneKitHelpers {
         let size = CGSize(width: d, height: d)
         let r = min(size.width, size.height) * 0.5
 
-        UIGraphicsBeginImageContextWithOptions(size, false, 0)
-        defer { UIGraphicsEndImageContext() }
+        let fmt = UIGraphicsImageRendererFormat.default()
+        fmt.opaque = false
+        fmt.scale = 0                      // device scale
+        fmt.preferredRange = .extended     // request extended-range drawing (EDR)
+        let renderer = UIGraphicsImageRenderer(size: size, format: fmt)
 
-        guard let ctx = UIGraphicsGetCurrentContext() else { return UIImage() }
+        return renderer.image { ctx in
+            let cg = ctx.cgContext
 
-        let cs = CGColorSpaceCreateDeviceRGB()
-        let colors: [CGColor] = [
-            UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.95).cgColor,
-            UIColor(red: 1.0, green: 0.95, blue: 0.70, alpha: 0.0).cgColor
-        ]
-        let grad = CGGradient(colorsSpace: cs, colors: colors as CFArray, locations: [0, 1])!
+            // Extended sRGB colours allow components > 1.0 for hot highlights.
+            let esrgb = CGColorSpace(name: CGColorSpace.extendedSRGB) ?? CGColorSpaceCreateDeviceRGB()
 
-        ctx.drawRadialGradient(
-            grad,
-            startCenter: CGPoint(x: r, y: r),
-            startRadius: 0,
-            endCenter: CGPoint(x: r, y: r),
-            endRadius: r,
-            options: []
-        )
+            // Warm inner glow values above reference white → visible headroom on HDR panels.
+            let inner = CGColor(colorSpace: esrgb, components: [3.2, 2.9, 2.0, 1.0])!
+            let outer = CGColor(colorSpace: esrgb, components: [1.0, 0.95, 0.70, 0.0])!
 
-        // Hot core
-        let coreRect = CGRect(
-            x: size.width * 0.5 - r * 0.58,
-            y: size.height * 0.5 - r * 0.58,
-            width: r * 1.16,
-            height: r * 1.16
-        )
-        ctx.setFillColor(UIColor(white: 1.0, alpha: 1.0).cgColor)
-        ctx.fillEllipse(in: coreRect)
+            let grad = CGGradient(colorsSpace: esrgb, colors: [inner, outer] as CFArray, locations: [0.0, 1.0])!
+            cg.drawRadialGradient(
+                grad,
+                startCenter: CGPoint(x: r, y: r), startRadius: 0,
+                endCenter: CGPoint(x: r, y: r),   endRadius: r,
+                options: []
+            )
 
-        return UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
+            // Hot core ellipse with even more headroom.
+            let coreRect = CGRect(
+                x: size.width * 0.5 - r * 0.58,
+                y: size.height * 0.5 - r * 0.58,
+                width: r * 1.16,
+                height: r * 1.16
+            )
+            let hotCore = CGColor(colorSpace: esrgb, components: [4.0, 3.6, 2.2, 1.0])!
+            cg.setFillColor(hotCore)
+            cg.fillEllipse(in: coreRect)
+        }
     }
 }
