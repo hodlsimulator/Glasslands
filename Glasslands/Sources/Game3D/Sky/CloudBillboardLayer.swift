@@ -33,9 +33,9 @@ enum CloudBillboardLayer {
     ) {
         let layerY: Float = max(1100, min(Float(radius) * 0.34, 1800))
 
-        // Band radii (dense at distance; open near the zenith).
-        let rNearMax: Float = max(560, Float(radius) * 0.22)        // near annulus outer radius
-        let rNearHole: Float = rNearMax * 0.34                      // zenith hole
+        // Multi-annulus distribution with a zenith hole (matches the older look).
+        let rNearMax: Float = max(560, Float(radius) * 0.22)
+        let rNearHole: Float = rNearMax * 0.34
         let rBridge0: Float = rNearMax * 1.06
         let rBridge1: Float = rBridge0 + max(900,  Float(radius) * 0.42)
         let rMid0: Float    = rBridge1 - 100
@@ -45,7 +45,6 @@ enum CloudBillboardLayer {
         let rUltra0: Float  = rFar1 + max(700,  Float(radius) * 0.40)
         let rUltra1: Float  = rUltra0 + max(1600, Float(radius) * 0.60)
 
-        // Allocation per band.
         let N = max(30, clusterCount)
         let nearC   = max(2,  Int(Float(N) * 0.04))
         let bridgeC = max(6,  Int(Float(N) * 0.10))
@@ -56,6 +55,7 @@ enum CloudBillboardLayer {
         Task.detached(priority: .userInitiated) {
             var s = (seed == 0) ? 1 : seed
 
+            // Pure math functions (nonisolated), safe to call off-main:
             let nearPts   = CloudBillboardPlacement.poissonAnnulus(nearC,   r0: rNearHole, r1: rNearMax, minSepNear: 820, minSepFar: 980, seed: &s)
             let bridgePts = CloudBillboardPlacement.poissonAnnulus(bridgeC, r0: rBridge0, r1: rBridge1, minSepNear: 620, minSepFar: 780, seed: &s)
             let midPts    = CloudBillboardPlacement.poissonAnnulus(midC,    r0: rMid0,    r1: rMid1,    minSepNear: 520, minSepFar: 700, seed: &s)
@@ -112,7 +112,7 @@ enum CloudBillboardLayer {
             }
 
             let atlas = await CloudSpriteTexture.makeAtlas(size: 512, seed: seed, count: 6)
-            let node  = await CloudBillboardFactory.makeNode(from: specs, atlas: atlas)
+            let node  = CloudBillboardFactory.makeNode(from: specs, atlas: atlas)
             await completion(node)
         }
     }

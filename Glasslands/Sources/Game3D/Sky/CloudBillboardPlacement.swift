@@ -18,7 +18,8 @@ enum CloudBillboardPlacement {
     @inline(__always) private static func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * t }
     @inline(__always) private static func sat(_ x: Float) -> Float { max(0, min(1, x)) }
 
-    static func poissonDisk(
+    // Explicitly nonisolated (pure math) so it can be called from background tasks.
+    nonisolated(unsafe) static func poissonDisk(
         _ n: Int, radius R: Float,
         minSepNear: Float, minSepFar: Float,
         seed: inout UInt32
@@ -41,7 +42,7 @@ enum CloudBillboardPlacement {
         return pts
     }
 
-    static func poissonAnnulus(
+    nonisolated(unsafe) static func poissonAnnulus(
         _ n: Int, r0: Float, r1: Float,
         minSepNear: Float, minSepFar: Float,
         seed: inout UInt32
@@ -65,7 +66,7 @@ enum CloudBillboardPlacement {
         return pts
     }
 
-    static func buildCluster(
+    nonisolated(unsafe) static func buildCluster(
         at anchorXZ: simd_float2,
         baseY: Float,
         bandSpan: (Float, Float),
@@ -86,7 +87,6 @@ enum CloudBillboardPlacement {
         var puffs: [CloudPuffSpec] = []
         puffs.reserveCapacity(12)
 
-        // Base ring (3–5 large puffs)
         let baseCount = 3 + Int(frand(&seed) * 2.8)
         for _ in 0..<baseCount {
             let ang = frand(&seed) * (.pi * 2)
@@ -104,7 +104,6 @@ enum CloudBillboardPlacement {
             ))
         }
 
-        // Top cap (smaller, lifting the silhouette)
         let capCount = 2 + Int(frand(&seed) * 2.0)
         for _ in 0..<capCount {
             let ang = frand(&seed) * (.pi * 2)

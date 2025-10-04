@@ -19,7 +19,7 @@ enum SunBillboard {
         m.diffuse.contents = UIColor.clear
         m.emission.contents = img
         m.emission.intensity = emissionIntensity
-        m.readsFromDepthBuffer = false     // never lost behind clouds
+        m.readsFromDepthBuffer = false     // never occluded
         m.writesToDepthBuffer = false
         plane.firstMaterial = m
 
@@ -28,7 +28,7 @@ enum SunBillboard {
         n.constraints = [b]
         n.name = "SunBillboard"
         n.castsShadow = false
-        n.renderingOrder = -9_990
+        n.renderingOrder = 9_990           // draw AFTER clouds/sky
         return n
     }
 }
