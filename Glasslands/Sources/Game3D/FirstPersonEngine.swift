@@ -128,18 +128,28 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func applyCloudSunUniforms() {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
         let sunV  = SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z)
         let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
 
-        layer.enumerateChildNodes { node, _ in
-            guard let g = node.geometry else { return }
-            for m in g.materials {
-                m.setValue(sunV,  forKey: "sunDirWorld")
-                m.setValue(tintV, forKey: "sunTint")
-                m.setValue(cloudSunBacklight, forKey: "sunBacklight")
-                m.setValue(cloudHorizonFade,  forKey: "horizonFade")
+        // Billboard sprites (if present)
+        if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
+            layer.enumerateChildNodes { node, _ in
+                guard let g = node.geometry else { return }
+                for m in g.materials {
+                    m.setValue(sunV,  forKey: "sunDirWorld")
+                    m.setValue(tintV, forKey: "sunTint")
+                    m.setValue(cloudSunBacklight, forKey: "sunBacklight")
+                    m.setValue(cloudHorizonFade, forKey: "horizonFade")
+                }
             }
+        }
+
+        // Volumetric sphere (preferred)
+        if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
+           let m = sphere.geometry?.firstMaterial {
+            m.setValue(sunV,  forKey: "sunDirWorld")
+            m.setValue(tintV, forKey: "sunTint")
+            // keep density/coverage defaults unless tweaked elsewhere
         }
     }
 
@@ -346,35 +356,36 @@ final class FirstPersonEngine: NSObject {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
-        // Reset sky anchor.
+        // Reset sky anchor
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Gradient sky; no IBL.
+        // Background gradient; no IBL
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Clouds layer.
-        CloudBillboardLayer.makeAsync(
-            radius: CGFloat(cfg.skyDistance),
-            minAltitudeY: 0.18,
-            clusterCount: 100,
-            seed: 0x2025_1003
-        ) { [weak self] layer in
-            guard let self else { return }
-            self.skyAnchor.childNodes.filter { $0.name == "CumulusBillboardLayer" }.forEach { $0.removeFromParentNode() }
-            self.skyAnchor.addChildNode(layer)
-            self.scnView?.prepare([layer]) { _ in }
-            self.applyCloudSunUniforms()
-        }
+        // --- Clouds: volumetric slab on an inward-facing sphere ---
+        // Altitudes chosen for puffy mid-level cumulus look
+        let baseY: CGFloat = 1350
+        let topY:  CGFloat = 2500
+        let coverage: CGFloat = 0.55
 
-        // Visible sun disc (billboarded).
+        skyAnchor.childNodes.filter { $0.name == "VolumetricCloudLayer" || $0.name == "CumulusBillboardLayer" }
+            .forEach { $0.removeFromParentNode() }
+
+        let vol = VolumetricCloudLayer.make(radius: CGFloat(cfg.skyDistance),
+                                            baseY: baseY,
+                                            topY: topY,
+                                            coverage: coverage)
+        skyAnchor.addChildNode(vol)
+        scnView?.prepare([vol]) { _ in }
+
+        // Visible sun disc (billboarded), drawn just behind the clouds
         let discSize: CGFloat = 500
         let plane = SCNPlane(width: discSize, height: discSize)
         plane.cornerRadius = discSize * 0.5
-
         let mat = SCNMaterial()
         mat.lightingModel = .constant
         mat.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
@@ -383,19 +394,14 @@ final class FirstPersonEngine: NSObject {
         mat.writesToDepthBuffer = false
         mat.isDoubleSided = true
         plane.firstMaterial = mat
-
         let disc = SCNNode(geometry: plane)
         disc.name = "SunDisc"
         disc.castsShadow = false
         disc.constraints = [SCNBillboardConstraint()]
-
-        // Draw BEFORE the clouds so they overlay it (sun sits “behind”).
         disc.renderingOrder = -10_000
-
         skyAnchor.addChildNode(disc)
         self.sunDiscNode = disc
 
-        // Place light + disc consistently.
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
     }
 
@@ -598,5 +604,16 @@ final class FirstPersonEngine: NSObject {
             UIGraphicsEndImageContext()
             return img
         }()
+    }
+    
+    @MainActor
+    func tickVolumetricClouds(atRenderTime t: TimeInterval) {
+        guard let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
+              let m = sphere.geometry?.firstMaterial else { return }
+        m.setValue(CGFloat(t), forKey: "time")
+
+        // Gentle wind; can be hooked to recipe/biome later
+        // Units are m/s in world XZ.
+        m.setValue(SCNVector2(6.0, 2.0), forKey: "wind")
     }
 }

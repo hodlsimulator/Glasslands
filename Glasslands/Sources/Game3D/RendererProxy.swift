@@ -5,12 +5,18 @@
 //  Created by . . on 9/30/25.
 //
 
+//
+//  RendererProxy.swift
+//  Glasslands
+//
+
 import Foundation
 import SceneKit
 
 /// Receives SceneKit callbacks on the render thread, then schedules the real
 /// update on the MainActor without touching main-isolated state here.
 final class RendererProxy: NSObject, SCNSceneRendererDelegate {
+
     // We avoid storing/reading a @MainActor object here. Instead we store a
     // @Sendable tick closure built on the main thread that hops to MainActor.
     private let tick: @Sendable (TimeInterval) -> Void
@@ -21,6 +27,8 @@ final class RendererProxy: NSObject, SCNSceneRendererDelegate {
         self.tick = { [weak engine] t in
             Task { @MainActor in
                 engine?.stepUpdateMain(at: t)
+                // NEW: give volumetric clouds a stable time input
+                engine?.tickVolumetricClouds(atRenderTime: t)
             }
         }
         super.init()
