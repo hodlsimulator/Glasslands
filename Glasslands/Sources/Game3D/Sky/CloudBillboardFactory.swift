@@ -25,9 +25,13 @@ enum CloudBillboardFactory {
 
         for cl in clusters {
             let group = SCNNode()
+            group.castsShadow = false
+
+            // Draw order within a cluster: base first, crown last
             for p in cl.puffs {
                 let bb = SCNNode()
                 bb.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
+
                 let bc = SCNBillboardConstraint()
                 bc.freeAxes = .all
                 bb.constraints = [bc]
@@ -44,17 +48,18 @@ enum CloudBillboardFactory {
                 m.transparency = CGFloat(max(0, min(1, p.opacity)))
                 if let t = p.tint {
                     m.multiply.contents = UIColor(
-                        red: CGFloat(max(0, min(1, t.x))),
+                        red:   CGFloat(max(0, min(1, t.x))),
                         green: CGFloat(max(0, min(1, t.y))),
-                        blue: CGFloat(max(0, min(1, t.z))),
+                        blue:  CGFloat(max(0, min(1, t.z))),
                         alpha: 1
                     )
                 }
-                plane.firstMaterial = m
 
+                plane.firstMaterial = m
                 bb.addChildNode(sprite)
                 group.addChildNode(bb)
             }
+
             root.addChildNode(group)
         }
 

@@ -5,9 +5,9 @@
 //  Created by . . on 10/3/25.
 //
 //  Soft cumulus “puff” sprites (premultiplied alpha).
-//  Silhouette comes from a small metaball SDF. Very light vertical tint and
-//  micro-variation to avoid banding. Adds a hard transparent 2-px frame so
-//  sampling at the edges is clamp/mip safe.
+//  Silhouettes come from a small metaball SDF. Very light vertical tint and
+//  micro-variation avoid banding. A hard transparent 2-px frame keeps sampling
+//  clamp/mip safe.
 //
 
 import UIKit
@@ -22,6 +22,8 @@ enum CloudSpriteTexture {
     }
 
     /// Builds a tiny atlas of puff images (sRGB, premultiplied alpha).
+    /// Each image is unique enough to prevent obvious repetition.
+    @MainActor
     static func makeAtlas(
         size: Int = 512,
         seed: UInt32 = 0xC10D5,
@@ -30,22 +32,29 @@ enum CloudSpriteTexture {
         let n = max(1, min(8, count))
         let s = max(256, size)
 
-        let images: [UIImage] = await MainActor.run {
-            (0..<n).map { i in
-                buildImage(s, seed: seed &+ UInt32(i) &* 0x9E37_79B9)
-            }
+        var rng = seed &+ 0x9E37_79B9
+        func nextSeed() -> UInt32 { rng = rng &* 1664525 &+ 1013904223; return rng }
+
+        let images: [UIImage] = (0..<n).map { _ in
+            buildImage(s, seed: nextSeed())
         }
+
         return Atlas(images: images, size: s)
     }
 
-    // MARK: - Private
+    // MARK: - Internals
 
     @inline(__always)
-    private static func smoothstep(_ a: Float, _ b: Float, _ x: Float) -> Float {
-        if x <= a { return 0 }
-        if x >= b { return 1 }
-        let t = (x - a) / (b - a)
+    private static func smooth01(_ x: Float) -> Float {
+        let t = max(0, min(1, x))
         return t * t * (3 - 2 * t)
+    }
+
+    @inline(__always)
+    private static func smin(_ a: Float, _ b: Float, _ k: Float) -> Float {
+        // Smooth union of SDFs
+        let res = -log(exp(-k * a) + exp(-k * b)) / k
+        return res.isFinite ? res : min(a, b)
     }
 
     @inline(__always)
@@ -57,7 +66,7 @@ enum CloudSpriteTexture {
         return Float(h & 0x00FF_FFFF) * (1.0 / 16_777_216.0)
     }
 
-    // tiny value noise for micro grain
+    // Tiny value-noise for micro grain
     @inline(__always)
     private static func vnoise(_ x: Float, _ y: Float) -> Float {
         let ix = floorf(x), iy = floorf(y)
@@ -66,16 +75,9 @@ enum CloudSpriteTexture {
         let b = hash2(Int32(ix + 1), Int32(iy))
         let c = hash2(Int32(ix), Int32(iy + 1))
         let d = hash2(Int32(ix + 1), Int32(iy + 1))
-        let u = fx*fx*(3 - 2*fx)
-        let v = fy*fy*(3 - 2*fy)
+        let u = fx * fx * (3 - 2 * fx)
+        let v = fy * fy * (3 - 2 * fy)
         return a*(1-u)*(1-v) + b*u*(1-v) + c*(1-u)*v + d*u*v
-    }
-
-    @inline(__always)
-    private static func smin(_ a: Float, _ b: Float, _ k: Float) -> Float {
-        // smooth union
-        let res = -log(exp(-k*a) + exp(-k*b)) / k
-        return res.isFinite ? res : min(a, b)
     }
 
     @MainActor
@@ -84,8 +86,8 @@ enum CloudSpriteTexture {
         let stride = W * 4
         var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-        // simple LCG
-        var state = seed == 0 ? 1 : Int(seed)
+        // Simple LCG
+        var state = (seed == 0) ? 1 : Int(seed)
         @inline(__always) func frand() -> Float {
             state = 1664525 &* state &+ 1013904223
             return Float((state >> 8) & 0xFFFFFF) * (1.0 / 16_777_216.0)
@@ -94,40 +96,29 @@ enum CloudSpriteTexture {
         struct Ball { var c: simd_float2; var r: Float }
         var balls: [Ball] = []
 
-        // Core + lobes → cauliflower silhouette
+        // Core + lobes → classic cauliflower silhouette
         let coreR: Float = 0.30 + frand() * 0.05
         balls.append(Ball(c: simd_float2(0.50, 0.53 + frand()*0.03), r: coreR))
 
-        let capN = 4 + Int(frand() * 3) // 4–6
+        let capN = 4 + Int(frand() * 3)   // 4–6 small puffs on top
         for _ in 0..<capN {
-            let ang = (Float.pi * 0.85) * (frand() - 0.5)   // prefer top half
-            let rr: Float = coreR * (0.62 + frand() * 0.20)
-            let off: Float = coreR * (0.70 + frand() * 0.28)
-            let cx = 0.50 + cosf(ang) * off * 0.85
-            let cy = 0.52 - sinf(ang) * off
-            balls.append(Ball(c: simd_float2(cx, cy), r: rr))
+            let a = (frand() * 0.9 - 0.45) * .pi
+            let d: Float = 0.20 + frand() * 0.20
+            let r: Float = coreR * (0.70 + frand() * 0.25)
+            let c = simd_float2(0.50 + cosf(a) * d, 0.52 + sinf(a) * (d * 0.82) + 0.03)
+            balls.append(Ball(c: c, r: r))
         }
 
-        let baseN = 3 + Int(frand() * 3) // 3–5
-        for i in 0..<baseN {
-            let t = (Float(i) + frand()*0.25) / Float(max(1, baseN - 1)) - 0.5
-            let cx = 0.50 + t * (0.60 + frand() * 0.10)
-            let cy = 0.58 + frand() * 0.04
-            let rr: Float = coreR * (0.72 + frand() * 0.20)
-            balls.append(Ball(c: simd_float2(cx, cy), r: rr))
+        let skirtN = 3 + Int(frand() * 3) // 3–5 base puffs
+        for _ in 0..<skirtN {
+            let x = 0.38 + frand() * 0.24
+            let y = 0.46 + frand() * 0.05
+            let r: Float = coreR * (0.78 + frand() * 0.30)
+            balls.append(Ball(c: simd_float2(x, y), r: r))
         }
 
-        let microN = 3 + Int(frand() * 3) // 3–5 tiny edge seeds
-        for _ in 0..<microN {
-            let ang = Float.random(in: 0...(2*Float.pi))
-            let cx = 0.50 + cosf(ang) * (coreR * (0.90 + frand()*0.28))
-            let cy = 0.52 + sinf(ang) * (coreR * (0.90 + frand()*0.28))
-            let rr: Float = coreR * (0.22 + frand() * 0.12)
-            balls.append(Ball(c: simd_float2(cx, cy), r: rr))
-        }
-
-        // signed distance to union of balls
-        let kBlend: Float = 12.0
+        // SDF parameters
+        let kBlend: Float = 8.0
         @inline(__always)
         func sdf(_ p: simd_float2) -> Float {
             var d: Float = .greatestFiniteMagnitude
@@ -138,41 +129,50 @@ enum CloudSpriteTexture {
             return d
         }
 
-        let edgeSoft: Float = 0.055 + 0.015 * frand()  // falloff thickness
-        let topBias:  Float = 0.02 + 0.02 * frand()    // slight brightening top
+        let edgeSoft: Float = 0.055 + 0.015 * frand()   // falloff thickness
+        let topBias: Float  = 0.02  + 0.02  * frand()   // slight brightening at top
 
         for y in 0..<H {
-            let fy = (Float(y) + 0.5) / Float(H)
+            let v = Float(y) / Float(H - 1)
             for x in 0..<W {
-                let fx = (Float(x) + 0.5) / Float(W)
-                var a = 1.0 - smoothstep(0.0, edgeSoft, sdf(simd_float2(fx, fy)))
-                a = max(0, min(1, a))
+                let u = Float(x) / Float(W - 1)
 
-                // gentle vertical tint (brighter at top), plus micro noise
-                let vert = 1.0 + topBias * (0.5 - (fy - 0.5))
-                let n = (vnoise(fx * 32, fy * 32) - 0.5) * 0.02
-
-                // bright, almost flat shade; premultiply
-                let shade = min(1.0, 0.97 * vert + n)
-                let c = min(1.0, a * shade)
-
-                let o = (y * W + x) * 4
-                buf[o + 0] = UInt8(c * 255.0 + 0.5)
-                buf[o + 1] = UInt8(c * 255.0 + 0.5)
-                buf[o + 2] = UInt8(c * 255.0 + 0.5)
-                buf[o + 3] = UInt8(a * 255.0 + 0.5)
-            }
-        }
-
-        // hard transparent frame (2px) for clamp/mip safety
-        if W >= 4 && H >= 4 {
-            for y in 0..<H {
-                for x in 0..<W {
-                    if x < 2 || y < 2 || x >= W - 2 || y >= H - 2 {
-                        let o = (y * W + x) * 4
-                        buf[o + 0] = 0; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = 0
-                    }
+                // Frame: keep a 2-px fully transparent border for safe sampling
+                if x < 2 || y < 2 || x >= W - 2 || y >= H - 2 {
+                    let o = (y * W + x) * 4
+                    buf[o + 0] = 0; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = 0
+                    continue
                 }
+
+                let p = simd_float2(u, v)
+                let d = sdf(p)      // < 0 inside, > 0 outside
+
+                // Soft edge: feather alpha outward
+                var a = smooth01((-d) / edgeSoft)
+
+                // Subtle vertical shading so the top feels sun-kissed
+                let ny = smooth01((0.55 - v) * 1.6)     // brighter toward the top
+                let shade = 1.0 + topBias * ny
+
+                // Micro grain to avoid flat, sterile white
+                let g = 0.96 + 0.04 * vnoise(u * 48.0, v * 48.0)
+
+                // Base colour is clean white, with tiny warmth baked by material later
+                var r = 1.0 * shade * g
+                var gch = 1.0 * shade * g
+                var b = 1.0 * shade * g
+
+                // Clamp
+                r = min(1, max(0, r))
+                gch = min(1, max(0, gch))
+                b = min(1, max(0, b))
+
+                // Premultiplied alpha
+                let o = (y * W + x) * 4
+                buf[o + 0] = UInt8(r * a * 255.0 + 0.5)
+                buf[o + 1] = UInt8(gch * a * 255.0 + 0.5)
+                buf[o + 2] = UInt8(b * a * 255.0 + 0.5)
+                buf[o + 3] = UInt8(a * 255.0 + 0.5)
             }
         }
 
@@ -180,11 +180,17 @@ enum CloudSpriteTexture {
         let provider = CGDataProvider(data: data)!
         let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let cg = CGImage(
-            width: W, height: H,
-            bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: stride,
+            width: W,
+            height: H,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: stride,
             space: cs,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
         )!
         return UIImage(cgImage: cg, scale: 1, orientation: .up)
     }
