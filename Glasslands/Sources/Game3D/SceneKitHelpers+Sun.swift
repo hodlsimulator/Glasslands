@@ -4,7 +4,7 @@
 //
 //  Created by . . on 10/4/25.
 //
-//  Provides a soft, emissive sun sprite image used by the sky.
+//  Soft, emissive sun sprite used for the visible disc.
 //
 
 import UIKit
@@ -16,7 +16,7 @@ extension SceneKitHelpers {
         let size = CGSize(width: d, height: d)
         let r = min(size.width, size.height) * 0.5
 
-        UIGraphicsBeginImageContextWithOptions(size, false, 1)
+        UIGraphicsBeginImageContextWithOptions(size, false, 0)
         defer { UIGraphicsEndImageContext() }
 
         guard let ctx = UIGraphicsGetCurrentContext() else { return UIImage() }
@@ -37,6 +37,7 @@ extension SceneKitHelpers {
             options: []
         )
 
+        // Hot core
         let coreRect = CGRect(
             x: size.width * 0.5 - r * 0.58,
             y: size.height * 0.5 - r * 0.58,
