@@ -10,10 +10,10 @@ import SceneKit
 import simd
 
 struct FirstPersonLookController {
-    private(set) var yaw: Float = 0      // +Y radians
-    private(set) var pitch: Float = 0    // +X radians
-    var sensitivity: Float               // radians per UIKit point
-    var maxPitch: Float                  // clamp magnitude
+    private(set) var yaw: Float = 0       // +Y radians
+    private(set) var pitch: Float = 0     // +X radians
+    var sensitivity: Float                // radians per UIKit point
+    var maxPitch: Float                   // clamp magnitude
 
     init(sensitivity: Float, maxPitch: Float) {
         self.sensitivity = max(0.0001, sensitivity)
@@ -21,9 +21,8 @@ struct FirstPersonLookController {
     }
 
     mutating func applyDelta(points: SIMD2<Float>) {
-        // Swipe right -> turn right
+        // Swipe right → turn right; swipe up → look up
         yaw   -= points.x * sensitivity
-        // Thumb up (dy < 0) -> look up
         pitch -= points.y * sensitivity
 
         let m = maxPitch

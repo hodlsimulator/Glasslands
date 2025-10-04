@@ -35,11 +35,11 @@ final class FirstPersonEngine {
         scnView?.isPlaying = !paused
     }
 
-    func setMoveInput(_ vec: SIMD2<Float>) { // MoveStickView
+    func setMoveInput(_ vec: SIMD2<Float>) {   // MoveStickView
         moveAxis = vec
     }
 
-    func applyLookDelta(points delta: SIMD2<Float>) { // LookPadView
+    func applyLookDelta(points delta: SIMD2<Float>) {   // LookPadView
         look.applyDelta(points: delta)
         look.apply(to: playerNode, pitchNode: pitchNode)
     }
@@ -50,7 +50,7 @@ final class FirstPersonEngine {
         noise = NoiseFields(recipe: newRecipe)
 
         makeLighting()
-        makeSkyBillboards()       // ← billboard impostors (Sky/*), not the dome
+        makeSkyBillboards()         // billboard impostors (in Sky/), not dome
 
         terrainRoot = SCNNode()
         terrainRoot.name = "TerrainRoot"
@@ -63,17 +63,17 @@ final class FirstPersonEngine {
             recipe: newRecipe,
             root: terrainRoot,
             renderer: scnView ?? sceneRendererFallback,
-            beaconSink: { [weak self] nodes in
+            beaconSink: { [weak self] (nodes: [SCNNode]) in
                 guard let self, let first = nodes.first else { return }
                 let k = self.keyFor(position: first.worldPosition)
                 self.beacons[k, default: []].append(contentsOf: nodes)
             },
-            obstacleSink: { [weak self] ci, nodes in
+            obstacleSink: { [weak self] (ci: IVec2, nodes: [SCNNode]) in
                 guard let self else { return }
                 let k = ChunkKey(x: ci.x, y: ci.y)
                 self.obstacles.setObstacles(for: k, from: nodes)
             },
-            onChunkRemoved: { [weak self] ci in
+            onChunkRemoved: { [weak self] (ci: IVec2) in
                 guard let self else { return }
                 let k = ChunkKey(x: ci.x, y: ci.y)
                 self.obstacles.removeChunk(k)
@@ -92,8 +92,8 @@ final class FirstPersonEngine {
         updateTransforms()
 
         // Build a 3×3 immediately so there are no visible “voids”.
-        streamer.warmupInitial(at: SIMD3(playerPos.x, 0, playerPos.z), radius: 1)
-        streamer.updateVisible(center: SIMD3(playerPos.x, 0, playerPos.z))
+        streamer.warmupInitial(at: SIMD3<Float>(playerPos.x, 0.0, playerPos.z), radius: 1)
+        streamer.updateVisible(center: SIMD3<Float>(playerPos.x, 0.0, playerPos.z))
     }
 
     func snapshot() -> UIImage? { scnView?.snapshot() }
@@ -115,14 +115,14 @@ final class FirstPersonEngine {
             x: playerPos.x, z: playerPos.z, cfg: config, noise: noise
         )
 
-        let groundY = { [noise, cfg = config] (x: Float, z: Float) -> Float in
+        let groundY: (Float, Float) -> Float = { [noise, cfg = config] (x, z) in
             TerrainMath.heightWorld(x: x, z: z, cfg: cfg, noise: noise)
         }
 
         let near = obstacles.nearby(to: playerPos, within: 4.0)
 
         playerPos = mover.step(
-            from: SIMD3(playerPos.x, gy + config.eyeHeight, playerPos.z),
+            from: SIMD3<Float>(playerPos.x, gy + config.eyeHeight, playerPos.z),
             yaw: lookYaw,
             moveAxis: moveAxis,
             dt: dt,
@@ -134,7 +134,7 @@ final class FirstPersonEngine {
         updateTransforms()
         updateSunBillboardPosition()
 
-        streamer?.updateVisible(center: SIMD3(playerPos.x, 0, playerPos.z))
+        streamer?.updateVisible(center: SIMD3<Float>(playerPos.x, 0.0, playerPos.z))
         tallyBeacons()
     }
 
@@ -156,7 +156,7 @@ final class FirstPersonEngine {
         cam.zNear = 0.01
         cam.zFar = 2000
 
-        // HDR + bloom for the sun disc
+        // HDR + bloom so the sun disc pops
         cam.wantsHDR = true
         cam.wantsExposureAdaptation = true
         cam.minimumExposure = -2.0
@@ -175,8 +175,8 @@ final class FirstPersonEngine {
     }()
 
     private var terrainRoot = SCNNode()
-    private var skyNode: SCNNode?              // billboard cloud layer (Sky/)
-    private var sunBillboard: SCNNode?         // HDR sun sprite (Sky/)
+    private var skyNode: SCNNode?          // billboard cloud layer (Sky/)
+    private var sunBillboard: SCNNode?     // HDR sun sprite (Sky/)
 
     private var streamer: ChunkStreamer3D?
 
@@ -193,18 +193,18 @@ final class FirstPersonEngine {
         seed64: 424242
     ))
 
-    private var config = Config()
+    private var config = FirstPersonEngine.Config()
 
     private var moveAxis = SIMD2<Float>(repeating: 0)
 
     private var look = FirstPersonLookController(
-        sensitivity: Config().lookSensitivityRadPerPoint,
-        maxPitch: Config().maxPitchRadians
+        sensitivity: FirstPersonEngine.Config().lookSensitivityRadPerPoint,
+        maxPitch: FirstPersonEngine.Config().maxPitchRadians
     )
 
     private var mover = FirstPersonMover(
-        speed: Config().moveSpeed,
-        radius: Config().playerRadius
+        speed: FirstPersonEngine.Config().moveSpeed,
+        radius: FirstPersonEngine.Config().playerRadius
     )
 
     private var isPaused = false
@@ -216,7 +216,7 @@ final class FirstPersonEngine {
     private var playerPos = SIMD3<Float>(0, 0, 0)
 
     private var beacons: [ChunkKey: [SCNNode]] = [:]
-    private var obstacles = FirstPersonObstacleField(cfg: Config())
+    private var obstacles = FirstPersonObstacleField(cfg: FirstPersonEngine.Config())
 
     private var lookYaw: Float { look.yaw }
 
@@ -230,11 +230,11 @@ final class FirstPersonEngine {
         v.rendersContinuously = true
         v.backgroundColor = .black
 
-        // IBL so PBR/matte materials aren’t black on the unlit side.
+        // Gentle IBL so matte/PBR materials aren’t black on the unlit side.
         let ibl = SceneKitHelpers.skyEquirectGradient(width: 512, height: 256)
         scene.lightingEnvironment.contents = ibl
         scene.lightingEnvironment.intensity = 1.0
-        // Also use as background so gaps never look like voids.
+        // Also as background so gaps never look like “void black”.
         scene.background.contents = ibl
     }
 
@@ -256,12 +256,11 @@ final class FirstPersonEngine {
     // MARK: Lighting + HDR sun
 
     private func makeLighting() {
-        // Directional sunlight kept moderate; HDR look comes from the sun sprite.
+        // Directional sunlight kept moderate; HDR highlight comes from sun sprite.
         let light = SCNLight()
         light.type = .directional
         light.color = UIColor.white
         light.intensity = 1400
-
         light.castsShadow = true
         light.shadowMode = .deferred
         light.shadowRadius = 2.0
@@ -277,25 +276,27 @@ final class FirstPersonEngine {
         sun.eulerAngles = SCNVector3(el, az, 0)
         scene.rootNode.addChildNode(sun)
 
-        // Soft ambient fill so backsides aren’t black.
+        // Ambient fill to avoid black backsides.
         let amb = SCNLight()
         amb.type = .ambient
         amb.intensity = 400
         amb.color = UIColor(white: 1.0, alpha: 1.0)
-        scene.rootNode.addChildNode(SCNNode()).light = amb
+        let ambNode = SCNNode()
+        ambNode.light = amb
+        scene.rootNode.addChildNode(ambNode)
 
         // Visible HDR sun disc (billboard sprite from Sky/)
         sunBillboard?.removeFromParentNode()
         let sprite = SunBillboard.makeNode(
             diameterWorld: 24,
-            emissionIntensity: 10.0 // ensures bloom
+            emissionIntensity: 10.0   // ensures bloom
         )
         scene.rootNode.addChildNode(sprite)
         sunBillboard = sprite
         updateSunBillboardPosition()
     }
 
-    // MARK: Sky (billboard impostors; all logic in Sky/)
+    // MARK: Sky (billboard impostors; all logic lives in Sky/)
 
     private func makeSkyBillboards() {
         skyNode?.removeFromParentNode()
@@ -306,10 +307,10 @@ final class FirstPersonEngine {
             minAltitudeY: 0.12,
             clusterCount: 140,
             seed: 0xC10D5
-        ) { [weak self] node in
+        ) { [weak self] (node: SCNNode) in
             guard let self else { return }
 
-            // Pass sun direction to the cloud materials for backlight.
+            // Optional: pass sun direction for subtle backlight in materials.
             let d = self.sunDirection()
             node.enumerateChildNodes { c, _ in
                 if let g = c.geometry, let m = g.firstMaterial {
@@ -399,40 +400,8 @@ final class FirstPersonEngine {
             playerPos.y + d.y * dist,
             playerPos.z + d.z * dist
         )
-        sunBillboard.position = SCNVector3(pos)
+        sunBillboard.position = SCNVector3(pos.x, pos.y, pos.z)
     }
 
     @inline(__always) private func deg2rad(_ v: Float) -> Float { v * .pi / 180 }
 }
-
-// MARK: - Tuning
-
-extension FirstPersonEngine {
-    struct Config {
-        // World grid
-        var tileSize: Float = 1.5
-        var tilesX: Int = 24
-        var tilesZ: Int = 24
-        var heightScale: Float = 3.8
-
-        // Streaming
-        var preloadRadius: Int = 2
-        var tasksPerFrame: Int = 2
-
-        // Camera/player
-        var eyeHeight: Float = 1.62
-        var playerRadius: Float = 0.22
-        var moveSpeed: Float = 3.2
-        var lookSensitivityRadPerPoint: Float = 0.0030
-        var maxPitchRadians: Float = .pi * 0.42
-
-        // Sky/sun
-        var skyTextureWidth: Int = 1024
-        var skyTextureHeight: Int = 512
-        var skyCoverage: Float = 0.34
-        var skyEdgeSoftness: Float = 0.22
-        var sunAzimuthDeg: Float = 30
-        var sunElevationDeg: Float = 55
-    }
-}
- 
