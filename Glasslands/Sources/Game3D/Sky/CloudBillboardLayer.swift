@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Plane-based cumulus: billboard sprites grouped into clusters on a horizontal
-//  layer. Uses premultiplied-alpha sprites with a proper transparency mask.
+//  Billboarded cumulus built from soft sprites. Uses premultiplied alpha,
+//  radial apron sprites, and a tiny fragment cutoff to avoid any halos.
 //
 
 @preconcurrency import SceneKit
@@ -27,7 +27,7 @@ enum CloudBillboardLayer {
     nonisolated static func makeAsync(
         radius: CGFloat,
         minAltitudeY: Float = 0.14,
-        clusterCount: Int = 230,
+        clusterCount: Int = 210,
         seed: UInt32 = 0xC10D5,
         completion: @MainActor @escaping (SCNNode) -> Void
     ) {
@@ -35,7 +35,7 @@ enum CloudBillboardLayer {
         let farCap: Float = max(layerHeight + 2000, Float(radius) * 2.6)
 
         Task.detached(priority: .userInitiated) {
-            func specs(
+            func makeSpecs(
                 _ n: Int,
                 minY: Float,
                 height: Float,
@@ -49,6 +49,7 @@ enum CloudBillboardLayer {
 
                 var s = seed == 0 ? 1 : seed
 
+                // Hemisphere directions above horizon; bias toward horizon.
                 @inline(__always)
                 func sampleDir(_ s: inout UInt32, minY: Float) -> simd_float3 {
                     let u = rand(&s), v = rand(&s)
@@ -59,6 +60,7 @@ enum CloudBillboardLayer {
                     return simd_normalize(simd_float3(sinf(az) * cx, y, cosf(az) * cx))
                 }
 
+                // Poisson‑ish angular spacing between cluster centres.
                 let minSepDeg: Float = 6.0
                 let minCos = cosf(minSepDeg * .pi / 180)
                 var rays: [simd_float3] = []
@@ -90,6 +92,7 @@ enum CloudBillboardLayer {
 
                     var puffs: [PuffSpec] = []
 
+                    // Base
                     let baseLift: Float = 40.0
                     let baseCount = 4 + Int(rand(&s) * 3.9)
                     for _ in 0..<baseCount {
@@ -102,10 +105,11 @@ enum CloudBillboardLayer {
                             size: size,
                             roll: rand(&s) * .pi * 2,
                             atlasIndex: Int(rand(&s) * 4),
-                            opacity: farFade * (0.85 + rand(&s) * 0.15)
+                            opacity: farFade * (0.88 + rand(&s) * 0.12)
                         ))
                     }
 
+                    // Fill
                     let midCount = 4 + Int(rand(&s) * 4.9)
                     for _ in 0..<midCount {
                         let ox = (rand(&s) - 0.5) * base * 1.1
@@ -121,6 +125,7 @@ enum CloudBillboardLayer {
                         ))
                     }
 
+                    // Cap
                     let capCount = 2 + Int(rand(&s) * 3.0)
                     for _ in 0..<capCount {
                         let ox = (rand(&s) - 0.5) * base * 0.7
@@ -132,7 +137,7 @@ enum CloudBillboardLayer {
                             size: size,
                             roll: rand(&s) * .pi * 2,
                             atlasIndex: Int(rand(&s) * 4),
-                            opacity: farFade * 0.92
+                            opacity: farFade * 0.94
                         ))
                     }
 
@@ -142,7 +147,7 @@ enum CloudBillboardLayer {
                 return clusters
             }
 
-            let layout = specs(
+            let layout = makeSpecs(
                 clusterCount,
                 minY: max(0.0, minAltitudeY),
                 height: layerHeight,
@@ -162,37 +167,47 @@ enum CloudBillboardLayer {
         root.name = "CumulusBillboardLayer"
         root.renderingOrder = -9_990
 
+        // Shared material variants (premultiplied alpha).
         var materials: [SCNMaterial] = []
         materials.reserveCapacity(atlas.images.count)
+
+        // Shader modifier: drop fragments that are effectively fully transparent.
+        // Prevents any faint “square” from far mip levels.
+        let cutoff: Float = 0.004
+        let fragment = """
+        #pragma transparent
+        #pragma body
+        if (_output.color.a < \(cutoff)) { discard_fragment(); }
+        """
 
         for img in atlas.images {
             let m = SCNMaterial()
             m.lightingModel = .constant
-
-            // Key: drive colour with diffuse, and transparency with the same image.
             m.diffuse.contents = img
             m.transparent.contents = img
 
-            // Premultiplied-alpha blending; respect per-pixel transparency.
-            m.transparencyMode = .aOne
+            m.transparencyMode = .aOne   // premultiplied
             m.blendMode = .alpha
 
-            // No emission; avoids brightening the full quad.
-            // No depth writes; no reads to keep ordering stable in the sky layer.
-            m.writesToDepthBuffer = false
-            m.readsFromDepthBuffer = false
             m.isDoubleSided = false
+            m.readsFromDepthBuffer = true     // terrain/horizon can occlude
+            m.writesToDepthBuffer = false
 
             m.diffuse.wrapS = .clamp;      m.diffuse.wrapT = .clamp
             m.transparent.wrapS = .clamp;  m.transparent.wrapT = .clamp
             m.diffuse.mipFilter = .linear
             m.transparent.mipFilter = .linear
+            m.diffuse.minificationFilter = .linear
+            m.transparent.minificationFilter = .linear
+            m.diffuse.magnificationFilter = .linear
+            m.transparent.magnificationFilter = .linear
 
+            m.shaderModifiers = [.fragment: fragment]
             materials.append(m)
         }
 
         @inline(__always)
-        func centredUVTransform(angle: Float, inset: Float = 0.80) -> SCNMatrix4 {
+        func centredUVTransform(angle: Float, inset: Float = 0.78) -> SCNMatrix4 {
             let t1 = SCNMatrix4MakeTranslation(0.5, 0.5, 0)
             let r  = SCNMatrix4MakeRotation(angle, 0, 0, 1)
             let s  = SCNMatrix4MakeScale(inset, inset, 1)
@@ -213,7 +228,7 @@ enum CloudBillboardLayer {
                 n.constraints = [bb]
 
                 let mat = (materials[(p.atlasIndex % max(1, materials.count))]).copy() as! SCNMaterial
-                let tform = centredUVTransform(angle: p.roll, inset: 0.80)
+                let tform = centredUVTransform(angle: p.roll, inset: 0.78)
                 mat.diffuse.contentsTransform = tform
                 mat.transparent.contentsTransform = tform
                 mat.transparency = CGFloat(p.opacity)
