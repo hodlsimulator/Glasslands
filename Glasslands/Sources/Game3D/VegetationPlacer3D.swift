@@ -73,16 +73,13 @@ struct VegetationPlacer3D {
 
     // MARK: - Varied low-poly conifer (no round spheres)
 
-    private static func makeTreeNode(palette: [UIColor],
-                                     rng: GKMersenneTwisterRandomSource) -> (SCNNode, Float, CGFloat) {
+    private static func makeTreeNode(palette: [UIColor], rng: GKMersenneTwisterRandomSource) -> (SCNNode, Float, CGFloat) {
         var r = RandomAdaptor(rng)
 
-        // Keep shapes related (subtle changes), avoid drastic silhouette changes
         let tall = rng.nextUniform() > 0.35
         let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r) : CGFloat.random(in: 0.75...1.15, using: &r)
         let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r) : CGFloat.random(in: 0.05...0.08, using: &r)
 
-        // Canopy as truncated cone; optionally stacked two-piece variant for variety
         let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r) : CGFloat.random(in: 1.10...1.60, using: &r)
         let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r) : CGFloat.random(in: 0.45...0.70, using: &r)
         let canopyTopR1: CGFloat = CGFloat.random(in: 0.06...0.16, using: &r)
@@ -94,18 +91,15 @@ struct VegetationPlacer3D {
 
         let barkBase = palette.indices.contains(4) ? palette[4] : .brown
         let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
-
         let bark = barkBase
             .adjustingHue(by: CGFloat.random(in: -0.02...0.02, using: &r),
                           satBy: CGFloat.random(in: -0.08...0.08, using: &r),
                           briBy: CGFloat.random(in: -0.05...0.05, using: &r))
-
         let leaf = leafBase
             .adjustingHue(by: CGFloat.random(in: -0.03...0.03, using: &r),
                           satBy: CGFloat.random(in: -0.10...0.10, using: &r),
                           briBy: CGFloat.random(in: -0.06...0.06, using: &r))
 
-        // Trunk
         let trunk = SCNCylinder(radius: trunkR, height: trunkH)
         let trunkMat = SCNMaterial()
         trunkMat.lightingModel = .physicallyBased
@@ -114,7 +108,6 @@ struct VegetationPlacer3D {
         trunkMat.metalness.contents = 0.0
         trunk.materials = [trunkMat]
 
-        // Canopy piece 1
         let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
         canopy1.radialSegmentCount = 12
         let leafMat = SCNMaterial()
@@ -122,42 +115,37 @@ struct VegetationPlacer3D {
         leafMat.diffuse.contents = leaf
         leafMat.roughness.contents = 0.75
         leafMat.metalness.contents = 0.0
-        canopy1.materials = [leafMat]
 
-        // Optional canopy piece 2
-        let canopy2: SCNGeometry? = twoStage ? {
-            let g = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
-            g.radialSegmentCount = 10
-            g.materials = [leafMat]
-            return g
-        }() : nil
-
-        // Build node
         let node = SCNNode()
 
         let trunkNode = SCNNode(geometry: trunk)
         trunkNode.position = SCNVector3(0, trunkH / 2.0, 0)
+        trunkNode.castsShadow = true
+        node.addChildNode(trunkNode)
 
         let canopyNode1 = SCNNode(geometry: canopy1)
         canopyNode1.position = SCNVector3(0, trunkH + canopyH1 * 0.5 - 0.02, 0)
-
-        node.addChildNode(trunkNode)
+        canopyNode1.castsShadow = true
+        canopyNode1.geometry?.materials = [leafMat]
         node.addChildNode(canopyNode1)
 
-        if let g2 = canopy2 {
+        if twoStage {
+            let g2 = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
+            g2.radialSegmentCount = 10
+            g2.materials = [leafMat]
             let cn2 = SCNNode(geometry: g2)
             cn2.position = SCNVector3(0, trunkH + canopyH1 + canopyH2 * 0.45, 0)
+            cn2.castsShadow = true
             node.addChildNode(cn2)
         }
 
-        // Gentle natural imperfections
         node.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &r)
         node.eulerAngles.z = Float.random(in: -0.04...0.04, using: &r)
 
         let treeHeight = trunkH + canopyH1 + canopyH2
         let hitRadius = Float(max(canopyR1 * 0.65, trunkR * 1.6))
         return (node, hitRadius, treeHeight)
-    }
+    } 
 
     private static func applyLOD(to tree: SCNNode) {
         let far: CGFloat = 120

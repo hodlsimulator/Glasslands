@@ -92,37 +92,6 @@ final class FirstPersonEngine: NSObject {
     }
 
     @MainActor
-    private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
-        var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
-
-        // Ensure the sun is in front of the camera at spawn (handy for screenshots/debug).
-        if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
-            // Camera “look” direction is -worldFront in SceneKit.
-            let look = -pov.presentation.simdWorldFront
-            if simd_dot(dir, look) < 0 { dir = -dir }
-        }
-
-        sunDirWorld = dir
-
-        // Aim the directional light.
-        if let sunLightNode {
-            let origin = yawNode.presentation.position
-            let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
-            sunLightNode.position = origin
-            sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
-        }
-
-        // Place the visible sun disc.
-        if let disc = sunDiscNode {
-            // Bring the disc closer so it’s unmissable; still attached to the sky anchor.
-            let dist: CGFloat = 1200   // was ~skyDistance; this guarantees it’s on-screen
-            disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
-        }
-
-        applyCloudSunUniforms()
-    }
-
-    @MainActor
     private func applyCloudSunUniforms() {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
         let sunV  = SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z)
@@ -292,41 +261,37 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func buildLighting() {
-        // Clear existing lights
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Ambient fill (category mask on ambient is benign even if ignored)
         let amb = SCNLight()
         amb.type = .ambient
-        amb.intensity = 400
+        amb.intensity = 250
         amb.color = UIColor(white: 1.0, alpha: 1.0)
-        amb.categoryBitMask = 0x00000401
+        amb.categoryBitMask = 0x00000401 // default(1) | terrain(0x400)
 
         let ambNode = SCNNode()
         ambNode.light = amb
         scene.rootNode.addChildNode(ambNode)
 
-        // Directional sun with shadows that affect terrain (0x00000400) and default (1)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1100
         sun.color = UIColor.white
         sun.castsShadow = true
-        sun.shadowMapSize = CGSize(width: 512, height: 512)
+        sun.shadowMapSize = CGSize(width: 1024, height: 1024)
         sun.shadowSampleCount = 4
         sun.shadowRadius = 2.0
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
         sun.automaticallyAdjustsShadowProjection = true
-        sun.categoryBitMask = 0x00000401
+        sun.categoryBitMask = 0x00000401 // lights trees + terrain
 
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
         self.sunLightNode = sunNode
 
-        // Aim the sun
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
@@ -335,22 +300,19 @@ final class FirstPersonEngine: NSObject {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
-        // Reset sky anchor
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Gradient sky; disable IBL
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Clouds layer
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             minAltitudeY: 0.18,
             clusterCount: 100,
-            seed: 0x2025_1003
+            seed: 0x2025_1004
         ) { [weak self] layer in
             guard let self else { return }
             self.skyAnchor.childNodes.filter { $0.name == "CumulusBillboardLayer" }.forEach { $0.removeFromParentNode() }
@@ -359,15 +321,17 @@ final class FirstPersonEngine: NSObject {
             self.applyCloudSunUniforms()
         }
 
-        // Visible sun disc (round plane, emissive, always faces camera)
-        let discSize: CGFloat = 220
+        // Smaller, HDR-capable sun disc (behind the clouds)
+        let discSize: CGFloat = 92
         let plane = SCNPlane(width: discSize, height: discSize)
         plane.cornerRadius = discSize * 0.5
 
+        let img = SceneKitHelpers.sunSpriteImage(diameter: Int(discSize))
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
-        mat.emission.contents = UIColor(white: 1.0, alpha: 1.0)
+        mat.diffuse.contents = img
+        mat.emission.contents = img
+        mat.emission.intensity = 6.0   // pops on XR/EDR layers
         mat.readsFromDepthBuffer = false
         mat.writesToDepthBuffer = false
         mat.isDoubleSided = true
@@ -377,13 +341,37 @@ final class FirstPersonEngine: NSObject {
         disc.name = "SunDisc"
         disc.castsShadow = false
         disc.constraints = [SCNBillboardConstraint()]
-        disc.renderingOrder = 1000  // draw after clouds
+        disc.renderingOrder = -10_000   // draw BEFORE clouds → visually behind
 
         skyAnchor.addChildNode(disc)
         self.sunDiscNode = disc
 
-        // Place light + disc consistently
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
+    }
+
+    @MainActor
+    private func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
+        var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
+
+        if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
+            let look = -pov.presentation.simdWorldFront
+            if simd_dot(dir, look) < 0 { dir = -dir }
+        }
+        sunDirWorld = dir
+
+        if let sunLightNode {
+            let origin = yawNode.presentation.position
+            let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
+            sunLightNode.position = origin
+            sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
+        }
+
+        if let disc = sunDiscNode {
+            let D = Float(cfg.skyDistance) * 0.92
+            disc.position = SCNVector3(dir.x * D, dir.y * D, dir.z * D)
+        }
+
+        applyCloudSunUniforms()
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {
