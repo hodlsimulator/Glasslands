@@ -26,12 +26,11 @@ enum SceneryCommon {
         _output.color.rgb = min(_output.color.rgb, float3(0.98)) * 0.92;
     }
     """
-}
 
-extension UIColor {
-    func adjustingHue(by dH: CGFloat, satBy dS: CGFloat, briBy dB: CGFloat) -> UIColor {
+    // Local colour adjuster to avoid method-name collisions across files.
+    static func adjust(_ color: UIColor, dH: CGFloat, dS: CGFloat, dB: CGFloat) -> UIColor {
         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
-        getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        color.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
         var hh = (h + dH).truncatingRemainder(dividingBy: 1); if hh < 0 { hh += 1 }
         let ss = max(0, min(1, s + dS))
         let bb = max(0, min(1, b + dB))

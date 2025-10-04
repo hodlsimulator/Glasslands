@@ -15,7 +15,6 @@ enum RockBuilder {
                              palette: [UIColor],
                              rng: inout RandomAdaptor) -> (SCNNode, CGFloat) {
         let s = Float(size)
-        // Base octahedron points
         var top = SIMD3<Float>(0,  s, 0)
         var bot = SIMD3<Float>(0, -s, 0)
         var ex  = SIMD3<Float>( s, 0, 0)
@@ -32,7 +31,6 @@ enum RockBuilder {
             return v
         }
 
-        // Subtle shape randomness (no inout-ref arrays ⇒ no '&' error)
         top = jittered(top, amt: 0.12 * s)
         bot = jittered(bot, amt: 0.12 * s)
         ex  = jittered(ex,  amt: 0.18 * s)
@@ -55,9 +53,12 @@ enum RockBuilder {
 
         let rockBase = palette.indices.contains(3) ? palette[3] : UIColor(white: 0.9, alpha: 1.0)
         func tint(_ c: UIColor) -> UIColor {
-            c.adjustingHue(by: CGFloat.random(in: -0.02...0.02, using: &rng),
-                           satBy: CGFloat.random(in: -0.05...0.05, using: &rng),
-                           briBy: CGFloat.random(in: -0.06...0.03, using: &rng))
+            SceneryCommon.adjust(
+                c,
+                dH: CGFloat.random(in: -0.02...0.02, using: &rng),
+                dS: CGFloat.random(in: -0.05...0.05, using: &rng),
+                dB: CGFloat.random(in: -0.06...0.03, using: &rng)
+            )
         }
 
         // Top fan
@@ -76,10 +77,12 @@ enum RockBuilder {
         let cSrc = geometrySourceForVertexColors(cols)
 
         var idx = Array(0..<verts.count).map { UInt16($0) }
-        let elem = SCNGeometryElement(data: Data(bytes: &idx, count: idx.count * MemoryLayout<UInt16>.size),
-                                      primitiveType: .triangles,
-                                      primitiveCount: verts.count / 3,
-                                      bytesPerIndex: MemoryLayout<UInt16>.size)
+        let elem = SCNGeometryElement(
+            data: Data(bytes: &idx, count: idx.count * MemoryLayout<UInt16>.size),
+            primitiveType: .triangles,
+            primitiveCount: verts.count / 3,
+            bytesPerIndex: MemoryLayout<UInt16>.size
+        )
 
         let g = SCNGeometry(sources: [vSrc, nSrc, cSrc], elements: [elem])
 

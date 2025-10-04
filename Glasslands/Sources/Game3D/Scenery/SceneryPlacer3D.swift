@@ -25,12 +25,11 @@ struct SceneryPlacer3D {
         let rng = GKMersenneTwisterRandomSource(seed: seed)
         var ra = RandomAdaptor(rng)
         var nodes: [SCNNode] = []
-        let tilesX = cfg.tilesX, tilesZ = cfg.tilesZ
         let palette = AppColours.uiColors(from: recipe.paletteHex)
 
         let step = 4
-        for tz in stride(from: 0, to: tilesZ, by: step) {
-            for tx in stride(from: 0, to: tilesX, by: step) {
+        for tz in stride(from: 0, to: cfg.tilesZ, by: step) {
+            for tx in stride(from: 0, to: cfg.tilesX, by: step) {
                 let tileX = originTile.x + tx
                 let tileZ = originTile.y + tz
 
@@ -46,7 +45,6 @@ struct SceneryPlacer3D {
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
 
-                // 1) Rocks
                 if (s > 0.18 || h > 0.80), Double.random(in: 0...1, using: &ra) < 0.18 {
                     let group = SCNNode()
                     let count = Int.random(in: 1...3, using: &ra)
@@ -63,58 +61,47 @@ struct SceneryPlacer3D {
                     }
                     group.position.y += 0.01
                     group.name = "rocks"
-                    nodes.append(group)
-                    continue
+                    nodes.append(group); continue
                 }
 
-                // 2) Flower patches
                 if (m > 0.40 && m < 0.75) && s < 0.12 && r < 0.50,
                    Double.random(in: 0...1, using: &ra) < 0.14 {
                     let patch = makeFlowerPatchNode(palette: palette, rng: &ra)
                     patch.position = SCNVector3(wx, wy + 0.02, wz)
                     patch.setValue(CGFloat(0.20), forKey: "hitRadius")
-                    nodes.append(patch)
-                    continue
+                    nodes.append(patch); continue
                 }
 
-                // 3) Mushrooms
                 if (m > 0.62 && h < 0.70) && s < 0.12 && r < 0.50,
                    Double.random(in: 0...1, using: &ra) < 0.10 {
                     let patch = MushroomBuilder.makeMushroomPatchNode(palette: palette, rng: &ra)
                     patch.position = SCNVector3(wx, wy, wz)
                     patch.setValue(CGFloat(0.18), forKey: "hitRadius")
-                    nodes.append(patch)
-                    continue
+                    nodes.append(patch); continue
                 }
 
-                // 4) Reeds
                 if r > 0.58 && s < 0.18,
                    Double.random(in: 0...1, using: &ra) < 0.16 {
                     let patch = ReedBuilder.makeReedPatchNode(palette: palette, rng: &ra)
                     patch.position = SCNVector3(wx, wy, wz)
                     patch.setValue(CGFloat(0.22), forKey: "hitRadius")
-                    nodes.append(patch)
-                    continue
+                    nodes.append(patch); continue
                 }
 
-                // 5) Crystals
                 if (m < 0.30 && h > 0.50 && s < 0.16),
                    Double.random(in: 0...1, using: &ra) < 0.06 {
                     let cluster = CrystalBuilder.makeCrystalClusterNode(palette: palette, rng: &ra)
                     cluster.position = SCNVector3(wx, wy, wz)
                     cluster.setValue(CGFloat(0.22), forKey: "hitRadius")
-                    nodes.append(cluster)
-                    continue
+                    nodes.append(cluster); continue
                 }
 
-                // 6) Bushes
                 if (m > 0.50 && h < 0.75 && s < 0.16 && r < 0.50),
                    Double.random(in: 0...1, using: &ra) < 0.16 {
                     let bush = BushBuilder.makeBushNode(palette: palette, rng: &ra)
                     bush.position = SCNVector3(wx, wy, wz)
                     bush.setValue(CGFloat(0.28), forKey: "hitRadius")
-                    nodes.append(bush)
-                    continue
+                    nodes.append(bush); continue
                 }
             }
         }
@@ -131,17 +118,24 @@ struct SceneryPlacer3D {
             let size = CGFloat.random(in: 0.10...0.18, using: &rng)
             let plane = SCNPlane(width: size, height: size)
             plane.cornerRadius = size * 0.5
+
             let m = SCNMaterial()
             m.lightingModel = .physicallyBased
-            m.diffuse.contents = flowerSpriteImage(diameter: Int(ceil(size * 128)),
-                                                   tint: randomFlowerTint(palette: palette, rng: &rng))
+            m.diffuse.contents = flowerSpriteImage(
+                diameter: Int(ceil(size * 128)),
+                tint: randomFlowerTint(palette: palette, rng: &rng)
+            )
             m.isDoubleSided = true
             m.writesToDepthBuffer = false
             plane.materials = [m]
+
             let n = SCNNode(geometry: plane)
             n.constraints = [SCNBillboardConstraint()]
-            n.position = SCNVector3(Float.random(in: -0.25...0.25, using: &rng), 0.01,
-                                    Float.random(in: -0.25...0.25, using: &rng))
+            n.position = SCNVector3(
+                Float.random(in: -0.25...0.25, using: &rng),
+                0.01,
+                Float.random(in: -0.25...0.25, using: &rng)
+            )
             node.addChildNode(n)
         }
         node.categoryBitMask = 0x00000002
@@ -165,25 +159,30 @@ struct SceneryPlacer3D {
             let inner = CGColor(colorSpace: cs, components: [tR, tG, tB, 1.0])!
             let outer = CGColor(colorSpace: cs, components: [tR, tG, tB, 0.0])!
             let grad = CGGradient(colorsSpace: cs, colors: [inner, outer] as CFArray, locations: [0.0, 1.0])!
-            cg.drawRadialGradient(grad,
-                                  startCenter: CGPoint(x: r, y: r), startRadius: 0,
-                                  endCenter: CGPoint(x: r, y: r), endRadius: r,
-                                  options: [])
+            cg.drawRadialGradient(
+                grad,
+                startCenter: CGPoint(x: r, y: r), startRadius: 0,
+                endCenter: CGPoint(x: r, y: r), endRadius: r,
+                options: []
+            )
             cg.setFillColor(UIColor(white: 1.0, alpha: 0.85).cgColor)
-            let core = CGRect(x: size.width*0.5 - r*0.18, y: size.height*0.5 - r*0.18, width: r*0.36, height: r*0.36)
+            let core = CGRect(x: size.width*0.5 - r*0.18, y: size.height*0.5 - r*0.18,
+                              width: r*0.36, height: r*0.36)
             cg.fillEllipse(in: core)
         }
     }
 
     private static func randomFlowerTint(palette: [UIColor], rng: inout RandomAdaptor) -> UIColor {
         let bank: [UIColor] = [
-            UIColor.systemYellow, UIColor.systemPink, UIColor.systemRed,
-            UIColor.systemPurple, UIColor.systemOrange,
-            palette.indices.contains(0) ? palette[0] : UIColor.systemTeal
+            .systemYellow, .systemPink, .systemRed, .systemPurple, .systemOrange,
+            palette.indices.contains(0) ? palette[0] : .systemTeal
         ]
-        let c = bank[Int.random(in: 0..<bank.count, using: &rng)]
-        return c.adjustingHue(by: CGFloat.random(in: -0.04...0.04, using: &rng),
-                              satBy: CGFloat.random(in: -0.08...0.08, using: &rng),
-                              briBy: CGFloat.random(in: -0.04...0.06, using: &rng))
+        let base = bank[Int.random(in: 0..<bank.count, using: &rng)]
+        return SceneryCommon.adjust(
+            base,
+            dH: CGFloat.random(in: -0.04...0.04, using: &rng),
+            dS: CGFloat.random(in: -0.08...0.08, using: &rng),
+            dB: CGFloat.random(in: -0.04...0.06, using: &rng)
+        )
     }
 }
