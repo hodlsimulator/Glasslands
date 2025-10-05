@@ -407,9 +407,10 @@ final class FirstPersonEngine: NSObject {
             node.name = "CumulusBillboardLayer"
             self.skyAnchor.addChildNode(node)
             self.applyCloudSunUniforms()
-            self.sanitizeCloudBillboards()
-            self.rebindMissingCloudTextures()
-            self.forceReplaceAllCloudBillboards()
+            // self.forceAllCloudsToPlainWhite()
+            // self.sanitizeCloudBillboards()
+            // self.rebindMissingCloudTextures()
+            // self.forceReplaceAllCloudBillboards()
         }
 
         // HDR sun (disc + halo).
@@ -791,6 +792,51 @@ final class FirstPersonEngine: NSObject {
     }
     
     @MainActor
+    private func forceReplaceAllCloudBillboards() {
+        guard let cloudLayer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            print("[Clouds] forceReplaceAllCloudBillboards: no layer"); return
+        }
+
+        var geometries = 0
+        var replaced = 0
+        var reboundDiffuse = 0
+
+        cloudLayer.enumerateChildNodes { node, _ in
+            guard let geo = node.geometry else { return }
+            geometries += 1
+
+            let newM = CloudBillboardMaterial.makeCurrent()
+
+            // Carry over the image (or bind a tiny fallback if none).
+            let old = geo.firstMaterial
+            if let ui = old?.diffuse.contents as? UIImage, (ui.cgImage != nil || ui.ciImage != nil) {
+                newM.diffuse.contents = ui
+            } else if let ci = old?.diffuse.contents as? CIImage {
+                newM.diffuse.contents = UIImage(ciImage: ci)
+            } else if let color = old?.diffuse.contents as? UIColor {
+                newM.diffuse.contents = color
+            } else {
+                newM.diffuse.contents = CloudSpriteTexture.fallbackWhite2x2
+                reboundDiffuse += 1
+            }
+
+            // Keep opacity / tint users may have set.
+            newM.transparency = old?.transparency ?? 1
+            newM.multiply.contents = old?.multiply.contents
+
+            // Paranoia: nuke any legacy program/modifiers on the outgoing mat.
+            geo.firstMaterial?.program = nil
+            geo.firstMaterial?.shaderModifiers = nil
+
+            // Replace.
+            geo.firstMaterial = newM
+            replaced += 1
+        }
+
+        print("[Clouds] force-replaced materials on \(replaced)/\(geometries) geometry nodes (fallback bound to \(reboundDiffuse))")
+    }
+    
+    @MainActor
     private func sanitizeCloudBillboards() {
         guard let cloudLayer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             print("[Clouds] no CumulusBillboardLayer found"); return
@@ -801,50 +847,41 @@ final class FirstPersonEngine: NSObject {
             guard let c = contents else { return false }
             if let ui = c as? UIImage { return ui.cgImage != nil || ui.ciImage != nil }
             if c is UIColor { return true }
-            // Treat any other non-nil (e.g. CGImage/CIImage/MTLTexture) as valid without casting.
+            // Treat any other non-nil (CGImage/CIImage/MTLTexture/etc.) as valid without casting.
             return true
         }
 
-        var scanned = 0
-        var replaced = 0
         var fixedDiffuse = 0
         var nukedProgram = 0
+        var nukedSamplerBased = 0
 
         cloudLayer.enumerateChildNodes { node, _ in
             guard let geo = node.geometry, let mat = geo.firstMaterial else { return }
-            scanned += 1
 
             if mat.program != nil {
                 mat.program = nil
                 nukedProgram += 1
             }
 
-            let frag = mat.shaderModifiers?[.fragment] ?? ""
-            let usesSampler = frag.contains("texture2d<") || frag.contains("spriteTex") || frag.contains("u_diffuseTexture")
-            let isVolNoSampler = frag.contains("alpha gate") || frag.contains("Premultiplied output with sprite alpha gate")
+            // If this material used any sampler-based modifier before, wipe it.
+            if let frag = mat.shaderModifiers?[.fragment],
+               frag.contains("texture2d<") || frag.contains("sampler") || frag.contains("u_diffuseTexture") {
+                mat.shaderModifiers = nil
+                nukedSamplerBased += 1
+            }
 
             if !hasValidDiffuse(mat.diffuse.contents) {
                 mat.diffuse.contents = CloudSpriteTexture.fallbackWhite2x2
                 fixedDiffuse += 1
             }
-
-            if usesSampler || !isVolNoSampler {
-                let newM = CloudBillboardMaterial.makeVolumetricTemplate()
-                newM.diffuse.contents = mat.diffuse.contents ?? CloudSpriteTexture.fallbackWhite2x2
-                newM.transparency = mat.transparency
-                newM.multiply.contents = mat.multiply.contents
-                geo.firstMaterial = newM
-                replaced += 1
-            }
         }
 
-        print("[Clouds] scanned=\(scanned) replaced=\(replaced) fixedDiffuse=\(fixedDiffuse) nukedProgram=\(nukedProgram)")
+        print("[Clouds] sanitize: fixedDiffuse=\(fixedDiffuse) nukedProgram=\(nukedProgram) nukedSamplerBased=\(nukedSamplerBased)")
     }
 
     @MainActor
     private func rebindMissingCloudTextures() {
         guard let cloudLayer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
-
         @inline(__always)
         func hasValidDiffuse(_ contents: Any?) -> Bool {
             guard let c = contents else { return false }
@@ -864,24 +901,25 @@ final class FirstPersonEngine: NSObject {
         if rebound > 0 { print("[Clouds] rebound diffuse on \(rebound) puff materials") }
     }
     
+    /*
     @MainActor
-    private func forceReplaceAllCloudBillboards() {
+    private func forceAllCloudsToPlainWhite() {
         guard let cloudLayer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
-            print("[Clouds] forceReplaceAllCloudBillboards: no layer"); return
+            print("[Clouds] plain-white: no layer"); return
         }
-        let template = CloudBillboardMaterial.makeVolumetricTemplate()
-        var count = 0
+        let basic = CloudBillboardMaterial.makeBasic()
+        var replaced = 0
         cloudLayer.enumerateChildNodes { node, _ in
-            if let geo = node.geometry {
-                let m = template.copy() as! SCNMaterial
-                m.diffuse.contents = geo.firstMaterial?.diffuse.contents ?? CloudSpriteTexture.fallbackWhite2x2
-                m.transparency = geo.firstMaterial?.transparency ?? 1
-                m.multiply.contents = geo.firstMaterial?.multiply.contents
-                m.program = nil
-                geo.firstMaterial = m
-                count += 1
+            if let g = node.geometry {
+                let m = basic.copy() as! SCNMaterial
+                m.diffuse.contents = UIColor.white   // unequivocal test: no textures at all
+                g.firstMaterial?.program = nil
+                g.firstMaterial?.shaderModifiers = nil
+                g.firstMaterial = m
+                replaced += 1
             }
         }
-        print("[Clouds] force-replaced materials on \(count) geometry nodes")
+        print("[Clouds] plain-white replaced \(replaced) materials")
     }
+     */
 }

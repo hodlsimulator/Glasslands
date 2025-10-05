@@ -21,7 +21,7 @@ enum CloudBillboardFactory {
         root.castsShadow = false
         root.renderingOrder = -9_990
 
-        let template = CloudBillboardMaterial.makeVolumetricTemplate()
+        let template = CloudBillboardMaterial.makeCurrent()
 
         for cl in clusters {
             let group = SCNNode()
@@ -35,15 +35,15 @@ enum CloudBillboardFactory {
                 bb.constraints = [bc]
 
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
-
-                // Independent, no-sampler material per puff.
                 let m = template.copy() as! SCNMaterial
 
-                // ALWAYS bind a valid image so SceneKit pre-samples diffuse → _output.color.a
-                let count = max(1, atlas.images.count)
-                let idx = ((p.atlasIndex % count) + count) % count
-                let img = atlas.images.isEmpty ? CloudSpriteTexture.fallbackWhite2x2 : atlas.images[idx]
-                m.diffuse.contents = img
+                let count = atlas.images.count
+                if count > 0 {
+                    let idx = ((p.atlasIndex % count) + count) % count
+                    m.diffuse.contents = atlas.images[idx]
+                } else {
+                    m.diffuse.contents = CloudSpriteTexture.fallbackWhite2x2
+                }
 
                 m.transparency = CGFloat(max(0, min(1, p.opacity)))
                 if let t = p.tint {
@@ -56,11 +56,9 @@ enum CloudBillboardFactory {
                 }
 
                 plane.firstMaterial = m
-
                 let sprite = SCNNode(geometry: plane)
                 sprite.eulerAngles.z = p.roll
                 sprite.castsShadow = false
-
                 bb.addChildNode(sprite)
                 group.addChildNode(bb)
             }
