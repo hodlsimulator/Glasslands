@@ -294,10 +294,11 @@ final class FirstPersonEngine: NSObject {
         camera.whitePoint = 1.0
         camera.minimumExposure = -1.0
         camera.maximumExposure = 2.0
-        // Bloom only catches genuinely hot pixels (EDR sun), not SDR terrain
-        camera.bloomThreshold = 1.15
-        camera.bloomIntensity = 1.25
-        camera.bloomBlurRadius = 12.0
+
+        // Bloom tuned for a hot sun core + gentle halo
+        camera.bloomThreshold = 1.0
+        camera.bloomIntensity = 1.6
+        camera.bloomBlurRadius = 14.0
 
         camNode.camera = camera
         pitchNode.addChildNode(camNode)
@@ -377,7 +378,7 @@ final class FirstPersonEngine: NSObject {
     private func buildSky() {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
-        scene.rootNode.childNodes.filter { $0.name == "SunDiscHDR" || $0.name == "VolumetricCloudLayer" }
+        scene.rootNode.childNodes.filter { $0.name == "SunDiscHDR" || $0.name == "SunHaloHDR" || $0.name == "VolumetricCloudLayer" }
             .forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
@@ -385,18 +386,123 @@ final class FirstPersonEngine: NSObject {
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Bigger, punchier HDR sun
-        let SUN_DEG: CGFloat = 4.0        // was ~1°, try 3–6° to taste
-        let SUN_PX: Int = 2048            // higher-res sprite to stay crisp when large
-        let SUN_EDR: CGFloat = 3.5        // HDR intensity (EDR > 1)
+        // Bigger, brighter sun with crisp core + soft halo.
+        // Tweakables:
+        let coreDeg: CGFloat      = 6.0     // apparent size in degrees (bigger disc)
+        let haloScale: CGFloat    = 2.6     // halo diameter = haloScale × core diameter
+        let coreEDR: CGFloat      = 8.0     // HDR intensity for core (very hot)
+        let haloEDR: CGFloat      = 2.0     // HDR intensity for halo
+        let haloExponent: CGFloat = 2.2     // falloff; higher = tighter bloom
+        let haloPixels: Int       = 2048    // halo texture resolution (keep crisp)
 
-        let sun = makeHDRSunDiscNode(angularSizeDeg: SUN_DEG, spritePixels: SUN_PX, edrIntensity: SUN_EDR)
+        let sun = makeHDRSunNode(coreAngularSizeDeg: coreDeg,
+                                 haloScale: haloScale,
+                                 coreIntensity: coreEDR,
+                                 haloIntensity: haloEDR,
+                                 haloExponent: haloExponent,
+                                 haloPixels: haloPixels)
         sun.renderingOrder = 100_000
         skyAnchor.addChildNode(sun)
-        sunDiscNode = sun
+        sunDiscNode = sun   // group node; applySunDirection moves the whole assembly
 
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         applyCloudSunUniforms()
+    }
+    
+    @MainActor
+    private func makeHDRSunNode(coreAngularSizeDeg: CGFloat,
+                                haloScale: CGFloat,
+                                coreIntensity: CGFloat,
+                                haloIntensity: CGFloat,
+                                haloExponent: CGFloat,
+                                haloPixels: Int) -> SCNNode
+    {
+        let dist = CGFloat(cfg.skyDistance)
+        let radians = coreAngularSizeDeg * .pi / 180.0
+        let coreDiameter = max(1.0, 2.0 * dist * tan(0.5 * radians))
+        let haloDiameter = max(coreDiameter * haloScale, coreDiameter + 1.0)
+
+        // Core: crisp circle via geometry (no texture), additive emission, very hot EDR
+        let corePlane = SCNPlane(width: coreDiameter, height: coreDiameter)
+        corePlane.cornerRadius = coreDiameter * 0.5
+
+        let coreMat = SCNMaterial()
+        coreMat.lightingModel = .constant
+        coreMat.diffuse.contents = UIColor.black
+        coreMat.blendMode = .add
+        coreMat.readsFromDepthBuffer = false
+        coreMat.writesToDepthBuffer = false
+        coreMat.emission.contents = UIColor.white
+        coreMat.emission.intensity = coreIntensity   // HDR punch
+        corePlane.firstMaterial = coreMat
+
+        let coreNode = SCNNode(geometry: corePlane)
+        coreNode.name = "SunDiscHDR"
+        coreNode.castsShadow = false
+        let bbCore = SCNBillboardConstraint()
+        bbCore.freeAxes = .all
+        coreNode.constraints = [bbCore]
+        coreNode.renderingOrder = 100_001
+
+        // Halo: radial gradient texture, additive emission, larger than core
+        let haloPlane = SCNPlane(width: haloDiameter, height: haloDiameter)
+        haloPlane.cornerRadius = haloDiameter * 0.5
+
+        let haloMat = SCNMaterial()
+        haloMat.lightingModel = .constant
+        haloMat.diffuse.contents = UIColor.black
+        haloMat.blendMode = .add
+        haloMat.readsFromDepthBuffer = false
+        haloMat.writesToDepthBuffer = false
+        haloMat.emission.contents = sunHaloImage(diameter: max(256, haloPixels), exponent: haloExponent)
+        haloMat.emission.intensity = haloIntensity
+        haloMat.transparencyMode = .aOne
+        haloPlane.firstMaterial = haloMat
+
+        let haloNode = SCNNode(geometry: haloPlane)
+        haloNode.name = "SunHaloHDR"
+        haloNode.castsShadow = false
+        let bbHalo = SCNBillboardConstraint()
+        bbHalo.freeAxes = .all
+        haloNode.constraints = [bbHalo]
+        haloNode.renderingOrder = 100_000
+
+        // Group so applySunDirection can move them together
+        let group = SCNNode()
+        group.addChildNode(haloNode)
+        group.addChildNode(coreNode)
+        return group
+    }
+    
+    @MainActor
+    private func sunHaloImage(diameter: Int, exponent: CGFloat) -> UIImage {
+        let size = CGSize(width: diameter, height: diameter)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            let cg = ctx.cgContext
+            cg.setFillColor(UIColor.clear.cgColor)
+            cg.fill(CGRect(origin: .zero, size: size))
+
+            let center = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
+            let steps = 8
+            var colors: [CGColor] = []
+            var locations: [CGFloat] = []
+            for i in 0...steps {
+                let p = CGFloat(i) / CGFloat(steps)
+                // Falloff shaped by exponent; alpha is stronger near centre
+                let a = pow(1.0 - p, max(0.1, exponent))
+                colors.append(UIColor(white: 1.0, alpha: a).cgColor)
+                locations.append(p)
+            }
+            guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                            colors: colors as CFArray,
+                                            locations: locations) else { return }
+            let radius = min(size.width, size.height) * 0.5
+            cg.drawRadialGradient(gradient,
+                                  startCenter: center, startRadius: 0,
+                                  endCenter: center,   endRadius: radius,
+                                  options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        }
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {
