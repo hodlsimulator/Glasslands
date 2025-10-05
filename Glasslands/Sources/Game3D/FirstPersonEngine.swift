@@ -127,10 +127,18 @@ final class FirstPersonEngine: NSObject {
     }
 
     @MainActor private func applyCloudSunUniforms() {
-        let sunV = SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z)
+        let sunW = simd_normalize(sunDirWorld)
+
+        // View-space sun direction for the shader
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let invView = simd_inverse(pov.simdWorldTransform)
+        let sunView4 = invView * simd_float4(sunW, 0)                // w = 0 → direction
+        let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
+
+        let sunV = SCNVector3(sunW.x, sunW.y, sunW.z)
+        let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
         let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
 
-        // Billboard sprites (if present)
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
@@ -143,15 +151,13 @@ final class FirstPersonEngine: NSObject {
             }
         }
 
-        // Volumetric sphere (find it whether it lives under root or skyAnchor)
         let sphere =
-            scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
-            ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
 
         if let m = sphere?.geometry?.firstMaterial {
-            m.setValue(sunV, forKey: "sunDirWorld")
+            m.setValue(sunViewV, forKey: "sunDirView")
             m.setValue(tintV, forKey: "sunTint")
-            // density/coverage defaults are already set by the material factory
         }
     }
 
@@ -370,22 +376,18 @@ final class FirstPersonEngine: NSObject {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
-        // Reset anchors
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Background gradient (shader draws its own too; this is a safety net)
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Remove any prior volumetric layer from anywhere
         scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
         skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
 
-        // Volumetric clouds are attached at world origin under root.
-        // The Metal vertex path uses identity model transform.
+        // Attach the volumetric sphere to the *skyAnchor* (follows camera position, not rotation)
         let clouds = VolumetricCloudLayer.make(
             radius: CGFloat(cfg.skyDistance),
             baseY: 1350,
@@ -393,11 +395,9 @@ final class FirstPersonEngine: NSObject {
             coverage: 0.55
         )
         clouds.simdPosition = .zero
-        scene.rootNode.addChildNode(clouds)
+        skyAnchor.addChildNode(clouds)
 
-        // No billboard sprite: the sun is drawn inside the volumetric shader now.
         sunDiscNode = nil
-
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
         applyCloudSunUniforms()
     }
@@ -608,16 +608,19 @@ final class FirstPersonEngine: NSObject {
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
         guard
             let sphere =
-                scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
-                ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
+                skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
+                ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
             let m = sphere.geometry?.firstMaterial
         else { return }
 
         m.setValue(CGFloat(t), forKey: "time")
 
-        // Keep the shader’s ray origin in world coordinates
-        let p = yawNode.presentation.worldPosition
-        m.setValue(SCNVector3(p.x, p.y, p.z), forKey: "cameraPos")
+        // Recompute sun in view space as the camera moves/turns
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let invView = simd_inverse(pov.simdWorldTransform)
+        let sunView4 = invView * simd_float4(sunDirWorld, 0)         // w = 0 → direction
+        let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
+        m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
     }
     
     // MARK: - Sun sprite (HDR)

@@ -15,19 +15,20 @@ import UIKit
 enum VolumetricCloudMaterial {
     @MainActor
     static func makeMaterial() -> SCNMaterial {
+        // View-space surface shader: ray origin at camera (0), direction from _surface.position.
+        // Sun direction is provided as *view-space* (sunDirView), so no SceneKit matrices are needed.
         let surface = """
         #pragma arguments
-        float3 cameraPos;
-        float3 sunDirWorld;
-        float3 sunTint;
-        float   time;
-        float3  wind;
-        float   baseY;
-        float   topY;
-        float   coverage;
-        float   densityMul;
-        float   stepMul;
-        float   horizonLift;
+        float3 sunDirView;   // unit vector in *view space*
+        float3 sunTint;      // HDR tint, e.g. 1.00,0.94,0.82
+        float   time;        // seconds
+        float3  wind;        // xy used for flow
+        float   baseY;       // metres above camera
+        float   topY;        // metres above camera
+        float   coverage;    // 0..1
+        float   densityMul;  // scalar
+        float   stepMul;     // scalar
+        float   horizonLift; // small lift near horizon
 
         float  saturate1(float x) { return clamp(x, 0.0, 1.0); }
         float3 saturate3(float3 v){ return clamp(v, float3(0.0), float3(1.0)); }
@@ -108,67 +109,61 @@ enum VolumetricCloudMaterial {
             return smoothstep(0.0, 0.70, d);
         }
 
-        float3 sunGlow(float3 rd, float3 sunW, float3 tint) {
-            float ct   = clamp(dot(rd, sunW), -1.0, 1.0);
+        // HDR sun: bright disc + two halos
+        float3 sunGlow(float3 rd, float3 sunV, float3 tint) {
+            float ct   = clamp(dot(rd, sunV), -1.0, 1.0);
             float ang  = acos(ct);
-            const float rad = deg2rad(0.95);
+            const float rad = deg2rad(0.95); // ~1°
 
             float core  = 1.0 - smoothstep(rad*0.75, rad,        ang);
             float halo1 = 1.0 - smoothstep(rad*1.25, rad*3.50,   ang);
             float halo2 = 1.0 - smoothstep(rad*3.50, rad*7.50,   ang);
 
-            float edr  = core * 5.0 + halo1 * 0.90 + halo2 * 0.25;
+            float edr  = core * 5.0 + halo1 * 0.90 + halo2 * 0.25; // > 1.0 on HDR
             return tint * edr;
         }
 
         #pragma body
-        // _surface.position is view-space in this stage; lift to world.
-        float3 PwView = _surface.position.xyz;
-        float3 Pw     = (u_inverseViewTransform * float4(PwView, 1.0)).xyz;
+        // View-space ray: origin at camera (0), direction from the fragment
+        float3 rd = normalize(_surface.position.xyz);
+        float3 sunV = normalize(sunDirView);
 
-        float3 ro = cameraPos;
-        float3 rd = normalize(Pw - ro);
-
-        // Base sky gradient + HDR sun (drawn behind clouds)
+        // Base sky gradient + HDR sun
         float tSky     = saturate1(rd.y * 0.6 + 0.4);
         float3 zenith  = float3(0.30, 0.56, 0.96);
         float3 horizon = float3(0.88, 0.93, 0.99);
         float3 baseCol = lerp3(horizon, zenith, tSky);
+        baseCol += sunGlow(rd, sunV, sunTint);
 
-        float3 sunW = normalize(sunDirWorld);
-        baseCol += sunGlow(rd, sunW, sunTint);
-
-        // Intersect cloud slab [baseY, topY]
+        // Intersect camera-centred slab [baseY, topY] along rd
         float denom = rd.y;
         float tb = 0.0, tt = -1.0;
-        bool hits = fabs(denom) >= 1e-4;
-        if (hits) {
-            tb = (baseY - ro.y) / denom;
-            tt = (topY  - ro.y) / denom;
+        if (abs(denom) >= 1e-4) {
+            tb = (baseY) / denom;
+            tt = (topY ) / denom;
         }
-        float t0 = hits ? min(tb, tt) : 1e9;
-        float t1 = hits ? max(tb, tt) : -1e9;
+        float t0 = min(tb, tt);
+        float t1 = max(tb, tt);
         t0 = max(t0, 0.0);
 
         float3 acc   = float3(0.0,0.0,0.0);
         float  trans = 1.0;
 
-        if (hits && t1 > 0.0) {
-            const int MAX_STEPS = 20;
+        if (abs(denom) >= 1e-4 && t1 > 0.0) {
             float baseStep   = 220.0 * stepMul;
-            float grazing    = clamp(1.0 - fabs(rd.y), 0.0, 1.0);
+            float grazing    = clamp(1.0 - abs(rd.y), 0.0, 1.0);
             float worldStep  = baseStep * lerp1(1.0, 2.2, grazing);
             float horizonBoost = horizonLift * smoothstep(0.0, 0.15, grazing);
-            float jitter = frac1(dot(Pw, float3(1.0, 57.0, 113.0))) * worldStep;
+            float jitter = frac1(dot(rd, float3(1.0, 57.0, 113.0))) * worldStep;
 
             float t = t0 + jitter;
-            for (int i = 0; i < MAX_STEPS; ++i) {
-                float3 p = ro + rd * t;
+            for (int i = 0; i < 20; ++i) {
+                float3 p = rd * t;            // camera-centric
                 if (t > t1) break;
 
                 float d = densityAt(p) * densityMul;
                 if (d > 1e-3) {
-                    float3 ps    = p + sunW * 300.0;
+                    float3 ps    = p + sunV * 300.0;
                     float  dl    = densityAt(ps);
                     float  shade = 0.55 + 0.45 * smoothstep(0.15, 0.95, 1.0 - dl);
                     float  powder= 1.0 - exp(-2.2 * d);
@@ -186,10 +181,8 @@ enum VolumetricCloudMaterial {
         }
 
         float3 outRGB = baseCol * trans + acc + sunTint * acc * 0.08;
-
-        // Write via surface entry point
-        _surface.emission   = float4(outRGB, 1.0);
-        _surface.transparent= 1.0;
+        _surface.emission    = float4(outRGB, 1.0);
+        _surface.transparent = 1.0;
         """
 
         let m = SCNMaterial()
@@ -201,8 +194,8 @@ enum VolumetricCloudMaterial {
         m.writesToDepthBuffer = false
         m.shaderModifiers = [.surface: surface]
 
-        // Defaults (updated per-frame elsewhere)
-        m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirWorld")
+        // Defaults; updated per-frame by the engine
+        m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
         m.setValue(0.0 as CGFloat, forKey: "time")
         m.setValue(SCNVector3(6.0, 2.0, 0.0), forKey: "wind")
@@ -212,7 +205,6 @@ enum VolumetricCloudMaterial {
         m.setValue(1.00 as CGFloat, forKey: "densityMul")
         m.setValue(1.00 as CGFloat, forKey: "stepMul")
         m.setValue(0.16 as CGFloat, forKey: "horizonLift")
-        m.setValue(SCNVector3Zero, forKey: "cameraPos")
         return m
     }
 }
