@@ -20,9 +20,9 @@ extension FirstPersonEngine {
     @MainActor
     func enableVolumetricCloudImpostors(
         _ on: Bool,
-        vapour: CGFloat = 2.6,
-        coverage: CGFloat = 0.52,
-        horizonLift: CGFloat = 0.18
+        vapour: CGFloat = 2.8,
+        coverage: CGFloat = 0.42,
+        horizonLift: CGFloat = 0.14
     ) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return
