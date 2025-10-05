@@ -604,17 +604,20 @@ final class FirstPersonEngine: NSObject {
     }
     
     // Called by RendererProxy each frame
-    @MainActor func tickVolumetricClouds(atRenderTime t: TimeInterval) {
-        let timeCG = CGFloat(t)
+    @MainActor
+    func tickVolumetricClouds(atRenderTime t: TimeInterval) {
+        guard
+            let sphere =
+                scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
+                ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
+            let m = sphere.geometry?.firstMaterial
+        else { return }
 
-        // Update the program uniform on the volumetric material
-        if let sphere =
-            scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
-            ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
-           let m = sphere.geometry?.firstMaterial
-        {
-            m.setValue(timeCG, forKey: "time")
-        }
+        m.setValue(CGFloat(t), forKey: "time")
+
+        // Keep the shader’s ray origin in world coordinates
+        let p = yawNode.presentation.worldPosition
+        m.setValue(SCNVector3(p.x, p.y, p.z), forKey: "cameraPos")
     }
     
     // MARK: - Sun sprite (HDR)
