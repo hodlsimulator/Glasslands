@@ -375,27 +375,28 @@ final class FirstPersonEngine: NSObject {
 
     @MainActor
     private func buildSky() {
-        // Clean slate
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
-        scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
-        scene.rootNode.childNodes.filter { $0.name == "SunDiscHDR" }.forEach { $0.removeFromParentNode() }
+        scene.rootNode.childNodes.filter { $0.name == "SunDiscHDR" || $0.name == "VolumetricCloudLayer" }
+            .forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Gradient only (no clouds yet)
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // EDR sun disc (additive), drawn after everything else
-        let sun = makeHDRSunDiscNode(angularSizeDeg: 1.05)
-        sun.renderingOrder = 9_999
+        // Bigger, punchier HDR sun
+        let SUN_DEG: CGFloat = 4.0        // was ~1°, try 3–6° to taste
+        let SUN_PX: Int = 2048            // higher-res sprite to stay crisp when large
+        let SUN_EDR: CGFloat = 3.5        // HDR intensity (EDR > 1)
+
+        let sun = makeHDRSunDiscNode(angularSizeDeg: SUN_DEG, spritePixels: SUN_PX, edrIntensity: SUN_EDR)
+        sun.renderingOrder = 100_000
         skyAnchor.addChildNode(sun)
         sunDiscNode = sun
 
-        // Point the sun where we want it and push uniforms
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
-        applyCloudSunUniforms() // safe even without clouds; keeps billboards in sync later
+        applyCloudSunUniforms()
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {
@@ -633,37 +634,35 @@ final class FirstPersonEngine: NSObject {
     // MARK: - Sun sprite (HDR)
 
     @MainActor
-    private func makeHDRSunDiscNode(angularSizeDeg: CGFloat) -> SCNNode {
-        // Place the quad on the sun direction at sky distance so its apparent size is right.
+    private func makeHDRSunDiscNode(angularSizeDeg: CGFloat, spritePixels: Int, edrIntensity: CGFloat) -> SCNNode {
         let dist = CGFloat(cfg.skyDistance)
         let radians = angularSizeDeg * .pi / 180.0
-        let worldDiameter = 2.0 * dist * tan(0.5 * radians)
+        let worldDiameter = max(1.0, 2.0 * dist * tan(0.5 * radians))
 
         let plane = SCNPlane(width: worldDiameter, height: worldDiameter)
+        plane.cornerRadius = worldDiameter * 0.5
 
         let m = SCNMaterial()
         m.lightingModel = .constant
-        m.diffuse.contents = UIColor.clear
-        // Emissive sprite with EDR headroom (the image already carries >1.0 values)
-        m.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: 512)
-        m.emission.intensity = 1.0
-        m.isDoubleSided = false
+        m.diffuse.contents = UIColor.black              // not clear → ensures additive shows up
+        m.blendMode = .add
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
-        m.transparencyMode = .aOne
-        m.blendMode = .add
+
+        m.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: spritePixels)
+        m.emission.intensity = edrIntensity             // >1.0 gives true HDR punch
+
         plane.firstMaterial = m
 
         let node = SCNNode(geometry: plane)
         node.name = "SunDiscHDR"
         node.castsShadow = false
 
-        // Face the camera at all times
         let bb = SCNBillboardConstraint()
         bb.freeAxes = .all
         node.constraints = [bb]
 
-        // Position gets set by applySunDirection(...)
+        node.renderingOrder = 100_000
         return node
-    } 
+    }
 }
