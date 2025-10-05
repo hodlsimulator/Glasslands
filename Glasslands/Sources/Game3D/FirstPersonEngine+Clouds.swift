@@ -20,7 +20,7 @@ extension FirstPersonEngine {
     @MainActor
     func enableVolumetricCloudImpostors(
         _ on: Bool,
-        vapour: CGFloat = 2.8,
+        vapour: CGFloat = 3.0,
         coverage: CGFloat = 0.42,
         horizonLift: CGFloat = 0.14
     ) {
