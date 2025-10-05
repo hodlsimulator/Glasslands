@@ -22,7 +22,7 @@ struct Scene3DView: UIViewRepresentable {
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
 
-        view.antialiasingMode = SCNAntialiasingMode.none
+        view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
@@ -50,32 +50,48 @@ struct Scene3DView: UIViewRepresentable {
             cam.whitePoint = 1.0
             cam.minimumExposure = -1.0
             cam.maximumExposure = 2.0
-
-            // Only EDR-hot pixels bloom (the sun), not SDR-lit trees.
             cam.bloomThreshold = 1.15
             cam.bloomIntensity = 1.25
             cam.bloomBlurRadius = 12.0
         }
 
-        let proxy = RendererProxy(engine: engine)
-        context.coordinator.proxy = proxy
-        view.delegate = proxy
+        let link = CADisplayLink(target: context.coordinator, selector: #selector(Coordinator.onTick(_:)))
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        } else {
+            link.preferredFramesPerSecond = 60
+        }
+        context.coordinator.link = link
+        link.add(to: .main, forMode: .default)
 
         engine.setPaused(isPaused)
-
         DispatchQueue.main.async { onReady(engine) }
-
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         context.coordinator.engine?.setPaused(isPaused)
+        context.coordinator.link?.isPaused = isPaused
+    }
+
+    static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
+        coordinator.link?.invalidate()
+        coordinator.link = nil
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator {
+    @MainActor
+    final class Coordinator: NSObject {
         var engine: FirstPersonEngine?
-        var proxy: RendererProxy?
+        var link: CADisplayLink?
+
+        // No deinit body; cleanup happens in dismantleUIView
+
+        @objc func onTick(_ link: CADisplayLink) {
+            let t = link.timestamp
+            engine?.stepUpdateMain(at: t)
+            engine?.tickVolumetricClouds(atRenderTime: t)
+        }
     }
 }

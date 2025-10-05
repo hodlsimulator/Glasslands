@@ -127,23 +127,15 @@ final class FirstPersonEngine: NSObject {
     }
 
     @MainActor private func applyCloudSunUniforms() {
-        // World-space sun direction already exists in sunDirWorld (unit)
-        let sunW = simd_normalize(sunDirWorld)
-
-        // Convert to view space for the shader
-        let pov = (scnView?.pointOfView ?? camNode).presentation
-        let invView = simd_inverse(pov.simdWorldTransform)
-        let sunView4 = invView * simd_float4(sunW, 0)                // w=0 for direction
-        let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-
+        let sunV = SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z)
         let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
 
-        // Billboards (if present)
+        // Billboards (unchanged)
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
-                    m.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
+                    m.setValue(sunV, forKey: "sunDirWorld")
                     m.setValue(tintV, forKey: "sunTint")
                     m.setValue(cloudSunBacklight, forKey: "sunBacklight")
                     m.setValue(cloudHorizonFade, forKey: "horizonFade")
@@ -151,14 +143,15 @@ final class FirstPersonEngine: NSObject {
             }
         }
 
-        // Volumetric sphere (now a minimal shader expecting sunDirView + sunTint)
+        // Volumetric sphere (now back to SCNProgram + Metal)
         let sphere =
-            skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
-            ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
 
         if let m = sphere?.geometry?.firstMaterial {
-            m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
+            m.setValue(sunV, forKey: "sunDirWorld")
             m.setValue(tintV, forKey: "sunTint")
+            VolumetricCloudProgram.updateUniforms(from: m)
         }
     }
 
@@ -607,19 +600,13 @@ final class FirstPersonEngine: NSObject {
     // Called by RendererProxy each frame
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
-        guard
-            let sphere =
-                skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
-                ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
-            let m = sphere.geometry?.firstMaterial
-        else { return }
+        let sphere =
+            scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
 
-        // Keep sun updated in view space as the camera moves/turns
-        let pov = (scnView?.pointOfView ?? camNode).presentation
-        let invView = simd_inverse(pov.simdWorldTransform)
-        let sunView4 = invView * simd_float4(sunDirWorld, 0)
-        let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-        m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
+        guard let m = sphere?.geometry?.firstMaterial else { return }
+        m.setValue(CGFloat(t), forKey: "time")
+        VolumetricCloudProgram.updateUniforms(from: m)
     }
     
     // MARK: - Sun sprite (HDR)

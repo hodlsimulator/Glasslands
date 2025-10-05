@@ -5,16 +5,127 @@
 //  Created by . . on 10/5/25.
 //
 
-// VolumetricCloudProgram.swift
-// Glasslands
-
 import SceneKit
+import simd
 import UIKit
+import os.lock
+
+private struct CloudUniforms {
+    var sunDirWorld: simd_float4
+    var sunTint:     simd_float4
+    var time:        Float
+    var wind:        simd_float2
+    var baseY:       Float
+    var topY:        Float
+    var coverage:    Float
+    var densityMul:  Float
+    var stepMul:     Float
+    var horizonLift: Float
+    var _pad:        Float = 0
+}
+
+// Non-actor store so the render thread can read without MainActor hops.
+private final class CloudUniformStore {
+    static let shared = CloudUniformStore()
+    private var lock = os_unfair_lock_s()
+    private var U = CloudUniforms(
+        sunDirWorld: simd_float4(0, 1, 0, 0),
+        sunTint:     simd_float4(1, 1, 1, 0),
+        time:        0,
+        wind:        simd_float2(6, 2),
+        baseY:       1350,
+        topY:        2500,
+        coverage:    0.55,
+        densityMul:  1.0,
+        stepMul:     1.0,
+        horizonLift: 0.16
+    )
+
+    func snapshot() -> CloudUniforms {
+        os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }
+        return U
+    }
+
+    @MainActor
+    func set(_ newValue: CloudUniforms) {
+        os_unfair_lock_lock(&lock); U = newValue; os_unfair_lock_unlock(&lock)
+    }
+}
 
 enum VolumetricCloudProgram {
-    @MainActor
+    // IMPORTANT: No @MainActor here, so the binding closure below is non-isolated.
     static func makeMaterial() -> SCNMaterial {
-        // Forward to the shader-modifier implementation (no SCNProgram; render-thread safe).
-        return VolumetricCloudMaterial.makeMaterial()
+        let m = SCNMaterial()
+        m.isDoubleSided = true
+        m.lightingModel = .constant
+        m.blendMode = .alpha
+        m.transparencyMode = .aOne
+        m.readsFromDepthBuffer = false
+        m.writesToDepthBuffer = false
+
+        let prog = SCNProgram()
+        prog.vertexFunctionName = "clouds_vertex"
+        prog.fragmentFunctionName = "clouds_fragment"
+        prog.delegate = ErrorLog.shared
+        m.program = prog
+
+        // Defaults (updated on main via updateUniforms).
+        m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirWorld")
+        m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
+        m.setValue(0.0 as CGFloat,           forKey: "time")
+        m.setValue(SCNVector3(6.0, 2.0, 0.0),forKey: "wind")   // xy used
+        m.setValue(1350.0 as CGFloat,        forKey: "baseY")
+        m.setValue(2500.0 as CGFloat,        forKey: "topY")
+        m.setValue(0.55 as CGFloat,          forKey: "coverage")
+        m.setValue(1.00 as CGFloat,          forKey: "densityMul")
+        m.setValue(1.00 as CGFloat,          forKey: "stepMul")
+        m.setValue(0.16 as CGFloat,          forKey: "horizonLift")
+
+        // Render-thread binding: copies POD bytes only (no KVC).
+        prog.handleBinding(ofBufferNamed: "uniforms", frequency: .perFrame) { stream, _, _, _ in
+            var U = CloudUniformStore.shared.snapshot()
+            stream.writeBytes(&U, count: MemoryLayout<CloudUniforms>.stride)
+        }
+
+        // Prime cache once on creation.
+        updateUniforms(from: m)
+        return m
+    }
+
+    /// Call on the main thread whenever time/sun/coverage/etc. changes.
+    @MainActor
+    static func updateUniforms(from mat: SCNMaterial) {
+        func f(_ key: String, _ def: CGFloat) -> Float {
+            if let cg = mat.value(forKey: key) as? CGFloat { return Float(cg) }
+            return Float(def)
+        }
+        func v3(_ key: String, _ def: SCNVector3) -> simd_float3 {
+            let v = (mat.value(forKey: key) as? SCNVector3) ?? def
+            return simd_float3(Float(v.x), Float(v.y), Float(v.z))
+        }
+
+        let sunDir = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
+        let tint   = v3("sunTint",     SCNVector3(1, 1, 1))
+        let wind3  = v3("wind",        SCNVector3(6, 2, 0))
+
+        var U = CloudUniformStore.shared.snapshot()
+        U.sunDirWorld = simd_float4(sunDir, 0)
+        U.sunTint     = simd_float4(tint, 0)
+        U.time        = f("time", 0)
+        U.wind        = simd_float2(wind3.x, wind3.y)
+        U.baseY       = f("baseY", 1350)
+        U.topY        = f("topY", 2500)
+        U.coverage    = f("coverage", 0.55)
+        U.densityMul  = f("densityMul", 1.0)
+        U.stepMul     = f("stepMul", 1.0)
+        U.horizonLift = f("horizonLift", 0.16)
+        CloudUniformStore.shared.set(U)
+    }
+
+    private final class ErrorLog: NSObject, SCNProgramDelegate {
+        static let shared = ErrorLog()
+        func program(_ program: SCNProgram, handleError error: Error) {
+            print("[VolumetricClouds] Metal compile error: \(error)")
+        }
     }
 }
