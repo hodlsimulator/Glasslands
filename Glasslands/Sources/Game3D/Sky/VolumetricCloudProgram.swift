@@ -4,41 +4,34 @@
 //
 //  Created by . . on 10/5/25.
 //
+//  SCNProgram + Metal uniforms for the volumetric cloud dome.
+//
 
 import SceneKit
 import simd
 import UIKit
 import os.lock
 
+// Must match the Metal layout exactly (packed into float4s).
 private struct CloudUniforms {
-    var sunDirWorld: simd_float4
-    var sunTint:     simd_float4
-    var time:        Float
-    var wind:        simd_float2
-    var baseY:       Float
-    var topY:        Float
-    var coverage:    Float
-    var densityMul:  Float
-    var stepMul:     Float
-    var horizonLift: Float
-    var _pad:        Float = 0
+    var sunDirWorld : simd_float4
+    var sunTint     : simd_float4
+    var params0     : simd_float4   // x=time, y=wind.x, z=wind.y, w=baseY
+    var params1     : simd_float4   // x=topY, y=coverage, z=densityMul, w=stepMul
+    var params2     : simd_float4   // x=mieG, y=powderK, z=horizonLift, w=detailMul
 }
 
-// Simple, lock-protected POD store; no MainActor usage here.
+// Simple lock‑protected POD store.
 private final class CloudUniformStore {
     static let shared = CloudUniformStore()
+
     private var lock = os_unfair_lock_s()
     private var U = CloudUniforms(
         sunDirWorld: simd_float4(0, 1, 0, 0),
-        sunTint:     simd_float4(1, 1, 1, 0),
-        time:        0,
-        wind:        simd_float2(6, 2),
-        baseY:       1350,
-        topY:        2500,
-        coverage:    0.40,
-        densityMul:  1.0,
-        stepMul:     1.0,
-        horizonLift: 0.16
+        sunTint:     simd_float4(1.00, 0.94, 0.82, 0),
+        params0:     simd_float4(0, 6, 2, 1350),      // time, windX, windY, baseY
+        params1:     simd_float4(2500, 0.42, 1.30, 0.95), // topY, coverage, densityMul, stepMul
+        params2:     simd_float4(0.65, 1.80, 0.18, 1.00)  // g, powderK, horizonLift, detailMul
     )
 
     func snapshot() -> CloudUniforms {
@@ -50,10 +43,10 @@ private final class CloudUniformStore {
         os_unfair_lock_lock(&lock); U = newValue; os_unfair_lock_unlock(&lock)
     }
 
-    // Per-frame update from the game loop (safe to call on main).
+    // Per‑frame update (main thread safe).
     func setTimeSun(time: Float, sun: simd_float3) {
         os_unfair_lock_lock(&lock)
-        U.time = time
+        U.params0.x = time
         U.sunDirWorld = simd_float4(simd_normalize(sun), 0)
         os_unfair_lock_unlock(&lock)
     }
@@ -65,7 +58,7 @@ enum VolumetricCloudProgram {
         let m = SCNMaterial()
         m.isDoubleSided = true
         m.lightingModel = .constant
-        m.blendMode = .alpha
+        m.blendMode = .alpha          // composite with the skydome behind
         m.transparencyMode = .aOne
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
@@ -73,33 +66,35 @@ enum VolumetricCloudProgram {
         let prog = SCNProgram()
         prog.vertexFunctionName   = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
-        // IMPORTANT: no delegate here (it’s called on the render queue).
         m.program = prog
 
-        // Defaults (primed once; live values come from the POD each frame)
-        m.setValue(SCNVector3(0, 1, 0),            forKey: "sunDirWorld")
-        m.setValue(SCNVector3(1.00, 0.94, 0.82),   forKey: "sunTint")
-        m.setValue(0.0 as CGFloat,                 forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0),      forKey: "wind")
-        m.setValue(1350.0 as CGFloat,              forKey: "baseY")
-        m.setValue(2500.0 as CGFloat,              forKey: "topY")
-        m.setValue(0.40  as CGFloat,               forKey: "coverage")
-        m.setValue(1.00  as CGFloat,               forKey: "densityMul")
-        m.setValue(1.00  as CGFloat,               forKey: "stepMul")
-        m.setValue(0.16  as CGFloat,               forKey: "horizonLift")
-
-        // Bind the POD buffer to the Metal arg name EXACTLY ("U") and with correct size.
+        // Bind the POD buffer named "U"
         prog.handleBinding(ofBufferNamed: "U", frequency: .perFrame) { stream, _, _, _ in
             var U = CloudUniformStore.shared.snapshot()
             stream.writeBytes(&U, count: MemoryLayout<CloudUniforms>.stride)
         }
 
-        // Prime the POD once from the material’s KVCs.
+        // Defaults exposed via KVC (so gameplay code can tweak live):
+        m.setValue(SCNVector3(0, 1, 0),                         forKey: "sunDirWorld")
+        m.setValue(SCNVector3(1.00, 0.94, 0.82),                forKey: "sunTint")
+        m.setValue(0.0 as CGFloat,                              forKey: "time")
+        m.setValue(SCNVector3(6.0, 2.0, 0.0),                   forKey: "wind")
+        m.setValue(1350.0 as CGFloat,                           forKey: "baseY")
+        m.setValue(2500.0 as CGFloat,                           forKey: "topY")
+        m.setValue(0.42 as CGFloat,                             forKey: "coverage")
+        m.setValue(1.30 as CGFloat,                             forKey: "densityMul")
+        m.setValue(0.95 as CGFloat,                             forKey: "stepMul")
+        m.setValue(0.18 as CGFloat,                             forKey: "horizonLift")
+        m.setValue(0.65 as CGFloat,                             forKey: "mieG")
+        m.setValue(1.80 as CGFloat,                             forKey: "powderK")
+        m.setValue(1.00 as CGFloat,                             forKey: "detailMul")
+
+        // Prime the store from these defaults.
         updateUniforms(from: m)
         return m
     }
 
-    // Called once on main when building the sky or changing sliders.
+    // Update the POD from an SCNMaterial’s KVCs (main thread).
     static func updateUniforms(from mat: SCNMaterial) {
         func f(_ key: String, _ def: CGFloat) -> Float {
             if let cg = mat.value(forKey: key) as? CGFloat { return Float(cg) }
@@ -111,24 +106,37 @@ enum VolumetricCloudProgram {
         }
 
         let sunW   = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
-        let tint   = v3("sunTint",      SCNVector3(1, 1, 1))
-        let wind3  = v3("wind",         SCNVector3(6, 2, 0))
+        let tint   = v3("sunTint", SCNVector3(1, 1, 1))
+        let wind3  = v3("wind",    SCNVector3(6, 2, 0))
 
         var U = CloudUniformStore.shared.snapshot()
         U.sunDirWorld = simd_float4(sunW, 0)
         U.sunTint     = simd_float4(tint, 0)
-        U.time        = f("time", 0)
-        U.wind        = simd_float2(wind3.x, wind3.y)
-        U.baseY       = f("baseY", 1350)
-        U.topY        = f("topY", 2500)
-        U.coverage    = f("coverage", 0.40)
-        U.densityMul  = f("densityMul", 1.0)
-        U.stepMul     = f("stepMul", 1.0)
-        U.horizonLift = f("horizonLift", 0.16)
+
+        U.params0 = simd_float4(
+            f("time", 0),
+            wind3.x, wind3.y,
+            f("baseY", 1350)
+        )
+
+        U.params1 = simd_float4(
+            f("topY", 2500),
+            f("coverage", 0.42),
+            f("densityMul", 1.30),
+            f("stepMul", 0.95)
+        )
+
+        U.params2 = simd_float4(
+            f("mieG", 0.65),
+            f("powderK", 1.80),
+            f("horizonLift", 0.18),
+            f("detailMul", 1.00)
+        )
+
         CloudUniformStore.shared.set(U)
     }
 
-    // Per-frame call from your main-thread tick (already present in FirstPersonEngine).
+    // Per‑frame call from the renderer.
     static func setPerFrame(time: Float, sunDirWorld: simd_float3) {
         CloudUniformStore.shared.setTimeSun(time: time, sun: sunDirWorld)
     }
