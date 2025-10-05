@@ -395,10 +395,8 @@ final class FirstPersonEngine: NSObject {
         clouds.simdPosition = .zero
         scene.rootNode.addChildNode(clouds)
 
-        // Fresh HDR sun disc billboard drawn AFTER the volumetric layer
-        let sun = makeHDRSunDiscNode(angularSizeDeg: 1.05)
-        skyAnchor.addChildNode(sun)
-        sunDiscNode = sun
+        // No billboard sprite: the sun is drawn inside the volumetric shader now.
+        sunDiscNode = nil
 
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
         applyCloudSunUniforms()
