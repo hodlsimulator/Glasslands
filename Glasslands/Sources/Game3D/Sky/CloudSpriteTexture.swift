@@ -21,8 +21,6 @@ enum CloudSpriteTexture {
         let size: Int
     }
 
-    /// Builds a tiny atlas of puff images (sRGB, premultiplied alpha).
-    /// Each image is unique enough to prevent obvious repetition.
     @MainActor
     static func makeAtlas(
         size: Int = 512,
@@ -42,8 +40,6 @@ enum CloudSpriteTexture {
         return Atlas(images: images, size: s)
     }
 
-    // MARK: - Internals
-
     @inline(__always)
     private static func smooth01(_ x: Float) -> Float {
         let t = max(0, min(1, x))
@@ -52,7 +48,6 @@ enum CloudSpriteTexture {
 
     @inline(__always)
     private static func smin(_ a: Float, _ b: Float, _ k: Float) -> Float {
-        // Smooth union of SDFs
         let res = -log(exp(-k * a) + exp(-k * b)) / k
         return res.isFinite ? res : min(a, b)
     }
@@ -66,7 +61,6 @@ enum CloudSpriteTexture {
         return Float(h & 0x00FF_FFFF) * (1.0 / 16_777_216.0)
     }
 
-    // Tiny value-noise for micro grain
     @inline(__always)
     private static func vnoise(_ x: Float, _ y: Float) -> Float {
         let ix = floorf(x), iy = floorf(y)
@@ -86,7 +80,6 @@ enum CloudSpriteTexture {
         let stride = W * 4
         var buf = [UInt8](repeating: 0, count: W * H * 4)
 
-        // Simple LCG
         var state = (seed == 0) ? 1 : Int(seed)
         @inline(__always) func frand() -> Float {
             state = 1664525 &* state &+ 1013904223
@@ -96,11 +89,10 @@ enum CloudSpriteTexture {
         struct Ball { var c: simd_float2; var r: Float }
         var balls: [Ball] = []
 
-        // Core + lobes → classic cauliflower silhouette
         let coreR: Float = 0.30 + frand() * 0.05
         balls.append(Ball(c: simd_float2(0.50, 0.53 + frand()*0.03), r: coreR))
 
-        let capN = 4 + Int(frand() * 3)   // 4–6 small puffs on top
+        let capN = 4 + Int(frand() * 3)
         for _ in 0..<capN {
             let a = (frand() * 0.9 - 0.45) * .pi
             let d: Float = 0.20 + frand() * 0.20
@@ -109,7 +101,7 @@ enum CloudSpriteTexture {
             balls.append(Ball(c: c, r: r))
         }
 
-        let skirtN = 3 + Int(frand() * 3) // 3–5 base puffs
+        let skirtN = 3 + Int(frand() * 3)
         for _ in 0..<skirtN {
             let x = 0.38 + frand() * 0.24
             let y = 0.46 + frand() * 0.05
@@ -117,7 +109,6 @@ enum CloudSpriteTexture {
             balls.append(Ball(c: simd_float2(x, y), r: r))
         }
 
-        // SDF parameters
         let kBlend: Float = 8.0
         @inline(__always)
         func sdf(_ p: simd_float2) -> Float {
@@ -129,15 +120,14 @@ enum CloudSpriteTexture {
             return d
         }
 
-        let edgeSoft: Float = 0.055 + 0.015 * frand()   // falloff thickness
-        let topBias: Float  = 0.02  + 0.02  * frand()   // slight brightening at top
+        let edgeSoft: Float = 0.055 + 0.015 * frand()
+        let topBias: Float  = 0.02  + 0.02  * frand()
 
         for y in 0..<H {
             let v = Float(y) / Float(H - 1)
             for x in 0..<W {
                 let u = Float(x) / Float(W - 1)
 
-                // Frame: keep a 2-px fully transparent border for safe sampling
                 if x < 2 || y < 2 || x >= W - 2 || y >= H - 2 {
                     let o = (y * W + x) * 4
                     buf[o + 0] = 0; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = 0
@@ -145,29 +135,23 @@ enum CloudSpriteTexture {
                 }
 
                 let p = simd_float2(u, v)
-                let d = sdf(p)      // < 0 inside, > 0 outside
+                let d = sdf(p)
 
-                // Soft edge: feather alpha outward
-                var a = smooth01((-d) / edgeSoft)
+                let a = smooth01((-d) / edgeSoft)
 
-                // Subtle vertical shading so the top feels sun-kissed
-                let ny = smooth01((0.55 - v) * 1.6)     // brighter toward the top
+                let ny = smooth01((0.55 - v) * 1.6)
                 let shade = 1.0 + topBias * ny
 
-                // Micro grain to avoid flat, sterile white
                 let g = 0.96 + 0.04 * vnoise(u * 48.0, v * 48.0)
 
-                // Base colour is clean white, with tiny warmth baked by material later
                 var r = 1.0 * shade * g
                 var gch = 1.0 * shade * g
                 var b = 1.0 * shade * g
 
-                // Clamp
                 r = min(1, max(0, r))
                 gch = min(1, max(0, gch))
                 b = min(1, max(0, b))
 
-                // Premultiplied alpha
                 let o = (y * W + x) * 4
                 buf[o + 0] = UInt8(r * a * 255.0 + 0.5)
                 buf[o + 1] = UInt8(gch * a * 255.0 + 0.5)

@@ -611,9 +611,7 @@ final class FirstPersonEngine: NSObject {
         guard let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
               let m = sphere.geometry?.firstMaterial else { return }
         m.setValue(CGFloat(t), forKey: "time")
-
-        // Gentle wind; can be hooked to recipe/biome later
-        // Units are m/s in world XZ.
-        m.setValue(SCNVector2(6.0, 2.0), forKey: "wind")
+        // CHANGED: use SCNVector3; shader reads wind.xy
+        m.setValue(SCNVector3(6.0, 2.0, 0.0), forKey: "wind")
     }
 }
