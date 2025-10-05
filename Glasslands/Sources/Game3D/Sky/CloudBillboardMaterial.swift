@@ -16,11 +16,11 @@ enum CloudBillboardMaterial {
     static func makeCurrent() -> SCNMaterial { makeVolumetricImpostor() }
 
     // Version marker for verification logs.
-    private static let marker = "/* VOL_IMPOSTOR_VSAFE_004 */"
+    private static let marker = "/* VOL_IMPOSTOR_VSAFE_005 */"
 
     @MainActor
     static func makeVolumetricImpostor() -> SCNMaterial {
-        // Single-sample, premultiplied impostor; no redeclarations of SceneKit's built-ins.
+        // Single-sample, premultiplied impostor; NO helper functions outside #pragma body.
         let fragment = """
         \(marker)
         #pragma transparent
@@ -33,36 +33,24 @@ enum CloudBillboardMaterial {
         float  stepMul;      // 0.7..1.5 (scales extinction)
         float  horizonLift;
 
-        float  saturate1(float x)      { return clamp(x, 0.0f, 1.0f); }
-        float3 sat3(float3 v)          { return clamp(v, float3(0.0f), float3(1.0f)); }
-
-        float  noise21(float2 p) {
-            float n = sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f;
-            return fract(n);
-        }
-
-        float  phaseSchlick(float g, float mu) {
-            float k = 1.55f * g - 0.55f * g * g;     // cheap, stable fit
-            float d = 1.0f + k * (1.0f - mu);
-            return (1.0f - k*k) / (d*d + 1e-4f);
-        }
-
         #pragma body
 
-        // Alpha mask from the material's diffuse texture.
-        // NOTE: u_diffuseTexture and u_diffuseTextureSampler are provided by SceneKit.
+        // Alpha mask from the material's diffuse texture (SceneKit provides these built-ins).
         float2 uv  = _surface.diffuseTexcoord;
         float  a0  = u_diffuseTexture.sample(u_diffuseTextureSampler, uv).a;
         if (a0 < 0.002f) { discard_fragment(); }
 
-        // View ray and lighting phase.
+        // View ray and lighting phase (Schlick single-scatter inline).
         float3 rd   = float3(0.0f, 0.0f, 1.0f);
         float3 sunV = normalize(sunDirView);
         float  mu   = clamp(dot(rd, sunV), -1.0f, 1.0f);
-        float  phase= phaseSchlick(0.62f, mu);
+        float  g    = 0.62f;
+        float  k    = 1.55f * g - 0.55f * g * g;
+        float  den  = 1.0f + k * (1.0f - mu);
+        float  phase= (1.0f - k*k) / (den*den + 1e-4f);
 
         // Shape/coverage.
-        float c       = saturate1(coverage);
+        float c       = clamp(coverage, 0.0f, 1.0f);
         float thresh  = clamp(0.56f - 0.36f * c, 0.20f, 0.62f);
         float soft    = 0.25f;
         float q       = clamp(stepMul, 0.7f, 1.5f);
@@ -71,94 +59,37 @@ enum CloudBillboardMaterial {
         float  T = 1.0f;             // transmittance
         float3 S = float3(0.0f);     // single scatter
 
-        // 8 fixed slices (no loops); sampler use is only the single alpha read above.
-        { float h=0.0625f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
-        { float h=0.1875f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
-        { float h=0.3125f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
-        { float h=0.4375f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
-        { float h=0.5625f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
-        { float h=0.6875f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
-        { float h=0.8125f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
-        { float h=0.9375f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
-          float bias=(h-0.5f)*0.10f+j;
-          float d=smoothstep(thresh-soft,thresh+soft,saturate1(a0+bias));
-          float powder=1.0f-exp(-2.0f*d);
-          float dens=max(0.0f,d*env)*1.15f;
-          float a=exp(-kSigma*dens);
-          float sliceT=T*(1.0f-a);
-          S+=sunTint*(phase*(0.40f+0.60f*powder))*sliceT;
-          T*=a; }
+        // Helper macro for 8 fixed slices (keeps code simple without extra functions).
+        #define SLICE(hVal) { \
+            float h = hVal; \
+            float env = smoothstep(0.06f, 0.40f, h) * (1.0f - smoothstep(0.58f, 0.98f, h)); \
+            float n = sin(dot(uv * 19.0f + float2(h, h * 1.7f), float2(12.9898f, 78.233f))) * 43758.5453f; \
+            float j = (fract(n) - 0.5f) * 0.08f; \
+            float bias = (h - 0.5f) * 0.10f + j; \
+            float d = smoothstep(thresh - soft, thresh + soft, clamp(a0 + bias, 0.0f, 1.0f)); \
+            float powder = 1.0f - exp(-2.0f * d); \
+            float dens = max(0.0f, d * env) * 1.15f; \
+            float a = exp(-kSigma * dens); \
+            float sliceT = T * (1.0f - a); \
+            S += sunTint * (phase * (0.40f + 0.60f * powder)) * sliceT; \
+            T *= a; \
+        }
 
-        // Subtle horizon lift.
+        SLICE(0.0625f)
+        SLICE(0.1875f)
+        SLICE(0.3125f)
+        SLICE(0.4375f)
+        SLICE(0.5625f)
+        SLICE(0.6875f)
+        SLICE(0.8125f)
+        SLICE(0.9375f)
+
+        #undef SLICE
+
+        // Subtle horizon lift and premultiplied write.
         S += float3(horizonLift * (1.0f - uv.y) * 0.22f);
-
-        // Premultiplied output.
-        float alphaOut = saturate1((1.0f - T) * a0);
-        _output.color  = float4(sat3(S) * alphaOut, alphaOut);
+        float alphaOut = clamp((1.0f - T) * a0, 0.0f, 1.0f);
+        _output.color  = float4(clamp(S, float3(0.0f), float3(1.0f)) * alphaOut, alphaOut);
         """
 
         let m = SCNMaterial()
@@ -170,6 +101,7 @@ enum CloudBillboardMaterial {
         m.writesToDepthBuffer = false
         m.shaderModifiers = [.fragment: fragment]
 
+        // Safe sampling defaults
         m.diffuse.wrapS = .clamp
         m.diffuse.wrapT = .clamp
         m.diffuse.mipFilter = .linear
@@ -177,6 +109,7 @@ enum CloudBillboardMaterial {
         m.diffuse.magnificationFilter = .linear
         m.diffuse.maxAnisotropy = 4.0
 
+        // Default arguments
         m.setValue(SCNVector3(0, 0, 1),            forKey: "sunDirView")
         m.setValue(SCNVector3(1.00, 0.94, 0.82),   forKey: "sunTint")
         m.setValue(0.42 as CGFloat,                forKey: "coverage")
