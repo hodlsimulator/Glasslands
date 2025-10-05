@@ -1,5 +1,5 @@
 //
-//  FirstPersonEngine.swift
+//  c
 //  Glasslands
 //
 //  Created by . . on 9/30/25.
@@ -159,6 +159,45 @@ final class FirstPersonEngine: NSObject {
         if let m = sphere?.geometry?.firstMaterial {
             m.setValue(sunViewV, forKey: "sunDirView")
             m.setValue(tintV,    forKey: "sunTint")
+        }
+    }
+    
+    @MainActor
+    func enableVolumetricCloudImpostors(_ on: Bool) {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+
+        // Pull the fragment once if enabling
+        let fragment: String? = on ? {
+            let mat = CloudBillboardMaterial.makeVolumetricImpostor()
+            let frag = mat.shaderModifiers?[.fragment] ?? ""
+            return CloudBillboardMaterial.volumetricMarker + frag
+        }() : nil
+
+        // Sun direction in VIEW space (stable with camera)
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let invView = simd_inverse(pov.simdWorldTransform)
+        let s4 = invView * simd_float4(simd_normalize(sunDirWorld), 0)
+        let s = simd_normalize(simd_float3(s4.x, s4.y, s4.z))
+        let sunViewV = SCNVector3(s.x, s.y, s.z)
+        let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
+
+        layer.enumerateChildNodes { node, _ in
+            guard let g = node.geometry else { return }
+            for m in g.materials {
+                var mods = m.shaderModifiers ?? [:]
+                mods[.fragment] = fragment
+                m.shaderModifiers = mods
+
+                if on {
+                    // Required args for the volumetric impostor fragment
+                    m.setValue(sunViewV, forKey: "sunDirView")
+                    m.setValue(tintV,   forKey: "sunTint")
+                    m.setValue(0.42 as CGFloat, forKey: "coverage")
+                    m.setValue(1.10 as CGFloat, forKey: "densityMul")
+                    m.setValue(1.00 as CGFloat, forKey: "stepMul")
+                    m.setValue(0.16 as CGFloat, forKey: "horizonLift")
+                }
+            }
         }
     }
 
@@ -407,6 +446,7 @@ final class FirstPersonEngine: NSObject {
             node.name = "CumulusBillboardLayer"
             self.skyAnchor.addChildNode(node)
             self.applyCloudSunUniforms()
+            self.enableVolumetricCloudImpostors(true)
             self.forceReplaceAndVerifyClouds()
             
             self.debugCloudShaderOnce(tag: "after-attach")

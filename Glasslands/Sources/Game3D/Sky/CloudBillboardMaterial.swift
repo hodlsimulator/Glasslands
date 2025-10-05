@@ -119,7 +119,7 @@ enum CloudBillboardMaterial {
         S += float3(horizonLift * (1.0f - uv.y) * 0.22f);
 
         float alphaOut = (1.0f - T) * a0;
-        _output.color = float4(sat3(S), clamp(alphaOut, 0.0f, 1.0f));
+        _output.color = float4(sat3(S) * alphaOut, clamp(alphaOut, 0.0f, 1.0f));
         """
 
         let m = SCNMaterial()
