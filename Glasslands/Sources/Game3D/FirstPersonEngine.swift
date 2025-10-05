@@ -131,34 +131,34 @@ final class FirstPersonEngine: NSObject {
         let sunW = simd_normalize(sunDirWorld)
         let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
 
-        // Compute sun in *view space* once
+        // Compute sun in view space once
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let invView = simd_inverse(pov.simdWorldTransform)
         let sunView4 = invView * simd_float4(sunW, 0)          // w = 0 → direction
         let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
         let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
 
-        // Billboards: pass view-space sunDirView (no scn_frame in shader)
+        // Billboards
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
                     m.setValue(sunViewV, forKey: "sunDirView")
-                    m.setValue(tintV, forKey: "sunTint")
+                    m.setValue(tintV,    forKey: "sunTint")
                     m.setValue(cloudSunBacklight, forKey: "sunBacklight")
                     m.setValue(cloudHorizonFade,  forKey: "horizonFade")
                 }
             }
         }
 
-        // Volumetric sphere (shader-modifier expects *view-space* sunDirView)
+        // Volumetric sphere
         let sphere =
             skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
             ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
 
         if let m = sphere?.geometry?.firstMaterial {
             m.setValue(sunViewV, forKey: "sunDirView")
-            m.setValue(tintV,   forKey: "sunTint")
+            m.setValue(tintV,    forKey: "sunTint")
         }
     }
 
@@ -385,20 +385,23 @@ final class FirstPersonEngine: NSObject {
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
+        // Volumetric sphere (now stable shader modifier)
         scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
-        skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
-
-        // Attach the volumetric sphere to the *skyAnchor* (follows camera position, not rotation)
-        let clouds = VolumetricCloudLayer.make(
+        let vol = VolumetricCloudLayer.make(
             radius: CGFloat(cfg.skyDistance),
             baseY: 1350,
             topY: 2500,
             coverage: 0.55
         )
-        clouds.simdPosition = .zero
-        skyAnchor.addChildNode(clouds)
+        vol.simdTransform = matrix_identity_float4x4
+        vol.renderingOrder = -9_990
+        scene.rootNode.addChildNode(vol)
 
-        sunDiscNode = nil
+        // Add EDR sun disc on top
+        let sun = makeHDRSunDiscNode(angularSizeDeg: 1.05)
+        skyAnchor.addChildNode(sun)
+        sunDiscNode = sun
+
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
         applyCloudSunUniforms()
     }
@@ -614,17 +617,17 @@ final class FirstPersonEngine: NSObject {
             let m = sphere.geometry?.firstMaterial
         else { return }
 
-        // Keep sun vector updated in *view space* as the camera moves
+        // Update time + view-space sun each frame
+        m.setValue(CGFloat(t), forKey: "time")
+
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let invView = simd_inverse(pov.simdWorldTransform)
         let sunView4 = invView * simd_float4(sunDirWorld, 0)
         let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
         let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
-
-        // Update volumetric sphere
         m.setValue(sunViewV, forKey: "sunDirView")
 
-        // Update every billboard material as well
+        // Keep billboards in sync too
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
@@ -645,8 +648,10 @@ final class FirstPersonEngine: NSObject {
         let plane = SCNPlane(width: worldDiameter, height: worldDiameter)
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor.clear  // keep all energy in emission
+        mat.diffuse.contents = UIColor.clear
+        // Extended-range sprite; keep values > 1.0 inside the image for HDR highlight.
         mat.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: 512)
+        mat.emission.intensity = 1.0
         mat.isDoubleSided = false
         mat.writesToDepthBuffer = false
         mat.readsFromDepthBuffer = false
@@ -657,12 +662,11 @@ final class FirstPersonEngine: NSObject {
         let node = SCNNode(geometry: plane)
         node.name = "SunDiscHDR"
         node.castsShadow = false
-        node.renderingOrder = 9_999 // after volumetric layer (-9_990)
 
         let bb = SCNBillboardConstraint()
         bb.freeAxes = .all
         node.constraints = [bb]
-
+        node.renderingOrder = 9_999 // after clouds
         return node
     }
 }

@@ -17,12 +17,10 @@ enum VolumetricCloudLayer {
         let sphere = SCNSphere(radius: max(10, radius * 0.98))
         sphere.segmentCount = 96
 
-        // IMPORTANT: use shader-modifier material (no SCNProgram, no render-thread bindings)
         let mat = VolumetricCloudMaterial.makeMaterial()
-        mat.setValue(baseY,   forKey: "baseY")      // present for later use
-        mat.setValue(topY,    forKey: "topY")
-        mat.setValue(coverage,forKey: "coverage")
-
+        mat.setValue(baseY,    forKey: "baseY")
+        mat.setValue(topY,     forKey: "topY")
+        mat.setValue(coverage, forKey: "coverage")
         sphere.firstMaterial = mat
 
         let node = SCNNode(geometry: sphere)

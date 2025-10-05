@@ -15,36 +15,37 @@ import UIKit
 enum VolumetricCloudMaterial {
     @MainActor
     static func makeMaterial() -> SCNMaterial {
-        // Minimal fragment-stage shader: sky gradient + HDR sun glow.
-        // No scn_frame usage; no per-frame Swift bindings required.
+        // Ultra-stable fragment-stage shader: deep sky + HDR sun.
+        // No helper functions, no loops, no scn_frame, so it won't pink-screen.
         let fragment = """
         #pragma transparent
         #pragma arguments
-        float3 sunDirView;   // unit vector in view space (fed from Swift each frame)
-        float3 sunTint;      // e.g. warm white like 1.00,0.94,0.82
+        float3 sunDirView;   // view-space unit vector (fed from Swift)
+        float3 sunTint;      // e.g. 1.00,0.94,0.82
+        float3 skyZenith;    // deep sky blue
+        float3 skyHorizon;   // horizon blue (avoid white)
+        float  sunEDRCore;   // 5..8: HDR punch for sun core
 
         #pragma body
-        // View-space: _surface.view points from fragment toward camera.
+        // In fragment stage: _surface.view points from fragment -> camera.
         // Ray from camera to fragment is the opposite.
         float3 V  = normalize(_surface.view);
         float3 rd = normalize(-V);
         float3 sunV = normalize(sunDirView);
 
-        // Sky gradient
-        float tSky     = clamp(rd.y * 0.6 + 0.4, 0.0, 1.0);
-        float3 zenith  = float3(0.30, 0.56, 0.96);
-        float3 horizon = float3(0.88, 0.93, 0.99);
-        float3 col     = horizon + (zenith - horizon) * tSky;
+        // Cooler, deeper sky; bias reduces 'too white' look
+        float tSky = clamp(rd.y * 0.62 + 0.30, 0.0, 1.0);
+        float3 col = mix(skyHorizon, skyZenith, tSky);
 
-        // HDR sun disc + halos (values > 1.0 on HDR displays)
-        float ct   = clamp(dot(rd, sunV), -1.0, 1.0);
-        float ang  = acos(ct);
+        // Analytic HDR sun (disc + halos)
+        float ct  = clamp(dot(rd, sunV), -1.0, 1.0);
+        float ang = acos(ct);
         const float rad = 0.95 * 0.017453292519943295; // ~1°
 
         float core  = 1.0 - smoothstep(rad*0.75, rad,        ang);
         float halo1 = 1.0 - smoothstep(rad*1.25, rad*3.50,   ang);
         float halo2 = 1.0 - smoothstep(rad*3.50, rad*7.50,   ang);
-        float edr   = core * 5.0 + halo1 * 0.90 + halo2 * 0.25;
+        float edr   = core * sunEDRCore + halo1 * 0.90 + halo2 * 0.25;
 
         col += sunTint * edr;
 
@@ -60,9 +61,12 @@ enum VolumetricCloudMaterial {
         m.writesToDepthBuffer = false
         m.shaderModifiers = [.fragment: fragment]
 
-        // Defaults; engine keeps sunDirView updated each frame
-        m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
+        // Sensible defaults — engine updates sunDirView every frame.
+        m.setValue(SCNVector3(0, 1, 0),          forKey: "sunDirView")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
+        m.setValue(SCNVector3(0.10, 0.28, 0.65), forKey: "skyZenith")    // deeper
+        m.setValue(SCNVector3(0.55, 0.72, 0.94), forKey: "skyHorizon")   // less white
+        m.setValue(7.0 as CGFloat,               forKey: "sunEDRCore")   // bright core
         return m
     }
 }
