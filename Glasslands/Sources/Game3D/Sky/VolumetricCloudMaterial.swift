@@ -19,6 +19,7 @@ enum VolumetricCloudMaterial {
         let frag = """
         #pragma transparent
         #pragma arguments
+        float3 cameraPos;      // world-space camera position (set from Swift)
         float3 sunDirWorld;
         float3 sunTint;
         float   time;           // seconds
@@ -30,13 +31,13 @@ enum VolumetricCloudMaterial {
         float   stepMul;        // world step scale
         float   horizonLift;    // small lift near horizon
 
-        // ---------- tiny stdlib shims (robust on iOS) ----------
+        // ---- mini stdlib shims (GL/Metal friendly) ----
         float saturate1(float x) { return clamp(x, 0.0, 1.0); }
         float3 saturate3(float3 v){ return clamp(v, float3(0.0), float3(1.0)); }
         float frac1(float x) { return x - floor(x); }
         float lerp1(float a, float b, float t){ return a + (b - a) * t; }
 
-        // ---------- noise ----------
+        // ---- noise ----
         float hash1(float n) { return frac1(sin(n) * 43758.5453123); }
 
         float noise3(float3 x) {
@@ -68,6 +69,7 @@ enum VolumetricCloudMaterial {
         float fbm(float3 p) {
             float a = 0.0;
             float w = 0.5;
+            // fixed-count for mobile compilers
             for (int i = 0; i < 5; i++) {
                 a += noise3(p) * w;
                 p = p * 2.01 + 19.0;
@@ -113,14 +115,14 @@ enum VolumetricCloudMaterial {
 
         #pragma body
 
-        // World-space camera position and fragment position
-        float3 ro = (scn_frame.inverseViewTransform * float4(0.0, 0.0, 0.0, 1.0)).xyz;
+        // World-space fragment position on the sky sphere
         float3 Pw = _surface.position.xyz;
 
-        // Ray from camera to this sky pixel
+        // Per-pixel ray: camera → fragment
+        float3 ro = cameraPos;
         float3 rd = normalize(Pw - ro);
 
-        // Intersect horizontal slab
+        // Intersect horizontal slab [baseY, topY]
         float denom = rd.y;
         if (abs(denom) < 1e-4) { _output.color = float4(0.0,0.0,0.0,0.0); return; }
 
@@ -131,11 +133,11 @@ enum VolumetricCloudMaterial {
         if (t1 <= 0.0) { _output.color = float4(0.0,0.0,0.0,0.0); return; }
         t0 = max(t0, 0.0);
 
-        // March
+        // March (fixed upper bound; early-exit)
+        const int MAX_STEPS = 32;
         float baseStep = 140.0 * stepMul;
         float grazing  = clamp(1.0 - abs(rd.y), 0.0, 1.0);
         float worldStep = baseStep * lerp1(1.0, 1.8, grazing);
-        int   maxSteps  = min(36, max(10, int(ceil((t1 - t0) / worldStep) + 2.0)));
 
         float3 sunW = normalize(sunDirWorld);
         float3 acc  = float3(0.0,0.0,0.0);
@@ -145,7 +147,7 @@ enum VolumetricCloudMaterial {
         float jitter = frac1(dot(Pw, float3(1.0, 57.0, 113.0))) * worldStep;
 
         float t = t0 + jitter;
-        for (int i = 0; i < maxSteps; ++i) {
+        for (int i = 0; i < MAX_STEPS; ++i) {
             float3 p = ro + rd * t;
             if (t > t1) break;
 
@@ -186,6 +188,7 @@ enum VolumetricCloudMaterial {
         m.writesToDepthBuffer = false
         m.shaderModifiers = [.fragment: frag]
 
+        // Defaults (swift updates per-frame)
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirWorld")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
         m.setValue(0.0 as CGFloat, forKey: "time")
@@ -196,6 +199,7 @@ enum VolumetricCloudMaterial {
         m.setValue(1.00 as CGFloat, forKey: "densityMul")
         m.setValue(1.00 as CGFloat, forKey: "stepMul")
         m.setValue(0.16 as CGFloat, forKey: "horizonLift")
+        // cameraPos is set every frame from Swift
         return m
     }
 }
