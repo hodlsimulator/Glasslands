@@ -4,7 +4,8 @@
 //
 //  Created by . . on 10/4/25.
 //
-//  Single source of truth for the sprite material and its soft back-lighting.
+//  Sprite-based cumulus impostors: confined density (no footprint growth),
+//  rounder cores, soft white lighting. Premultiplied output.
 //
 
 import SceneKit
@@ -15,112 +16,134 @@ enum CloudBillboardMaterial {
     @MainActor
     static func makeCurrent() -> SCNMaterial { makeVolumetricImpostor() }
 
-    // Marker for logs/verification.
-    private static let marker = "/* VOL_IMPOSTOR_VSAFE_009_ROUND_DENSE */"
+    // Marker for quick verification.
+    private static let marker = "/* VOL_IMPOSTOR_VSAFE_013_CONFINED_ROUND_NOHASH */"
 
     @MainActor
     static func makeVolumetricImpostor() -> SCNMaterial {
-        // Pure white cumulus puffs; centre-weighted; soft rims; premultiplied.
+
+        // NOTE:
+        //  • No function declarations between #pragma arguments and #pragma body.
+        //  • Any “helpers” are written inline inside the body to keep SceneKit happy.
+
         let fragment = """
         \(marker)
         #pragma transparent
 
         #pragma arguments
         float3 sunDirView;
-        float3 sunTint;      // kept for compatibility
-        float  coverage;     // 0..1
-        float  densityMul;   // 0.5..2.0
-        float  stepMul;      // 0.7..1.5
-        float  horizonLift;
+        float3 sunTint;        // kept for compatibility
+        float coverage;        // 0..1 (unused here but preserved)
+        float densityMul;      // 0.5..3.5 — raise for “more vapour”, stays confined
+        float stepMul;         // 0.7..1.5
+        float horizonLift;     // 0..1
 
         #pragma body
-
-        // Sprite alpha (SceneKit provides these built-ins).
-        float2 uv  = _surface.diffuseTexcoord;
-        float  a0  = u_diffuseTexture.sample(u_diffuseTextureSampler, uv).a;
+        // Sprite alpha.
+        float2 uv = _surface.diffuseTexcoord;
+        float  a0 = u_diffuseTexture.sample(u_diffuseTextureSampler, uv).a;
         if (a0 < 0.002f) { discard_fragment(); }
 
-        // Mild forward-scattering for sun punch.
-        float3 rd   = float3(0.0f, 0.0f, 1.0f);
-        float3 sunV = normalize(sunDirView);
-        float  mu   = clamp(dot(rd, sunV), -1.0f, 1.0f);
-        float  g    = 0.55f;
-        float  kph  = 1.55f * g - 0.55f * g * g;
-        float  den  = 1.0f + kph * (1.0f - mu);
-        float  phase= (1.0f - kph*kph) / (den*den + 1e-4f);
+        // Confinement: tighten edges so extra density never bleeds outside the sprite.
+        float edgePow = 1.35f;
+        float mask    = pow(clamp(a0, 0.0f, 1.0f), edgePow);
 
-        // Rounder density from sprite alpha + thin vertical profile.
-        float c       = clamp(coverage, 0.0f, 1.0f);
-        float thresh  = clamp(0.56f - 0.36f * c, 0.20f, 0.62f);
-        float soft    = 0.40f;                       // more softness => rounder edge
-        float q       = clamp(stepMul, 0.7f, 1.5f);
-        float kSigma  = 0.28f * q / 8.0f * max(0.7f, densityMul);   // denser core
+        // Mild forward scattering for sun “punch”.
+        float3 rd    = float3(0.0f, 0.0f, 1.0f);
+        float3 sunV  = normalize(sunDirView);
+        float  mu    = clamp(dot(rd, sunV), -1.0f, 1.0f);
+        float  g     = 0.55f;
+        float  gg    = g * g;
+        float  phase = (1.0f - gg) / (4.0f * 3.14159265f * pow(1.0f + gg - 2.0f*g*mu, 1.5f));
 
-        float  T = 1.0f;     // transmittance
-        float  ss = 0.0f;    // single-scatter accumulator (scalar)
+        // Optical depth.
+        float q      = clamp(stepMul, 0.7f, 1.5f);
+        float vap    = clamp(densityMul, 0.5f, 3.5f);
+        float kSigma = (0.28f * q / 8.0f) * (0.9f + 1.6f * vap);
 
-        // 8 fixed slices; only the alpha read above uses a sampler.
-        { float h=0.0625f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
-        { float h=0.1875f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
-        { float h=0.3125f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
-        { float h=0.4375f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
-        { float h=0.5625f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
-        { float h=0.6875f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
-        { float h=0.8125f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
-        { float h=0.9375f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
-          float d=smoothstep(thresh-soft,thresh+soft,a0);
-          float dens=max(0.0f,d*env)*1.18f;
-          float a=exp(-kSigma*dens);
-          ss += d * (1.0f - a) * (0.88f + 0.12f*phase);
-          T *= a; }
+        // Tiny per-pixel jitter to kill arced banding when dense.
+        float jitter = fract(sin(dot(uv, float2(12.9898f, 78.233f))) * 43758.5453f) - 0.5f;
+        jitter *= 0.12f;
 
-        // Visibility & roundness: gamma on sprite alpha + volumetric term.
-        float alphaOut = clamp(pow(a0, 0.52f) * (1.0f - pow(T, 0.55f)), 0.0f, 1.0f);
+        float T  = 1.0f; // transmittance
+        float ss = 0.0f; // single scattering accumulator
 
-        // Colour: bright white with ambient lift; centre-weighted; premultiplied.
-        float ambient = 0.65f;
-        float gain    = 2.40f;
-        float  centre = pow(a0, 0.60f);
+        // 8 fixed slices through a thin vertical profile; only a0 used via sampler above.
+        {
+            float h=0.0625f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }{
+            float h=0.1875f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }{
+            float h=0.3125f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }{
+            float h=0.4375f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }{
+            float h=0.5625f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }{
+            float h=0.6875f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }{
+            float h=0.8125f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }{
+            float h=0.9375f + jitter;
+            float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
+            float dens = mask * env * 1.20f;
+            float a = exp(-kSigma*dens);
+            ss += mask * (1.0f - a) * (0.86f + 0.14f*phase);
+            T *= a;
+        }
+
+        // Roundness bias so silhouettes read as cauliflower, not squares.
+        float2 d = uv - float2(0.5f, 0.5f);
+        float  r = clamp(length(d) * 2.0f, 0.0f, 1.0f);
+        float  roundBoost = 1.0f - smoothstep(0.55f, 1.00f, r);  // centre > rim
+
+        // Alpha strictly within original mask, centre-weighted.
+        float alphaOut = clamp(mask * (1.0f - pow(T, 0.62f)) * (0.85f + 0.30f * roundBoost), 0.0f, 1.0f);
+
+        // Bright white, centre-weighted lighting, premultiplied.
+        float ambient = 0.62f;
+        float gain    = 2.35f;
+        float centre  = pow(a0, 0.95f);
         float3 Cpm    = float3(min(1.0f, ambient + gain * ss * centre));
 
         // Gentle horizon lift respecting alpha.
         Cpm += float3(horizonLift * (1.0f - uv.y) * 0.10f) * alphaOut;
-        Cpm  = clamp(Cpm, float3(0.0f), float3(1.0f));
+        Cpm = clamp(Cpm, float3(0.0f), float3(1.0f));
 
         _output.color = float4(Cpm * alphaOut, alphaOut);
         """
@@ -130,11 +153,11 @@ enum CloudBillboardMaterial {
         m.blendMode = .alpha
         m.transparencyMode = .aOne
         m.isDoubleSided = false
-        m.readsFromDepthBuffer = false   // sky layer: draw-order only
+        m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
         m.shaderModifiers = [.fragment: fragment]
 
-        // Sampling defaults
+        // Sampling defaults.
         m.diffuse.wrapS = .clamp
         m.diffuse.wrapT = .clamp
         m.diffuse.mipFilter = .linear
@@ -142,13 +165,13 @@ enum CloudBillboardMaterial {
         m.diffuse.magnificationFilter = .linear
         m.diffuse.maxAnisotropy = 4.0
 
-        // Defaults
-        m.setValue(SCNVector3(0, 0, 1),          forKey: "sunDirView")
-        m.setValue(SCNVector3(1.0, 0.94, 0.82),  forKey: "sunTint")
-        m.setValue(0.42 as CGFloat,              forKey: "coverage")
-        m.setValue(1.20 as CGFloat,              forKey: "densityMul")  // denser
-        m.setValue(0.95 as CGFloat,              forKey: "stepMul")
-        m.setValue(0.14 as CGFloat,              forKey: "horizonLift")
+        // Defaults (engine overrides at runtime).
+        m.setValue(SCNVector3(0, 0, 1),         forKey: "sunDirView")
+        m.setValue(SCNVector3(1.0, 0.94, 0.82), forKey: "sunTint")
+        m.setValue(0.42 as CGFloat,             forKey: "coverage")
+        m.setValue(2.20 as CGFloat,             forKey: "densityMul")  // thicker core
+        m.setValue(0.95 as CGFloat,             forKey: "stepMul")
+        m.setValue(0.14 as CGFloat,             forKey: "horizonLift")
         return m
     }
 

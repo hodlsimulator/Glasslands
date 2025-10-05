@@ -5,6 +5,9 @@
 //  Created by . . on 10/5/25.
 //
 
+//  FirstPersonEngine+Clouds.swift
+//  Glasslands
+
 import SceneKit
 import simd
 import UIKit
@@ -15,8 +18,15 @@ extension FirstPersonEngine {
     // MARK: - Volumetric cloud impostors
 
     @MainActor
-    func enableVolumetricCloudImpostors(_ on: Bool) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+    func enableVolumetricCloudImpostors(
+        _ on: Bool,
+        vapour: CGFloat = 2.6,
+        coverage: CGFloat = 0.52,
+        horizonLift: CGFloat = 0.18
+    ) {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return
+        }
 
         let fragment: String? = on ? {
             let mat = CloudBillboardMaterial.makeVolumetricImpostor()
@@ -39,19 +49,19 @@ extension FirstPersonEngine {
                 m.shaderModifiers = mods
                 if on {
                     m.setValue(sunViewV, forKey: "sunDirView")
-                    m.setValue(tintV, forKey: "sunTint")
-                    m.setValue(0.42 as CGFloat, forKey: "coverage")
-                    m.setValue(1.25 as CGFloat, forKey: "densityMul")   // was 1.10
-                    m.setValue(0.95 as CGFloat, forKey: "stepMul")      // gentler transmittance
-                    m.setValue(0.16 as CGFloat, forKey: "horizonLift")
+                    m.setValue(tintV,    forKey: "sunTint")
+                    m.setValue(coverage, forKey: "coverage")
+                    m.setValue(vapour,   forKey: "densityMul")   // ← dial this if needed
+                    m.setValue(0.95 as CGFloat, forKey: "stepMul")
+                    m.setValue(horizonLift,     forKey: "horizonLift")
                 }
             }
         }
-        
+
         if on { prewarmCloudImpostorPipelines() }
     }
 
-    // Called by RendererProxy each frame
+    // Called by RendererProxy each frame (keep as-is)
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
         guard
@@ -67,8 +77,8 @@ extension FirstPersonEngine {
         let sunView4 = invView * simd_float4(sunDirWorld, 0)
         let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
         let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
-        m.setValue(sunViewV, forKey: "sunDirView")
 
+        m.setValue(sunViewV, forKey: "sunDirView")
         m.setValue(SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z), forKey: "sunDirWorld")
         VolumetricCloudProgram.updateUniforms(from: m)
     }
