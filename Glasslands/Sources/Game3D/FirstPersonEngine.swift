@@ -612,10 +612,5 @@ final class FirstPersonEngine: NSObject {
               let m = sphere.geometry?.firstMaterial else { return }
         m.setValue(CGFloat(t), forKey: "time")
         m.setValue(SCNVector3(6.0, 2.0, 0.0), forKey: "wind")
-
-        if let cam = scnView?.pointOfView {
-            let p = cam.worldPosition
-            m.setValue(SCNVector3(p.x, p.y, p.z), forKey: "cameraPos")
-        }
     }
 }
