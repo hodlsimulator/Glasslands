@@ -23,11 +23,12 @@ struct CloudUniforms {
     float  densityMul;
     float  stepMul;
     float  horizonLift;
-    float  _pad;          // 16B align
+    float  _pad;
 };
 
 struct VSIn {
     float3 position [[attribute(SCNVertexSemanticPosition)]];
+    float3 normal   [[attribute(SCNVertexSemanticNormal)]];
 };
 
 struct VSOut {
@@ -35,25 +36,30 @@ struct VSOut {
     float3 worldPos;
 };
 
-vertex VSOut clouds_vertex(VSIn in                  [[stage_in]],
-                           constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-                           constant SCNNodeBuffer&  scn_node  [[buffer(1)]])
+// buffer(0) = SCNSceneBuffer (provided by SceneKit)
+// buffer(1) = float4x4 modelTransform (bound from Swift)
+// buffer(2) = CloudUniforms (bound from Swift)
+vertex VSOut clouds_vertex(VSIn in                                  [[stage_in]],
+                           constant SCNSceneBuffer& scn_frame        [[buffer(0)]],
+                           constant float4x4&         modelTransform [[buffer(1)]])
 {
     VSOut o;
-    const float4 p = float4(in.position, 1.0);
-    o.position = scn_frame.projectionTransform * scn_node.modelViewTransform * p;
-    o.worldPos = (scn_node.modelTransform * p).xyz;
+    float4 p = float4(in.position, 1.0);
+    float4 world = modelTransform * p;
+    // clip = proj * view * world
+    float4 view  = scn_frame.viewTransform * world;
+    o.position   = scn_frame.projectionTransform * view;
+    o.worldPos   = world.xyz;
     return o;
 }
 
-// ---- tiny helpers (Metal-safe) ----
+// ---------- helpers ----------
 inline float  saturate1(float x)            { return clamp(x, 0.0f, 1.0f); }
 inline float3 saturate3(float3 v)           { return clamp(v, float3(0.0), float3(1.0)); }
 inline float  frac1(float x)                { return x - floor(x); }
 inline float  lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float  hash1(float n)                { return frac1(sin(n) * 43758.5453123f); }
 
-// 3D value-noise with trilinear blend
 inline float noise3(float3 x) {
     float3 p = floor(x);
     float3 f = x - p;
@@ -81,7 +87,6 @@ inline float noise3(float3 x) {
 inline float fbm(float3 p) {
     float a = 0.0f;
     float w = 0.5f;
-    // fixed-count for mobile compilers
     for (int i = 0; i < 5; i++) {
         a += noise3(p) * w;
         p = p * 2.01f + 19.0f;
@@ -90,7 +95,6 @@ inline float fbm(float3 p) {
     return a;
 }
 
-// gentle 2D curl-like flow (for drift)
 inline float2 curl2(float2 xz) {
     const float e = 0.01f;
     float n1 = noise3(float3(xz.x + e, 0.0, xz.y)) - noise3(float3(xz.x - e, 0.0, xz.y));
@@ -127,34 +131,33 @@ inline float densityAt(float3 wp, constant CloudUniforms& U) {
 
 fragment float4 clouds_fragment(VSOut                         in        [[stage_in]],
                                 constant SCNSceneBuffer&     scn_frame [[buffer(0)]],
-                                constant CloudUniforms&      uniforms  [[buffer(2)]])
+                                constant CloudUniforms&      U         [[buffer(2)]])
 {
-    // Camera world position from SceneKit
+    // camera world pos from SceneKit
     float3 ro = (scn_frame.inverseViewTransform * float4(0,0,0,1)).xyz;
     float3 rd = normalize(in.worldPos - ro);
 
-    // Intersect the horizontal cloud slab [baseY, topY]
+    // intersect slab [baseY, topY]
     float denom = rd.y;
     if (fabs(denom) < 1e-4f) { return float4(0.0); }
 
-    float tb = (uniforms.baseY - ro.y) / denom;
-    float tt = (uniforms.topY  - ro.y) / denom;
+    float tb = (U.baseY - ro.y) / denom;
+    float tt = (U.topY  - ro.y) / denom;
     float t0 = min(tb, tt);
     float t1 = max(tb, tt);
     if (t1 <= 0.0f) { return float4(0.0); }
     t0 = max(t0, 0.0f);
 
-    // March (fixed upper bound; early-exit allowed)
     const int   MAX_STEPS = 32;
-    float baseStep   = 140.0f * uniforms.stepMul;
+    float baseStep   = 140.0f * U.stepMul;
     float grazing    = clamp(1.0f - fabs(rd.y), 0.0f, 1.0f);
     float worldStep  = baseStep * lerp1(1.0f, 1.8f, grazing);
 
-    float3 sunW = normalize(uniforms.sunDirWorld.xyz);
+    float3 sunW = normalize(U.sunDirWorld.xyz);
     float3 acc  = float3(0.0);
     float  trans = 1.0f;
 
-    float horizonBoost = uniforms.horizonLift * smoothstep(0.0f, 0.15f, grazing);
+    float horizonBoost = U.horizonLift * smoothstep(0.0f, 0.15f, grazing);
     float jitter = frac1(dot(in.worldPos, float3(1.0, 57.0, 113.0))) * worldStep;
 
     float t = t0 + jitter;
@@ -162,10 +165,10 @@ fragment float4 clouds_fragment(VSOut                         in        [[stage_
         float3 p = ro + rd * t;
         if (t > t1) break;
 
-        float d = densityAt(p, uniforms) * uniforms.densityMul;
+        float d = densityAt(p, U) * U.densityMul;
         if (d > 1e-3f) {
             float3 ps = p + sunW * 300.0f;
-            float dl  = densityAt(ps, uniforms);
+            float dl  = densityAt(ps, U);
             float shade = 0.55f + 0.45f * smoothstep(0.15f, 0.95f, 1.0f - dl);
 
             float powder = 1.0f - exp(-2.2f * d);
@@ -185,6 +188,6 @@ fragment float4 clouds_fragment(VSOut                         in        [[stage_
     }
 
     float alpha = saturate1(1.0f - trans);
-    float3 outRGB = acc + uniforms.sunTint.xyz * acc * 0.08f;
+    float3 outRGB = acc + U.sunTint.xyz * acc * 0.08f;
     return float4(outRGB, alpha);
 }
