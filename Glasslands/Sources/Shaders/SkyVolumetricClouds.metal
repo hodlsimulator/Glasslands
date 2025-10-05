@@ -9,14 +9,14 @@
 //
 
 #include <metal_stdlib>
+using namespace metal;                    // must be before scn_metal
 #include <SceneKit/scn_metal>
-using namespace metal;
 
 struct CloudUniforms {
-    float4 sunDirWorld;   // .xyz used
-    float4 sunTint;       // .xyz used
+    float4 sunDirWorld;
+    float4 sunTint;
     float  time;
-    float2 wind;          // XZ in metres/sec
+    float2 wind;
     float  baseY;
     float  topY;
     float  coverage;
@@ -35,7 +35,7 @@ struct VSOut {
     float3 worldPos;
 };
 
-// buffer(0) = SCNSceneBuffer (provided by SceneKit)
+// buffer(0) = SCNSceneBuffer
 // buffer(1) = float4x4 modelTransform (bound from Swift)
 // buffer(2) = CloudUniforms (bound from Swift as "uniforms")
 vertex VSOut clouds_vertex(VSIn in                                  [[stage_in]],
@@ -51,7 +51,6 @@ vertex VSOut clouds_vertex(VSIn in                                  [[stage_in]]
     return o;
 }
 
-// ---------- helpers ----------
 inline float  saturate1(float x)            { return clamp(x, 0.0f, 1.0f); }
 inline float3 saturate3(float3 v)           { return clamp(v, float3(0.0), float3(1.0)); }
 inline float  frac1(float x)                { return x - floor(x); }
@@ -109,27 +108,27 @@ inline float heightProfile(float y, float baseY, float topY) {
     return pow(up * dn, 0.78f);
 }
 
-inline float densityAt(float3 wp, constant CloudUniforms& uniforms) {
+inline float densityAt(float3 wp, constant CloudUniforms& U) {
     float3 q = wp * 0.0011f;
 
-    float2 flow = uniforms.wind * 0.0012f + 1.3f * curl2(q.xz + uniforms.time * 0.07f);
-    q.xz += flow * uniforms.time;
+    float2 flow = U.wind * 0.0012f + 1.3f * curl2(q.xz + U.time * 0.07f);
+    q.xz += flow * U.time;
 
     float3 warp = float3(fbm(q*1.7f + 31.0f), fbm(q*1.8f + 57.0f), fbm(q*1.9f + 83.0f));
     q += (warp - 0.5f) * 0.48f;
 
     float shape  = fbm(q * 0.8f);
     float detail = fbm(q * 2.8f) * 0.55f;
-    float prof   = heightProfile(wp.y, uniforms.baseY, uniforms.topY);
+    float prof   = heightProfile(wp.y, U.baseY, U.topY);
 
-    float thr = lerp1(0.65f, 0.45f, saturate1(uniforms.coverage));
+    float thr = lerp1(0.65f, 0.45f, saturate1(U.coverage));
     float d = (shape * 0.95f + detail * 0.65f) * prof - thr + 0.08f;
     return smoothstep(0.0f, 0.70f, d);
 }
 
 fragment float4 clouds_fragment(VSOut                         in        [[stage_in]],
                                 constant SCNSceneBuffer&     scn_frame [[buffer(0)]],
-                                constant CloudUniforms&      uniforms  [[buffer(2)]])
+                                constant CloudUniforms&      U         [[buffer(2)]])
 {
     float3 ro = (scn_frame.inverseViewTransform * float4(0,0,0,1)).xyz;
     float3 rd = normalize(in.worldPos - ro);
@@ -137,23 +136,23 @@ fragment float4 clouds_fragment(VSOut                         in        [[stage_
     float denom = rd.y;
     if (fabs(denom) < 1e-4f) { return float4(0.0); }
 
-    float tb = (uniforms.baseY - ro.y) / denom;
-    float tt = (uniforms.topY  - ro.y) / denom;
+    float tb = (U.baseY - ro.y) / denom;
+    float tt = (U.topY  - ro.y) / denom;
     float t0 = min(tb, tt);
     float t1 = max(tb, tt);
     if (t1 <= 0.0f) { return float4(0.0); }
     t0 = max(t0, 0.0f);
 
     const int   MAX_STEPS = 32;
-    float baseStep   = 140.0f * uniforms.stepMul;
+    float baseStep   = 140.0f * U.stepMul;
     float grazing    = clamp(1.0f - fabs(rd.y), 0.0f, 1.0f);
     float worldStep  = baseStep * lerp1(1.0f, 1.8f, grazing);
 
-    float3 sunW = normalize(uniforms.sunDirWorld.xyz);
+    float3 sunW = normalize(U.sunDirWorld.xyz);
     float3 acc  = float3(0.0);
     float  trans = 1.0f;
 
-    float horizonBoost = uniforms.horizonLift * smoothstep(0.0f, 0.15f, grazing);
+    float horizonBoost = U.horizonLift * smoothstep(0.0f, 0.15f, grazing);
     float jitter = frac1(dot(in.worldPos, float3(1.0, 57.0, 113.0))) * worldStep;
 
     float t = t0 + jitter;
@@ -161,10 +160,10 @@ fragment float4 clouds_fragment(VSOut                         in        [[stage_
         float3 p = ro + rd * t;
         if (t > t1) break;
 
-        float d = densityAt(p, uniforms) * uniforms.densityMul;
+        float d = densityAt(p, U) * U.densityMul;
         if (d > 1e-3f) {
             float3 ps = p + sunW * 300.0f;
-            float dl  = densityAt(ps, uniforms);
+            float dl  = densityAt(ps, U);
             float shade = 0.55f + 0.45f * smoothstep(0.15f, 0.95f, 1.0f - dl);
 
             float powder = 1.0f - exp(-2.2f * d);
@@ -184,6 +183,6 @@ fragment float4 clouds_fragment(VSOut                         in        [[stage_
     }
 
     float alpha = saturate1(1.0f - trans);
-    float3 outRGB = acc + uniforms.sunTint.xyz * acc * 0.08f;
+    float3 outRGB = acc + U.sunTint.xyz * acc * 0.08f;
     return float4(outRGB, alpha);
 }

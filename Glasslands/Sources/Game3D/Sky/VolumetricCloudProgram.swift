@@ -41,11 +41,11 @@ enum VolumetricCloudProgram {
         prog.delegate = ErrorLog.shared
         m.program = prog
 
-        // Defaults; can be overridden via setValue(_:forKey:)
+        // Defaults
         m.setValue(SCNVector3(0, 1, 0),          forKey: "sunDirWorld")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
         m.setValue(0.0 as CGFloat,               forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0),    forKey: "wind") // xy used
+        m.setValue(SCNVector3(6.0, 2.0, 0.0),    forKey: "wind")
         m.setValue(1350.0 as CGFloat,            forKey: "baseY")
         m.setValue(2500.0 as CGFloat,            forKey: "topY")
         m.setValue(0.55 as CGFloat,              forKey: "coverage")
@@ -53,26 +53,26 @@ enum VolumetricCloudProgram {
         m.setValue(1.00 as CGFloat,              forKey: "stepMul")
         m.setValue(0.16 as CGFloat,              forKey: "horizonLift")
 
-        // Bind per-node model matrix → Metal buffer(1) param "modelTransform"
+        // buffer(1): modelTransform (per-node)
         prog.handleBinding(ofBufferNamed: "modelTransform",
                            frequency: .perNode,
-                           handler: { stream, node, shadable, renderer in
+                           handler: { (stream: SCNBufferStream, node: SCNNode?, shadable: SCNShadable, renderer: SCNRenderer) in
             var mt: simd_float4x4 = node?.simdWorldTransform ?? matrix_identity_float4x4
-            stream.writeBytes(&mt, length: MemoryLayout<simd_float4x4>.stride)
+            stream.writeBytes(&mt, count: MemoryLayout<simd_float4x4>.stride)
         })
 
-        // Bind cloud uniforms → Metal buffer(2) param "uniforms"
+        // buffer(2): uniforms (per-frame)
         prog.handleBinding(ofBufferNamed: "uniforms",
                            frequency: .perFrame,
-                           handler: { stream, node, shadable, renderer in
-            let mat = (shadable as? SCNMaterial)
+                           handler: { (stream: SCNBufferStream, node: SCNNode?, shadable: SCNShadable, renderer: SCNRenderer) in
+            guard let mat = (shadable as? SCNMaterial) else { return }
 
             func f(_ key: String, _ def: CGFloat) -> Float {
-                if let cg = mat?.value(forKey: key) as? CGFloat { return Float(cg) }
+                if let cg = mat.value(forKey: key) as? CGFloat { return Float(cg) }
                 return Float(def)
             }
             func v3(_ key: String, _ def: SCNVector3) -> simd_float3 {
-                let v = (mat?.value(forKey: key) as? SCNVector3) ?? def
+                let v = (mat.value(forKey: key) as? SCNVector3) ?? def
                 return simd_float3(Float(v.x), Float(v.y), Float(v.z))
             }
 
@@ -93,7 +93,7 @@ enum VolumetricCloudProgram {
                 horizonLift: f("horizonLift", 0.16)
             )
 
-            stream.writeBytes(&U, length: MemoryLayout<CloudUniforms>.stride)
+            stream.writeBytes(&U, count: MemoryLayout<CloudUniforms>.stride)
         })
 
         return m
