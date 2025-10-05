@@ -41,11 +41,11 @@ enum VolumetricCloudProgram {
         prog.delegate = ErrorLog.shared
         m.program = prog
 
-        // Defaults
+        // Defaults; override via setValue(_:forKey:) if desired
         m.setValue(SCNVector3(0, 1, 0),          forKey: "sunDirWorld")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
         m.setValue(0.0 as CGFloat,               forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0),    forKey: "wind")
+        m.setValue(SCNVector3(6.0, 2.0, 0.0),    forKey: "wind") // xy used
         m.setValue(1350.0 as CGFloat,            forKey: "baseY")
         m.setValue(2500.0 as CGFloat,            forKey: "topY")
         m.setValue(0.55 as CGFloat,              forKey: "coverage")
@@ -53,15 +53,7 @@ enum VolumetricCloudProgram {
         m.setValue(1.00 as CGFloat,              forKey: "stepMul")
         m.setValue(0.16 as CGFloat,              forKey: "horizonLift")
 
-        // buffer(1): modelTransform (per-node)
-        prog.handleBinding(ofBufferNamed: "modelTransform",
-                           frequency: .perNode,
-                           handler: { (stream: SCNBufferStream, node: SCNNode?, shadable: SCNShadable, renderer: SCNRenderer) in
-            var mt: simd_float4x4 = node?.simdWorldTransform ?? matrix_identity_float4x4
-            stream.writeBytes(&mt, count: MemoryLayout<simd_float4x4>.stride)
-        })
-
-        // buffer(2): uniforms (per-frame)
+        // Only uniforms at buffer(2); no node access on render thread.
         prog.handleBinding(ofBufferNamed: "uniforms",
                            frequency: .perFrame,
                            handler: { (stream: SCNBufferStream, node: SCNNode?, shadable: SCNShadable, renderer: SCNRenderer) in

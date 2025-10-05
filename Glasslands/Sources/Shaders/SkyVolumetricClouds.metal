@@ -9,7 +9,7 @@
 //
 
 #include <metal_stdlib>
-using namespace metal;                    // must be before scn_metal
+using namespace metal;            // must precede scn_metal
 #include <SceneKit/scn_metal>
 
 struct CloudUniforms {
@@ -35,22 +35,21 @@ struct VSOut {
     float3 worldPos;
 };
 
-// buffer(0) = SCNSceneBuffer
-// buffer(1) = float4x4 modelTransform (bound from Swift)
-// buffer(2) = CloudUniforms (bound from Swift as "uniforms")
-vertex VSOut clouds_vertex(VSIn in                                  [[stage_in]],
-                           constant SCNSceneBuffer& scn_frame        [[buffer(0)]],
-                           constant float4x4&         modelTransform [[buffer(1)]])
+// buffer(0) = SCNSceneBuffer (SceneKit)
+// buffer(2) = CloudUniforms   (bound from Swift as "uniforms")
+vertex VSOut clouds_vertex(VSIn vin [[stage_in]],
+                           constant SCNSceneBuffer& scn_frame [[buffer(0)]])
 {
     VSOut o;
-    float4 p = float4(in.position, 1.0);
-    float4 world = modelTransform * p;
+    // Identity model transform by design: keep the cloud sphere at world origin.
+    float4 world = float4(vin.position, 1.0);
     float4 view  = scn_frame.viewTransform * world;
     o.position   = scn_frame.projectionTransform * view;
     o.worldPos   = world.xyz;
     return o;
 }
 
+// ---------- helpers ----------
 inline float  saturate1(float x)            { return clamp(x, 0.0f, 1.0f); }
 inline float3 saturate3(float3 v)           { return clamp(v, float3(0.0), float3(1.0)); }
 inline float  frac1(float x)                { return x - floor(x); }
