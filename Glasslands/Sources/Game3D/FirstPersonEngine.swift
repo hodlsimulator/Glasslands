@@ -127,23 +127,23 @@ final class FirstPersonEngine: NSObject {
     }
 
     @MainActor private func applyCloudSunUniforms() {
+        // World-space sun direction already exists in sunDirWorld (unit)
         let sunW = simd_normalize(sunDirWorld)
 
-        // View-space sun direction for the shader
+        // Convert to view space for the shader
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let invView = simd_inverse(pov.simdWorldTransform)
-        let sunView4 = invView * simd_float4(sunW, 0)                // w = 0 → direction
+        let sunView4 = invView * simd_float4(sunW, 0)                // w=0 for direction
         let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
 
-        let sunV = SCNVector3(sunW.x, sunW.y, sunW.z)
-        let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
         let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
 
+        // Billboards (if present)
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
-                    m.setValue(sunV, forKey: "sunDirWorld")
+                    m.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
                     m.setValue(tintV, forKey: "sunTint")
                     m.setValue(cloudSunBacklight, forKey: "sunBacklight")
                     m.setValue(cloudHorizonFade, forKey: "horizonFade")
@@ -151,12 +151,13 @@ final class FirstPersonEngine: NSObject {
             }
         }
 
+        // Volumetric sphere (now a minimal shader expecting sunDirView + sunTint)
         let sphere =
             skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
             ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
 
         if let m = sphere?.geometry?.firstMaterial {
-            m.setValue(sunViewV, forKey: "sunDirView")
+            m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
             m.setValue(tintV, forKey: "sunTint")
         }
     }
@@ -613,12 +614,10 @@ final class FirstPersonEngine: NSObject {
             let m = sphere.geometry?.firstMaterial
         else { return }
 
-        m.setValue(CGFloat(t), forKey: "time")
-
-        // Recompute sun in view space as the camera moves/turns
+        // Keep sun updated in view space as the camera moves/turns
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let invView = simd_inverse(pov.simdWorldTransform)
-        let sunView4 = invView * simd_float4(sunDirWorld, 0)         // w = 0 → direction
+        let sunView4 = invView * simd_float4(sunDirWorld, 0)
         let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
         m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
     }
