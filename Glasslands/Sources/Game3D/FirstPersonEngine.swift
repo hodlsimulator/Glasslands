@@ -407,6 +407,11 @@ final class FirstPersonEngine: NSObject {
             node.name = "CumulusBillboardLayer"
             self.skyAnchor.addChildNode(node)
             self.applyCloudSunUniforms()
+            self.forceReplaceAndVerifyClouds()
+            
+            self.debugCloudShaderOnce(tag: "after-attach")
+            DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
+        
             // self.forceAllCloudsToPlainWhite()
             // self.sanitizeCloudBillboards()
             // self.rebindMissingCloudTextures()
@@ -922,4 +927,71 @@ final class FirstPersonEngine: NSObject {
         print("[Clouds] plain-white replaced \(replaced) materials")
     }
      */
+    
+    @MainActor
+    private func debugCloudShaderOnce(tag: String) {
+        // Prevent log spam
+        struct Flag { static var logged = false }
+        guard !Flag.logged else { return }
+        Flag.logged = true
+
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            print("[CloudFrag] \(tag): layer not found")
+            return
+        }
+
+        var geoms = 0
+        var withFrag = 0
+        var withProg = 0
+        var risky = 0
+
+        layer.enumerateChildNodes { n, _ in
+            guard let g = n.geometry, let m = g.firstMaterial else { return }
+            geoms += 1
+
+            if let frag = m.shaderModifiers?[.fragment] {
+                withFrag += 1
+                // Show length + quick flags so we know what’s actually bound.
+                let len = frag.count
+                let usesSampler = frag.contains("texture2d<") || frag.contains("sampler")
+                let usesPow     = frag.contains("pow(")
+                let hasBody     = frag.contains("#pragma body")
+                print("[CloudFrag] len=\(len) sampler=\(usesSampler) pow=\(usesPow) body=\(hasBody)")
+                if usesSampler { risky += 1 }
+            }
+
+            if m.program != nil {
+                withProg += 1
+                print("[CloudFrag] has SCNProgram on node: \(n.name ?? "<unnamed>")")
+            }
+        }
+
+        print("[CloudFrag] \(tag): geoms=\(geoms) withFrag=\(withFrag) withProg=\(withProg) risky=\(risky)")
+    }
+    
+    @MainActor
+    private func forceReplaceAndVerifyClouds() {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            print("[Clouds] verify: no layer"); return
+        }
+        let templ = CloudBillboardMaterial.makeCurrent()
+        var geoms = 0, replaced = 0, ok = 0, bad = 0
+
+        layer.enumerateChildNodes { n, _ in
+            guard let g = n.geometry else { return }
+            geoms += 1
+
+            // Replace with fresh material
+            let m = templ.copy() as! SCNMaterial
+            m.diffuse.contents = g.firstMaterial?.diffuse.contents ?? CloudSpriteTexture.fallbackWhite2x2
+            g.firstMaterial = m
+            replaced += 1
+
+            // Verify marker
+            let frag = m.shaderModifiers?[.fragment] ?? ""
+            if frag.contains(CloudBillboardMaterial.volumetricMarker) { ok += 1 } else { bad += 1 }
+        }
+
+        print("[Clouds] verify: geoms=\(geoms) replaced=\(replaced) ok=\(ok) bad=\(bad)")
+    }
 }
