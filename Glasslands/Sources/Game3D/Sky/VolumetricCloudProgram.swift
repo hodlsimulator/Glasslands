@@ -41,7 +41,7 @@ enum VolumetricCloudProgram {
         prog.delegate = ErrorLog.shared
         m.program = prog
 
-        // Defaults; higher-level code may override via setValue(_:forKey:)
+        // Defaults; can be overridden via setValue(_:forKey:)
         m.setValue(SCNVector3(0, 1, 0),          forKey: "sunDirWorld")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
         m.setValue(0.0 as CGFloat,               forKey: "time")
@@ -53,32 +53,38 @@ enum VolumetricCloudProgram {
         m.setValue(1.00 as CGFloat,              forKey: "stepMul")
         m.setValue(0.16 as CGFloat,              forKey: "horizonLift")
 
-        // Per-node model matrix at Metal buffer(1)
-        m.handleBinding(ofBufferNamed: "modelTransform",
-                        frequency: SCNBufferFrequency.perNode,
-                        using: { (stream: SCNBufferStream, node: SCNNode?, renderer: SCNRenderer) in
-            let mt: simd_float4x4 = node?.simdWorldTransform ?? matrix_identity_float4x4
-            var copy = mt
-            stream.writeBytes(&copy, length: MemoryLayout<simd_float4x4>.stride)
+        // Bind per-node model matrix → Metal buffer(1) param "modelTransform"
+        prog.handleBinding(ofBufferNamed: "modelTransform",
+                           frequency: .perNode,
+                           handler: { stream, node, shadable, renderer in
+            var mt: simd_float4x4 = node?.simdWorldTransform ?? matrix_identity_float4x4
+            stream.writeBytes(&mt, length: MemoryLayout<simd_float4x4>.stride)
         })
 
-        // Cloud uniforms at Metal buffer(2)
-        m.handleBinding(ofBufferNamed: "uniforms",
-                        frequency: SCNBufferFrequency.perFrame,
-                        using: { (stream: SCNBufferStream, node: SCNNode?, renderer: SCNRenderer) in
+        // Bind cloud uniforms → Metal buffer(2) param "uniforms"
+        prog.handleBinding(ofBufferNamed: "uniforms",
+                           frequency: .perFrame,
+                           handler: { stream, node, shadable, renderer in
+            let mat = (shadable as? SCNMaterial)
+
             func f(_ key: String, _ def: CGFloat) -> Float {
-                (m.value(forKey: key) as? CGFloat).map { Float($0) } ?? Float(def)
+                if let cg = mat?.value(forKey: key) as? CGFloat { return Float(cg) }
+                return Float(def)
             }
             func v3(_ key: String, _ def: SCNVector3) -> simd_float3 {
-                let v = (m.value(forKey: key) as? SCNVector3) ?? def
+                let v = (mat?.value(forKey: key) as? SCNVector3) ?? def
                 return simd_float3(Float(v.x), Float(v.y), Float(v.z))
             }
 
+            let sunDir = simd_normalize(v3("sunDirWorld", SCNVector3(0,1,0)))
+            let tint   = v3("sunTint", SCNVector3(1,1,1))
+            let wind3  = v3("wind", SCNVector3(6,2,0))
+
             var U = CloudUniforms(
-                sunDirWorld: simd_float4(simd_normalize(v3("sunDirWorld", SCNVector3(0,1,0))), 0),
-                sunTint:     simd_float4(simd_clamp(v3("sunTint", SCNVector3(1,1,1)), min: 0, max: 1), 0),
+                sunDirWorld: simd_float4(sunDir, 0),
+                sunTint:     simd_float4(tint, 0),
                 time:        f("time", 0),
-                wind:        simd_float2(v3("wind", SCNVector3(6,2,0)).x, v3("wind", SCNVector3(6,2,0)).y),
+                wind:        simd_float2(wind3.x, wind3.y),
                 baseY:       f("baseY", 1350),
                 topY:        f("topY", 2500),
                 coverage:    f("coverage", 0.55),
