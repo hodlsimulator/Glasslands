@@ -11,7 +11,6 @@ import SceneKit
 import UIKit
 
 enum CloudBillboardFactory {
-
     @MainActor
     static func makeNode(
         from clusters: [CloudClusterSpec],
@@ -19,32 +18,30 @@ enum CloudBillboardFactory {
     ) -> SCNNode {
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
+        root.castsShadow = false
         root.renderingOrder = -9_990
 
-        let template = CloudBillboardMaterial.makeTemplate()
+        let template = CloudBillboardMaterial.makeVolumetricTemplate()
 
         for cl in clusters {
             let group = SCNNode()
             group.castsShadow = false
 
-            // Draw order within a cluster: base first, crown last
             for p in cl.puffs {
                 let bb = SCNNode()
                 bb.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
-
                 let bc = SCNBillboardConstraint()
                 bc.freeAxes = .all
                 bb.constraints = [bc]
 
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
-                let sprite = SCNNode(geometry: plane)
-                sprite.eulerAngles.z = p.roll
-                sprite.castsShadow = false
-
                 let m = template.copy() as! SCNMaterial
+
                 if !atlas.images.isEmpty {
-                    m.diffuse.contents = atlas.images[p.atlasIndex % atlas.images.count]
+                    let img = atlas.images[p.atlasIndex % atlas.images.count]
+                    m.diffuse.contents = img
                 }
+
                 m.transparency = CGFloat(max(0, min(1, p.opacity)))
                 if let t = p.tint {
                     m.multiply.contents = UIColor(
@@ -56,6 +53,11 @@ enum CloudBillboardFactory {
                 }
 
                 plane.firstMaterial = m
+
+                let sprite = SCNNode(geometry: plane)
+                sprite.eulerAngles.z = p.roll
+                sprite.castsShadow = false
+
                 bb.addChildNode(sprite)
                 group.addChildNode(bb)
             }

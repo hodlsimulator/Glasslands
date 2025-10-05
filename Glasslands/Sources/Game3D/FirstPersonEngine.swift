@@ -391,23 +391,25 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.childNodes
-            .filter { $0.name == "SunDiscHDR" || $0.name == "SunHaloHDR" || $0.name == "VolumetricCloudLayer" }
+            .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer"].contains($0.name ?? "") }
             .forEach { $0.removeFromParentNode() }
 
         scene.rootNode.addChildNode(skyAnchor)
 
+        // Background gradient; no skydome mesh so there are no seam lines.
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        let clouds = VolumetricCloudLayer.make(
-            radius: CGFloat(cfg.skyDistance),
-            baseY: 1350,
-            topY:  2500,
-            coverage: 0.40
-        )
-        skyAnchor.addChildNode(clouds)
+        // Build volumetric impostor clouds (billboard clusters).
+        CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance)) { [weak self] node in
+            guard let self else { return }
+            node.name = "CumulusBillboardLayer"
+            self.skyAnchor.addChildNode(node)
+            self.applyCloudSunUniforms()
+        }
 
+        // HDR sun (disc + halo).
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
         let coreEDR: CGFloat = 8.0
@@ -426,10 +428,6 @@ final class FirstPersonEngine: NSObject {
 
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         applyCloudSunUniforms()
-
-        if let m = clouds.geometry?.firstMaterial {
-            VolumetricCloudProgram.updateUniforms(from: m)
-        }
     }
     
     @MainActor

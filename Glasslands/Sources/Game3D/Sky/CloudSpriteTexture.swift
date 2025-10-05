@@ -22,6 +22,17 @@ enum CloudSpriteTexture {
     }
 
     @MainActor
+    static var fallbackWhite2x2: UIImage {
+        let size = CGSize(width: 2, height: 2)
+        UIGraphicsBeginImageContextWithOptions(size, false, 1)
+        UIColor(white: 1, alpha: 1).setFill()
+        UIBezierPath(rect: CGRect(origin: .zero, size: size)).fill()
+        let img = UIGraphicsGetImageFromCurrentImageContext()!
+        UIGraphicsEndImageContext()
+        return img
+    }
+
+    @MainActor
     static func makeAtlas(
         size: Int = 512,
         seed: UInt32 = 0xC10D5,
