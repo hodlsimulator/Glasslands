@@ -126,9 +126,8 @@ final class FirstPersonEngine: NSObject {
         applyCloudSunUniforms()
     }
 
-    @MainActor
-    private func applyCloudSunUniforms() {
-        let sunV  = SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z)
+    @MainActor private func applyCloudSunUniforms() {
+        let sunV = SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z)
         let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
 
         // Billboard sprites (if present)
@@ -136,7 +135,7 @@ final class FirstPersonEngine: NSObject {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
-                    m.setValue(sunV,  forKey: "sunDirWorld")
+                    m.setValue(sunV, forKey: "sunDirWorld")
                     m.setValue(tintV, forKey: "sunTint")
                     m.setValue(cloudSunBacklight, forKey: "sunBacklight")
                     m.setValue(cloudHorizonFade, forKey: "horizonFade")
@@ -144,12 +143,15 @@ final class FirstPersonEngine: NSObject {
             }
         }
 
-        // Volumetric sphere (preferred)
-        if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
-           let m = sphere.geometry?.firstMaterial {
-            m.setValue(sunV,  forKey: "sunDirWorld")
+        // Volumetric sphere (find it whether it lives under root or skyAnchor)
+        let sphere =
+            scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
+
+        if let m = sphere?.geometry?.firstMaterial {
+            m.setValue(sunV, forKey: "sunDirWorld")
             m.setValue(tintV, forKey: "sunTint")
-            // keep density/coverage defaults unless tweaked elsewhere
+            // density/coverage defaults are already set by the material factory
         }
     }
 
@@ -158,7 +160,6 @@ final class FirstPersonEngine: NSObject {
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
-
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
@@ -169,8 +170,9 @@ final class FirstPersonEngine: NSObject {
 
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
-            metal.wantsExtendedDynamicRangeContent = false
-            metal.pixelFormat = .bgra8Unorm
+            metal.wantsExtendedDynamicRangeContent = true
+            metal.colorspace = CGColorSpace(name: CGColorSpace.extendedSRGB)
+            metal.pixelFormat = .bgra10_xr_srgb
             metal.maximumDrawableCount = 3
         }
 
@@ -259,7 +261,7 @@ final class FirstPersonEngine: NSObject {
 
     // MARK: - World
 
-    private func resetWorld() {
+    @MainActor private func resetWorld() {
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
         beacons.removeAll()
         obstaclesByChunk.removeAll()
@@ -276,10 +278,21 @@ final class FirstPersonEngine: NSObject {
         camera.zNear = 0.02
         camera.zFar = 20_000
         camera.fieldOfView = 70
-        camera.wantsHDR = false
-        camera.wantsExposureAdaptation = false
-        camNode.camera = camera
 
+        // Keep HDR/EDR enabled so the sun can go “over 1.0”
+        camera.wantsHDR = true
+        camera.wantsExposureAdaptation = true
+        camera.exposureOffset = 0.0
+        camera.averageGray = 0.18
+        camera.whitePoint = 1.0
+        camera.minimumExposure = -1.0
+        camera.maximumExposure = 2.0
+        // Bloom only catches genuinely hot pixels (EDR sun), not SDR terrain
+        camera.bloomThreshold = 1.15
+        camera.bloomIntensity = 1.25
+        camera.bloomBlurRadius = 12.0
+
+        camNode.camera = camera
         pitchNode.addChildNode(camNode)
         yawNode.addChildNode(pitchNode)
         scene.rootNode.addChildNode(yawNode)
@@ -351,8 +364,9 @@ final class FirstPersonEngine: NSObject {
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
-    @MainActor
-    private func buildSky() {
+    // MARK: - Sky
+
+    @MainActor private func buildSky() {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
@@ -361,7 +375,7 @@ final class FirstPersonEngine: NSObject {
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Background gradient (kept, though shader now draws its own too)
+        // Background gradient (shader draws its own too; this is a safety net)
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
@@ -370,40 +384,24 @@ final class FirstPersonEngine: NSObject {
         scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
         skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
 
-        // Add the volumetric sphere directly under root at identity so our Metal
-        // vertex path (no model matrix) is correct and avoids render-thread asserts.
-        let baseY: CGFloat = 1350
-        let topY:  CGFloat = 2500
-        let coverage: CGFloat = 0.55
+        // Volumetric clouds are attached at world origin under root.
+        // The Metal vertex path uses identity model transform.
+        let clouds = VolumetricCloudLayer.make(
+            radius: CGFloat(cfg.skyDistance),
+            baseY: 1350,
+            topY: 2500,
+            coverage: 0.55
+        )
+        clouds.simdPosition = .zero
+        scene.rootNode.addChildNode(clouds)
 
-        let vol = VolumetricCloudLayer.make(radius: CGFloat(cfg.skyDistance),
-                                            baseY: baseY,
-                                            topY: topY,
-                                            coverage: coverage)
-        vol.simdTransform = matrix_identity_float4x4
-        scene.rootNode.addChildNode(vol)
-
-        // Sun disc (billboard) still under skyAnchor
-        let discSize: CGFloat = 500
-        let plane = SCNPlane(width: discSize, height: discSize)
-        plane.cornerRadius = discSize * 0.5
-        let mat = SCNMaterial()
-        mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
-        mat.emission.contents = UIColor(white: 1.0, alpha: 1.0)
-        mat.readsFromDepthBuffer = false
-        mat.writesToDepthBuffer = false
-        mat.isDoubleSided = true
-        plane.firstMaterial = mat
-        let disc = SCNNode(geometry: plane)
-        disc.name = "SunDisc"
-        disc.castsShadow = false
-        disc.constraints = [SCNBillboardConstraint()]
-        disc.renderingOrder = -10_000
-        skyAnchor.addChildNode(disc)
-        self.sunDiscNode = disc
+        // Fresh HDR sun disc billboard drawn AFTER the volumetric layer
+        let sun = makeHDRSunDiscNode(angularSizeDeg: 1.05)
+        skyAnchor.addChildNode(sun)
+        sunDiscNode = sun
 
         applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
+        applyCloudSunUniforms()
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {
@@ -607,11 +605,48 @@ final class FirstPersonEngine: NSObject {
         }()
     }
     
-    @MainActor
-    func tickVolumetricClouds(atRenderTime t: TimeInterval) {
-        guard let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
-              let m = sphere.geometry?.firstMaterial else { return }
-        m.setValue(CGFloat(t), forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0), forKey: "wind")
+    // Called by RendererProxy each frame
+    @MainActor func tickVolumetricClouds(atRenderTime t: TimeInterval) {
+        let timeCG = CGFloat(t)
+
+        // Update the program uniform on the volumetric material
+        if let sphere =
+            scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            ?? skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
+           let m = sphere.geometry?.firstMaterial
+        {
+            m.setValue(timeCG, forKey: "time")
+        }
+    }
+    
+    // MARK: - Sun sprite (HDR)
+
+    @MainActor private func makeHDRSunDiscNode(angularSizeDeg: CGFloat) -> SCNNode {
+        let dist = CGFloat(cfg.skyDistance)
+        let radians = angularSizeDeg * .pi / 180.0
+        let worldDiameter = 2.0 * dist * tan(0.5 * radians)
+
+        let plane = SCNPlane(width: worldDiameter, height: worldDiameter)
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = UIColor.clear  // keep all energy in emission
+        mat.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: 512)
+        mat.isDoubleSided = false
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false
+        mat.transparencyMode = .aOne
+        mat.blendMode = .add
+        plane.firstMaterial = mat
+
+        let node = SCNNode(geometry: plane)
+        node.name = "SunDiscHDR"
+        node.castsShadow = false
+        node.renderingOrder = 9_999 // after volumetric layer (-9_990)
+
+        let bb = SCNBillboardConstraint()
+        bb.freeAxes = .all
+        node.constraints = [bb]
+
+        return node
     }
 }
