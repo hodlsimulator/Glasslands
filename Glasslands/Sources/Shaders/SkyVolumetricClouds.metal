@@ -83,7 +83,8 @@ inline float noise3(float3 x) {
 inline float fbm(float3 p) {
     float a = 0.0f;
     float w = 0.5f;
-    for (int i = 0; i < 5; i++) {
+    // fewer octaves for speed
+    for (int i = 0; i < 4; i++) {
         a += noise3(p) * w;
         p = p * 2.01f + 19.0f;
         w *= 0.5f;
@@ -92,7 +93,7 @@ inline float fbm(float3 p) {
 }
 
 inline float2 curl2(float2 xz) {
-    const float e = 0.01f;
+    const float e = 0.02f; // slightly larger epsilon → fewer ALU ops overall
     float n1 = noise3(float3(xz.x + e, 0.0, xz.y)) - noise3(float3(xz.x - e, 0.0, xz.y));
     float n2 = noise3(float3(xz.x, 0.0, xz.y + e)) - noise3(float3(xz.x, 0.0, xz.y - e));
     float2 v = float2(n2, -n1);
@@ -110,14 +111,14 @@ inline float heightProfile(float y, float baseY, float topY) {
 inline float densityAt(float3 wp, constant CloudUniforms& U) {
     float3 q = wp * 0.0011f;
 
-    float2 flow = U.wind * 0.0012f + 1.3f * curl2(q.xz + U.time * 0.07f);
+    float2 flow = U.wind * 0.0012f + 1.1f * curl2(q.xz + U.time * 0.07f);
     q.xz += flow * U.time;
 
-    float3 warp = float3(fbm(q*1.7f + 31.0f), fbm(q*1.8f + 57.0f), fbm(q*1.9f + 83.0f));
-    q += (warp - 0.5f) * 0.48f;
+    float3 warp = float3(fbm(q*1.6f + 31.0f), fbm(q*1.7f + 57.0f), fbm(q*1.8f + 83.0f));
+    q += (warp - 0.5f) * 0.44f;
 
     float shape  = fbm(q * 0.8f);
-    float detail = fbm(q * 2.8f) * 0.55f;
+    float detail = fbm(q * 2.4f) * 0.50f;
     float prof   = heightProfile(wp.y, U.baseY, U.topY);
 
     float thr = lerp1(0.65f, 0.45f, saturate1(U.coverage));
@@ -129,23 +130,38 @@ fragment float4 clouds_fragment(VSOut                         in        [[stage_
                                 constant SCNSceneBuffer&     scn_frame [[buffer(0)]],
                                 constant CloudUniforms&      U         [[buffer(2)]])
 {
+    // Ray setup
     float3 ro = (scn_frame.inverseViewTransform * float4(0,0,0,1)).xyz;
     float3 rd = normalize(in.worldPos - ro);
 
+    // Always compute a base sky gradient so there's never a black sky.
+    // Same palette as the Swift background gradient.
+    float tSky = saturate1(rd.y * 0.6f + 0.4f);
+    float3 zenith  = float3(0.30f, 0.56f, 0.96f);
+    float3 horizon = float3(0.88f, 0.93f, 0.99f);
+    float3 baseCol = mix(horizon, zenith, tSky);
+
+    // Intersect slab [baseY, topY]
     float denom = rd.y;
-    if (fabs(denom) < 1e-4f) { return float4(0.0); }
+    if (fabs(denom) < 1e-4f) {
+        // No intersection; just sky.
+        return float4(baseCol, 1.0);
+    }
 
     float tb = (U.baseY - ro.y) / denom;
     float tt = (U.topY  - ro.y) / denom;
     float t0 = min(tb, tt);
     float t1 = max(tb, tt);
-    if (t1 <= 0.0f) { return float4(0.0); }
+    if (t1 <= 0.0f) {
+        return float4(baseCol, 1.0);
+    }
     t0 = max(t0, 0.0f);
 
-    const int   MAX_STEPS = 32;
-    float baseStep   = 140.0f * U.stepMul;
+    // Faster march: fewer steps, bigger stride, stronger grazing boost.
+    const int   MAX_STEPS = 20;
+    float baseStep   = 220.0f * U.stepMul;
     float grazing    = clamp(1.0f - fabs(rd.y), 0.0f, 1.0f);
-    float worldStep  = baseStep * lerp1(1.0f, 1.8f, grazing);
+    float worldStep  = baseStep * lerp1(1.0f, 2.2f, grazing);
 
     float3 sunW = normalize(U.sunDirWorld.xyz);
     float3 acc  = float3(0.0);
@@ -175,13 +191,13 @@ fragment float4 clouds_fragment(VSOut                         in        [[stage_
 
             acc += trans * add;
             trans *= (1.0f - a);
-            if (trans < 0.015f) break;
+            if (trans < 0.03f) break; // earlier exit to kill hitch
         }
 
         t += worldStep;
     }
 
-    float alpha = saturate1(1.0f - trans);
-    float3 outRGB = acc + U.sunTint.xyz * acc * 0.08f;
-    return float4(outRGB, alpha);
+    // Composite clouds over our sky gradient using remaining transmittance.
+    float3 outRGB = baseCol * trans + acc + U.sunTint.xyz * acc * 0.08f;
+    return float4(outRGB, 1.0);
 }

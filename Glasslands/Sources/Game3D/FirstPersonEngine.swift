@@ -356,33 +356,34 @@ final class FirstPersonEngine: NSObject {
         let sunAz: Float = 40
         let sunEl: Float = 65
 
-        // Reset sky anchor
+        // Reset anchors
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Background gradient; no IBL
+        // Background gradient (kept, though shader now draws its own too)
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // --- Clouds: volumetric slab on an inward-facing sphere ---
-        // Altitudes chosen for puffy mid-level cumulus look
+        // Remove any prior volumetric layer from anywhere
+        scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
+        skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
+
+        // Add the volumetric sphere directly under root at identity so our Metal
+        // vertex path (no model matrix) is correct and avoids render-thread asserts.
         let baseY: CGFloat = 1350
         let topY:  CGFloat = 2500
         let coverage: CGFloat = 0.55
-
-        skyAnchor.childNodes.filter { $0.name == "VolumetricCloudLayer" || $0.name == "CumulusBillboardLayer" }
-            .forEach { $0.removeFromParentNode() }
 
         let vol = VolumetricCloudLayer.make(radius: CGFloat(cfg.skyDistance),
                                             baseY: baseY,
                                             topY: topY,
                                             coverage: coverage)
-        skyAnchor.addChildNode(vol)
-        scnView?.prepare([vol]) { _ in }
+        vol.simdTransform = matrix_identity_float4x4
+        scene.rootNode.addChildNode(vol)
 
-        // Visible sun disc (billboarded), drawn just behind the clouds
+        // Sun disc (billboard) still under skyAnchor
         let discSize: CGFloat = 500
         let plane = SCNPlane(width: discSize, height: discSize)
         plane.cornerRadius = discSize * 0.5
