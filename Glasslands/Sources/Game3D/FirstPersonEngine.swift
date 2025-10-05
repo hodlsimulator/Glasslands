@@ -260,9 +260,18 @@ final class FirstPersonEngine: NSObject {
 
         chunker.updateVisible(center: next)
         collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
-        
-        // Push time/sun into the thread-safe POD (no SceneKit touching here).
-        VolumetricCloudProgram.setPerFrame(time: Float(t), sunDirWorld: sunDirWorld)
+
+        // Update volumetric clouds (shader-modifier path): time + sun in VIEW space.
+        if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
+           let m = sphere.geometry?.firstMaterial {
+            m.setValue(CGFloat(t), forKey: "time")
+
+            let pov = (scnView?.pointOfView ?? camNode).presentation
+            let invView = simd_inverse(pov.simdWorldTransform)
+            let sunView4 = invView * simd_float4(sunDirWorld, 0)
+            let s = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
+            m.setValue(SCNVector3(s.x, s.y, s.z), forKey: "sunDirView")
+        }
 
         if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
             sg.simdPosition = simd_float3(next.x, groundY - 0.02, next.z)

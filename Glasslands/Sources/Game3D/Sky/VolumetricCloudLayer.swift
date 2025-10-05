@@ -22,10 +22,7 @@ enum VolumetricCloudLayer {
         let sphere = SCNSphere(radius: max(10, radius * 0.98))
         sphere.segmentCount = 96
 
-        let mat = VolumetricCloudProgram.makeMaterial()
-        mat.setValue(baseY,    forKey: "baseY")
-        mat.setValue(topY,     forKey: "topY")
-        mat.setValue(coverage, forKey: "coverage")
+        let mat = VolumetricCloudMaterial.makeMaterial()
         sphere.firstMaterial = mat
 
         let node = SCNNode(geometry: sphere)
