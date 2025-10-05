@@ -260,6 +260,9 @@ final class FirstPersonEngine: NSObject {
 
         chunker.updateVisible(center: next)
         collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
+        
+        // Push time/sun into the thread-safe POD (no SceneKit touching here).
+        VolumetricCloudProgram.setPerFrame(time: Float(t), sunDirWorld: sunDirWorld)
 
         if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
             sg.simdPosition = simd_float3(next.x, groundY - 0.02, next.z)
@@ -378,23 +381,30 @@ final class FirstPersonEngine: NSObject {
     private func buildSky() {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
-        scene.rootNode.childNodes.filter { $0.name == "SunDiscHDR" || $0.name == "SunHaloHDR" || $0.name == "VolumetricCloudLayer" }
+        scene.rootNode.childNodes
+            .filter { $0.name == "SunDiscHDR" || $0.name == "SunHaloHDR" || $0.name == "VolumetricCloudLayer" }
             .forEach { $0.removeFromParentNode() }
+
         scene.rootNode.addChildNode(skyAnchor)
 
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Bigger, brighter sun with crisp core + soft halo.
-        // Tweakables:
-        let coreDeg: CGFloat      = 6.0     // apparent size in degrees (bigger disc)
-        let haloScale: CGFloat    = 2.6     // halo diameter = haloScale × core diameter
-        let coreEDR: CGFloat      = 8.0     // HDR intensity for core (very hot)
-        let haloEDR: CGFloat      = 2.0     // HDR intensity for halo
-        let haloExponent: CGFloat = 2.2     // falloff; higher = tighter bloom
-        let haloPixels: Int       = 2048    // halo texture resolution (keep crisp)
+        let clouds = VolumetricCloudLayer.make(
+            radius: CGFloat(cfg.skyDistance),
+            baseY: 1350,
+            topY:  2500,
+            coverage: 0.40
+        )
+        skyAnchor.addChildNode(clouds)
 
+        let coreDeg: CGFloat = 6.0
+        let haloScale: CGFloat = 2.6
+        let coreEDR: CGFloat = 8.0
+        let haloEDR: CGFloat = 2.0
+        let haloExponent: CGFloat = 2.2
+        let haloPixels: Int = 2048
         let sun = makeHDRSunNode(coreAngularSizeDeg: coreDeg,
                                  haloScale: haloScale,
                                  coreIntensity: coreEDR,
@@ -403,10 +413,14 @@ final class FirstPersonEngine: NSObject {
                                  haloPixels: haloPixels)
         sun.renderingOrder = 100_000
         skyAnchor.addChildNode(sun)
-        sunDiscNode = sun   // group node; applySunDirection moves the whole assembly
+        sunDiscNode = sun
 
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         applyCloudSunUniforms()
+
+        if let m = clouds.geometry?.firstMaterial {
+            VolumetricCloudProgram.updateUniforms(from: m)
+        }
     }
     
     @MainActor
@@ -709,32 +723,26 @@ final class FirstPersonEngine: NSObject {
     // Called by RendererProxy each frame
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
-        guard
-            let sphere =
+        guard let sphere =
                 skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
                 ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
-            let m = sphere.geometry?.firstMaterial
+              let m = sphere.geometry?.firstMaterial
         else { return }
 
-        // Update time + view-space sun each frame
+        // Time for shader-modifier or program paths.
         m.setValue(CGFloat(t), forKey: "time")
 
+        // View-space sun for any billboard/cloud materials still using it.
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let invView = simd_inverse(pov.simdWorldTransform)
         let sunView4 = invView * simd_float4(sunDirWorld, 0)
-        let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
+        let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
         let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
         m.setValue(sunViewV, forKey: "sunDirView")
 
-        // Keep billboards in sync too
-        if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
-            layer.enumerateChildNodes { node, _ in
-                guard let g = node.geometry else { return }
-                for m in g.materials {
-                    m.setValue(sunViewV, forKey: "sunDirView")
-                }
-            }
-        }
+        // World-space sun for SCNProgram path.
+        m.setValue(SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z), forKey: "sunDirWorld")
+        VolumetricCloudProgram.updateUniforms(from: m)
     }
     
     // MARK: - Sun sprite (HDR)

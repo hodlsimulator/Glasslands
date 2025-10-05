@@ -24,7 +24,6 @@ private struct CloudUniforms {
     var _pad:        Float = 0
 }
 
-// Non-actor store so the render thread can read without MainActor hops.
 private final class CloudUniformStore {
     static let shared = CloudUniformStore()
     private var lock = os_unfair_lock_s()
@@ -35,7 +34,7 @@ private final class CloudUniformStore {
         wind:        simd_float2(6, 2),
         baseY:       1350,
         topY:        2500,
-        coverage:    0.55,
+        coverage:    0.40,
         densityMul:  1.0,
         stepMul:     1.0,
         horizonLift: 0.16
@@ -45,15 +44,19 @@ private final class CloudUniformStore {
         os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }
         return U
     }
-
-    @MainActor
     func set(_ newValue: CloudUniforms) {
         os_unfair_lock_lock(&lock); U = newValue; os_unfair_lock_unlock(&lock)
+    }
+    func setTimeSun(time: Float, sun: simd_float3) {
+        os_unfair_lock_lock(&lock)
+        U.time = time
+        U.sunDirWorld = simd_float4(simd_normalize(sun), 0)
+        os_unfair_lock_unlock(&lock)
     }
 }
 
 enum VolumetricCloudProgram {
-    // IMPORTANT: No @MainActor here, so the binding closure below is non-isolated.
+
     static func makeMaterial() -> SCNMaterial {
         let m = SCNMaterial()
         m.isDoubleSided = true
@@ -64,36 +67,40 @@ enum VolumetricCloudProgram {
         m.writesToDepthBuffer = false
 
         let prog = SCNProgram()
-        prog.vertexFunctionName = "clouds_vertex"
+        prog.vertexFunctionName   = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
         prog.delegate = ErrorLog.shared
         m.program = prog
 
-        // Defaults (updated on main via updateUniforms).
+        // Defaults (edited on main thread when building sky)
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirWorld")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
-        m.setValue(0.0 as CGFloat,           forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0),forKey: "wind")   // xy used
-        m.setValue(1350.0 as CGFloat,        forKey: "baseY")
-        m.setValue(2500.0 as CGFloat,        forKey: "topY")
-        m.setValue(0.55 as CGFloat,          forKey: "coverage")
-        m.setValue(1.00 as CGFloat,          forKey: "densityMul")
-        m.setValue(1.00 as CGFloat,          forKey: "stepMul")
-        m.setValue(0.16 as CGFloat,          forKey: "horizonLift")
+        m.setValue(0.0 as CGFloat,            forKey: "time")
+        m.setValue(SCNVector3(6.0, 2.0, 0.0), forKey: "wind")
+        m.setValue(1350.0 as CGFloat,         forKey: "baseY")
+        m.setValue(2500.0 as CGFloat,         forKey: "topY")
+        m.setValue(0.40  as CGFloat,          forKey: "coverage")
+        m.setValue(1.00  as CGFloat,          forKey: "densityMul")
+        m.setValue(1.00  as CGFloat,          forKey: "stepMul")
+        m.setValue(0.16  as CGFloat,          forKey: "horizonLift")
 
-        // Render-thread binding: copies POD bytes only (no KVC).
+        // Bind POD each frame (render thread safe).
         prog.handleBinding(ofBufferNamed: "uniforms", frequency: .perFrame) { stream, _, _, _ in
             var U = CloudUniformStore.shared.snapshot()
             stream.writeBytes(&U, count: MemoryLayout<CloudUniforms>.stride)
         }
 
-        // Prime cache once on creation.
+        // Prime store from these KVCs once.
         updateUniforms(from: m)
         return m
     }
 
-    /// Call on the main thread whenever time/sun/coverage/etc. changes.
-    @MainActor
+    // Thread-agnostic per-frame update (no SceneKit touching).
+    static func setPerFrame(time: Float, sunDirWorld: simd_float3) {
+        CloudUniformStore.shared.setTimeSun(time: time, sun: sunDirWorld)
+    }
+
+    // Call on main when tweaking material KVCs (e.g. coverage sliders).
     static func updateUniforms(from mat: SCNMaterial) {
         func f(_ key: String, _ def: CGFloat) -> Float {
             if let cg = mat.value(forKey: key) as? CGFloat { return Float(cg) }
@@ -103,19 +110,18 @@ enum VolumetricCloudProgram {
             let v = (mat.value(forKey: key) as? SCNVector3) ?? def
             return simd_float3(Float(v.x), Float(v.y), Float(v.z))
         }
-
-        let sunDir = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
-        let tint   = v3("sunTint",     SCNVector3(1, 1, 1))
-        let wind3  = v3("wind",        SCNVector3(6, 2, 0))
+        let sunW   = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
+        let tint   = v3("sunTint", SCNVector3(1, 1, 1))
+        let wind3  = v3("wind",    SCNVector3(6, 2, 0))
 
         var U = CloudUniformStore.shared.snapshot()
-        U.sunDirWorld = simd_float4(sunDir, 0)
+        U.sunDirWorld = simd_float4(sunW, 0)
         U.sunTint     = simd_float4(tint, 0)
         U.time        = f("time", 0)
         U.wind        = simd_float2(wind3.x, wind3.y)
         U.baseY       = f("baseY", 1350)
         U.topY        = f("topY", 2500)
-        U.coverage    = f("coverage", 0.55)
+        U.coverage    = f("coverage", 0.40)
         U.densityMul  = f("densityMul", 1.0)
         U.stepMul     = f("stepMul", 1.0)
         U.horizonLift = f("horizonLift", 0.16)
