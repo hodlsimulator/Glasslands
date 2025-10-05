@@ -12,16 +12,17 @@ import SceneKit
 import UIKit
 
 enum VolumetricCloudLayer {
-
     @MainActor
     static func make(radius: CGFloat, baseY: CGFloat, topY: CGFloat, coverage: CGFloat) -> SCNNode {
         let sphere = SCNSphere(radius: max(10, radius * 0.98))
         sphere.segmentCount = 96
 
-        let mat = VolumetricCloudProgram.makeMaterial()
-        mat.setValue(baseY,    forKey: "baseY")
-        mat.setValue(topY,     forKey: "topY")
-        mat.setValue(coverage, forKey: "coverage")
+        // IMPORTANT: use shader-modifier material (no SCNProgram, no render-thread bindings)
+        let mat = VolumetricCloudMaterial.makeMaterial()
+        mat.setValue(baseY,   forKey: "baseY")      // present for later use
+        mat.setValue(topY,    forKey: "topY")
+        mat.setValue(coverage,forKey: "coverage")
+
         sphere.firstMaterial = mat
 
         let node = SCNNode(geometry: sphere)
