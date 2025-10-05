@@ -24,6 +24,7 @@ private struct CloudUniforms {
     var _pad:        Float = 0
 }
 
+// Simple, lock-protected POD store; no MainActor usage here.
 private final class CloudUniformStore {
     static let shared = CloudUniformStore()
     private var lock = os_unfair_lock_s()
@@ -44,9 +45,12 @@ private final class CloudUniformStore {
         os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }
         return U
     }
+
     func set(_ newValue: CloudUniforms) {
         os_unfair_lock_lock(&lock); U = newValue; os_unfair_lock_unlock(&lock)
     }
+
+    // Per-frame update from the game loop (safe to call on main).
     func setTimeSun(time: Float, sun: simd_float3) {
         os_unfair_lock_lock(&lock)
         U.time = time
@@ -69,38 +73,33 @@ enum VolumetricCloudProgram {
         let prog = SCNProgram()
         prog.vertexFunctionName   = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
-        prog.delegate = ErrorLog.shared
+        // IMPORTANT: no delegate here (it’s called on the render queue).
         m.program = prog
 
-        // Defaults (edited on main thread when building sky)
-        m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirWorld")
-        m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
-        m.setValue(0.0 as CGFloat,            forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0), forKey: "wind")
-        m.setValue(1350.0 as CGFloat,         forKey: "baseY")
-        m.setValue(2500.0 as CGFloat,         forKey: "topY")
-        m.setValue(0.40  as CGFloat,          forKey: "coverage")
-        m.setValue(1.00  as CGFloat,          forKey: "densityMul")
-        m.setValue(1.00  as CGFloat,          forKey: "stepMul")
-        m.setValue(0.16  as CGFloat,          forKey: "horizonLift")
+        // Defaults (primed once; live values come from the POD each frame)
+        m.setValue(SCNVector3(0, 1, 0),            forKey: "sunDirWorld")
+        m.setValue(SCNVector3(1.00, 0.94, 0.82),   forKey: "sunTint")
+        m.setValue(0.0 as CGFloat,                 forKey: "time")
+        m.setValue(SCNVector3(6.0, 2.0, 0.0),      forKey: "wind")
+        m.setValue(1350.0 as CGFloat,              forKey: "baseY")
+        m.setValue(2500.0 as CGFloat,              forKey: "topY")
+        m.setValue(0.40  as CGFloat,               forKey: "coverage")
+        m.setValue(1.00  as CGFloat,               forKey: "densityMul")
+        m.setValue(1.00  as CGFloat,               forKey: "stepMul")
+        m.setValue(0.16  as CGFloat,               forKey: "horizonLift")
 
-        // Bind POD each frame (render thread safe).
-        prog.handleBinding(ofBufferNamed: "uniforms", frequency: .perFrame) { stream, _, _, _ in
+        // Bind the POD buffer to the Metal arg name EXACTLY ("U") and with correct size.
+        prog.handleBinding(ofBufferNamed: "U", frequency: .perFrame) { stream, _, _, _ in
             var U = CloudUniformStore.shared.snapshot()
             stream.writeBytes(&U, count: MemoryLayout<CloudUniforms>.stride)
         }
 
-        // Prime store from these KVCs once.
+        // Prime the POD once from the material’s KVCs.
         updateUniforms(from: m)
         return m
     }
 
-    // Thread-agnostic per-frame update (no SceneKit touching).
-    static func setPerFrame(time: Float, sunDirWorld: simd_float3) {
-        CloudUniformStore.shared.setTimeSun(time: time, sun: sunDirWorld)
-    }
-
-    // Call on main when tweaking material KVCs (e.g. coverage sliders).
+    // Called once on main when building the sky or changing sliders.
     static func updateUniforms(from mat: SCNMaterial) {
         func f(_ key: String, _ def: CGFloat) -> Float {
             if let cg = mat.value(forKey: key) as? CGFloat { return Float(cg) }
@@ -110,9 +109,10 @@ enum VolumetricCloudProgram {
             let v = (mat.value(forKey: key) as? SCNVector3) ?? def
             return simd_float3(Float(v.x), Float(v.y), Float(v.z))
         }
+
         let sunW   = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
-        let tint   = v3("sunTint", SCNVector3(1, 1, 1))
-        let wind3  = v3("wind",    SCNVector3(6, 2, 0))
+        let tint   = v3("sunTint",      SCNVector3(1, 1, 1))
+        let wind3  = v3("wind",         SCNVector3(6, 2, 0))
 
         var U = CloudUniformStore.shared.snapshot()
         U.sunDirWorld = simd_float4(sunW, 0)
@@ -128,10 +128,8 @@ enum VolumetricCloudProgram {
         CloudUniformStore.shared.set(U)
     }
 
-    private final class ErrorLog: NSObject, SCNProgramDelegate {
-        static let shared = ErrorLog()
-        func program(_ program: SCNProgram, handleError error: Error) {
-            print("[VolumetricClouds] Metal compile error: \(error)")
-        }
+    // Per-frame call from your main-thread tick (already present in FirstPersonEngine).
+    static func setPerFrame(time: Float, sunDirWorld: simd_float3) {
+        CloudUniformStore.shared.setTimeSun(time: time, sun: sunDirWorld)
     }
 }
