@@ -16,11 +16,11 @@ enum CloudBillboardMaterial {
     static func makeCurrent() -> SCNMaterial { makeVolumetricImpostor() }
 
     // Version marker for verification logs.
-    private static let marker = "/* VOL_IMPOSTOR_VSAFE_003 */"
+    private static let marker = "/* VOL_IMPOSTOR_VSAFE_004 */"
 
     @MainActor
     static func makeVolumetricImpostor() -> SCNMaterial {
-        // Single-sample, premultiplied impostor; explicitly typed sampler to avoid driver quirks.
+        // Single-sample, premultiplied impostor; no redeclarations of SceneKit's built-ins.
         let fragment = """
         \(marker)
         #pragma transparent
@@ -32,9 +32,6 @@ enum CloudBillboardMaterial {
         float  densityMul;   // 0.5..2.0
         float  stepMul;      // 0.7..1.5 (scales extinction)
         float  horizonLift;
-
-        texture2d<float, access::sample> u_diffuseTexture;
-        sampler                           u_diffuseTextureSampler;
 
         float  saturate1(float x)      { return clamp(x, 0.0f, 1.0f); }
         float3 sat3(float3 v)          { return clamp(v, float3(0.0f), float3(1.0f)); }
@@ -52,7 +49,8 @@ enum CloudBillboardMaterial {
 
         #pragma body
 
-        // Alpha mask from the diffuse texture (explicitly typed).
+        // Alpha mask from the material's diffuse texture.
+        // NOTE: u_diffuseTexture and u_diffuseTextureSampler are provided by SceneKit.
         float2 uv  = _surface.diffuseTexcoord;
         float  a0  = u_diffuseTexture.sample(u_diffuseTextureSampler, uv).a;
         if (a0 < 0.002f) { discard_fragment(); }
@@ -73,7 +71,7 @@ enum CloudBillboardMaterial {
         float  T = 1.0f;             // transmittance
         float3 S = float3(0.0f);     // single scatter
 
-        // 8 fixed slices (no loops); sampler-free except the single alpha read above.
+        // 8 fixed slices (no loops); sampler use is only the single alpha read above.
         { float h=0.0625f; float env=smoothstep(0.06f,0.40f,h)*(1.0f-smoothstep(0.58f,0.98f,h));
           float j=(noise21(uv*19.0f+float2(h,h*1.7f))-0.5f)*0.08f;
           float bias=(h-0.5f)*0.10f+j;
@@ -172,7 +170,6 @@ enum CloudBillboardMaterial {
         m.writesToDepthBuffer = false
         m.shaderModifiers = [.fragment: fragment]
 
-        // Safe sampling defaults
         m.diffuse.wrapS = .clamp
         m.diffuse.wrapT = .clamp
         m.diffuse.mipFilter = .linear
@@ -180,7 +177,6 @@ enum CloudBillboardMaterial {
         m.diffuse.magnificationFilter = .linear
         m.diffuse.maxAnisotropy = 4.0
 
-        // Default arguments
         m.setValue(SCNVector3(0, 0, 1),            forKey: "sunDirView")
         m.setValue(SCNVector3(1.00, 0.94, 0.82),   forKey: "sunTint")
         m.setValue(0.42 as CGFloat,                forKey: "coverage")
