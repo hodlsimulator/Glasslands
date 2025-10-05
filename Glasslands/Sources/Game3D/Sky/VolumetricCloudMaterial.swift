@@ -15,47 +15,40 @@ import UIKit
 enum VolumetricCloudMaterial {
     @MainActor
     static func makeMaterial() -> SCNMaterial {
-        // Minimal, safe surface shader: view-space gradient + HDR sun disc/halo.
-        // No raymarching here to avoid compile pitfalls that cause magenta.
-        let surface = """
+        // Minimal fragment-stage shader: sky gradient + HDR sun glow.
+        // No scn_frame usage; no per-frame Swift bindings required.
+        let fragment = """
+        #pragma transparent
         #pragma arguments
-        float3 sunDirView;   // unit vector in *view space*
-        float3 sunTint;      // e.g. 1.00,0.94,0.82
-
-        float  saturate1(float x) { return clamp(x, 0.0, 1.0); }
-        float3 lerp3(float3 a,float3 b,float t){ return a + (b - a) * t; }
-        float  deg2rad(float d)   { return d * 0.017453292519943295; }
-
-        // HDR sun: bright core + soft halos (values > 1 on HDR displays)
-        float3 sunGlow(float3 rd, float3 sunV, float3 tint) {
-            float ct   = clamp(dot(rd, sunV), -1.0, 1.0);
-            float ang  = acos(ct);
-            const float rad = deg2rad(0.95); // ~1°
-
-            float core  = 1.0 - smoothstep(rad*0.75, rad,        ang);
-            float halo1 = 1.0 - smoothstep(rad*1.25, rad*3.50,   ang);
-            float halo2 = 1.0 - smoothstep(rad*3.50, rad*7.50,   ang);
-
-            float edr  = core * 5.0 + halo1 * 0.90 + halo2 * 0.25;
-            return tint * edr;
-        }
+        float3 sunDirView;   // unit vector in view space (fed from Swift each frame)
+        float3 sunTint;      // e.g. warm white like 1.00,0.94,0.82
 
         #pragma body
-        // View-space ray: origin at camera (0), direction from the fragment
-        float3 rd = normalize(_surface.position.xyz);
+        // View-space: _surface.view points from fragment toward camera.
+        // Ray from camera to fragment is the opposite.
+        float3 V  = normalize(_surface.view);
+        float3 rd = normalize(-V);
         float3 sunV = normalize(sunDirView);
 
         // Sky gradient
-        float tSky     = saturate1(rd.y * 0.6 + 0.4);
+        float tSky     = clamp(rd.y * 0.6 + 0.4, 0.0, 1.0);
         float3 zenith  = float3(0.30, 0.56, 0.96);
         float3 horizon = float3(0.88, 0.93, 0.99);
-        float3 col     = lerp3(horizon, zenith, tSky);
+        float3 col     = horizon + (zenith - horizon) * tSky;
 
-        // Add HDR sun on top
-        col += sunGlow(rd, sunV, sunTint);
+        // HDR sun disc + halos (values > 1.0 on HDR displays)
+        float ct   = clamp(dot(rd, sunV), -1.0, 1.0);
+        float ang  = acos(ct);
+        const float rad = 0.95 * 0.017453292519943295; // ~1°
 
-        _surface.emission    = float4(col, 1.0);
-        _surface.transparent = 1.0;
+        float core  = 1.0 - smoothstep(rad*0.75, rad,        ang);
+        float halo1 = 1.0 - smoothstep(rad*1.25, rad*3.50,   ang);
+        float halo2 = 1.0 - smoothstep(rad*3.50, rad*7.50,   ang);
+        float edr   = core * 5.0 + halo1 * 0.90 + halo2 * 0.25;
+
+        col += sunTint * edr;
+
+        _output.color = float4(col, 1.0);
         """
 
         let m = SCNMaterial()
@@ -65,9 +58,9 @@ enum VolumetricCloudMaterial {
         m.transparencyMode = .aOne
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
-        m.shaderModifiers = [.surface: surface]
+        m.shaderModifiers = [.fragment: fragment]
 
-        // Defaults (updated every frame by the engine)
+        // Defaults; engine keeps sunDirView updated each frame
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
         return m
