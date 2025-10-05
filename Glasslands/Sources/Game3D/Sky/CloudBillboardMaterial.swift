@@ -45,7 +45,7 @@ enum CloudBillboardMaterial {
 
         #pragma body
 
-        // Sprite UV + built-in diffuse sample bound via material property.
+        // Sprite UV + diffuse sample bound via material property.
         float2 uv = clamp(_surface.diffuseTexcoord, 0.002, 0.998);
         float  a0 = u_diffuseTexture.sample(u_diffuseTextureSampler, uv).a;
         if (a0 < 0.002) { discard_fragment(); }
