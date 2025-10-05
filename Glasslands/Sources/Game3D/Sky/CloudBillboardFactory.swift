@@ -20,7 +20,6 @@ enum CloudBillboardFactory {
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
         root.castsShadow = false
-        root.renderingOrder = -9_990
 
         // Share one material per atlas image.
         let template = CloudBillboardMaterial.makeCurrent()
@@ -61,7 +60,11 @@ enum CloudBillboardFactory {
                 sprite.eulerAngles.z = p.roll
                 sprite.castsShadow = false
 
-                // Per-puff opacity stays on the node so the material is shared.
+                // Draw clouds AFTER the sun for occlusion-by-order.
+                sprite.renderingOrder = -9_000
+                bb.renderingOrder = -9_000
+
+                // Per-puff opacity lives on the node so the material stays shared.
                 bb.opacity = CGFloat(max(0, min(1, p.opacity)))
 
                 bb.addChildNode(sprite)

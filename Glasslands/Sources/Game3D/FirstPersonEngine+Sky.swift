@@ -100,14 +100,12 @@ extension FirstPersonEngine {
         haloPixels: Int
     ) -> SCNNode {
         let dist = CGFloat(cfg.skyDistance)
-
         let radians = coreAngularSizeDeg * .pi / 180.0
         let coreDiameter = max(1.0, 2.0 * dist * tan(0.5 * radians))
         let haloDiameter = max(coreDiameter * haloScale, coreDiameter + 1.0)
 
         let corePlane = SCNPlane(width: coreDiameter, height: coreDiameter)
         corePlane.cornerRadius = coreDiameter * 0.5
-
         let coreMat = SCNMaterial()
         coreMat.lightingModel = .constant
         coreMat.diffuse.contents = UIColor.black
@@ -117,18 +115,16 @@ extension FirstPersonEngine {
         coreMat.emission.contents = UIColor.white
         coreMat.emission.intensity = coreIntensity
         corePlane.firstMaterial = coreMat
-
         let coreNode = SCNNode(geometry: corePlane)
         coreNode.name = "SunDiscHDR"
         coreNode.castsShadow = false
         let bbCore = SCNBillboardConstraint()
         bbCore.freeAxes = .all
         coreNode.constraints = [bbCore]
-        coreNode.renderingOrder = 100_001
+        coreNode.renderingOrder = -20_000   // draw BEFORE clouds
 
         let haloPlane = SCNPlane(width: haloDiameter, height: haloDiameter)
         haloPlane.cornerRadius = haloDiameter * 0.5
-
         let haloMat = SCNMaterial()
         haloMat.lightingModel = .constant
         haloMat.diffuse.contents = UIColor.black
@@ -139,14 +135,13 @@ extension FirstPersonEngine {
         haloMat.emission.intensity = haloIntensity
         haloMat.transparencyMode = .aOne
         haloPlane.firstMaterial = haloMat
-
         let haloNode = SCNNode(geometry: haloPlane)
         haloNode.name = "SunHaloHDR"
         haloNode.castsShadow = false
         let bbHalo = SCNBillboardConstraint()
         bbHalo.freeAxes = .all
         haloNode.constraints = [bbHalo]
-        haloNode.renderingOrder = 100_000
+        haloNode.renderingOrder = -19_990   // also before clouds, after core
 
         let group = SCNNode()
         group.addChildNode(haloNode)

@@ -41,8 +41,8 @@ extension FirstPersonEngine {
                     m.setValue(sunViewV, forKey: "sunDirView")
                     m.setValue(tintV, forKey: "sunTint")
                     m.setValue(0.42 as CGFloat, forKey: "coverage")
-                    m.setValue(1.10 as CGFloat, forKey: "densityMul")
-                    m.setValue(1.00 as CGFloat, forKey: "stepMul")
+                    m.setValue(1.25 as CGFloat, forKey: "densityMul")   // was 1.10
+                    m.setValue(0.95 as CGFloat, forKey: "stepMul")      // gentler transmittance
                     m.setValue(0.16 as CGFloat, forKey: "horizonLift")
                 }
             }
