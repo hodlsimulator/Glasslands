@@ -129,13 +129,11 @@ extension FirstPersonEngine {
     func buildSky() {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
-
         scene.rootNode.childNodes
             .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer"].contains($0.name ?? "") }
             .forEach { $0.removeFromParentNode() }
 
         scene.rootNode.addChildNode(skyAnchor)
-
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
@@ -146,11 +144,9 @@ extension FirstPersonEngine {
             self.skyAnchor.addChildNode(node)
             self.applyCloudSunUniforms()
             self.enableVolumetricCloudImpostors(true)
-            self.forceReplaceAndVerifyClouds()
+            // DO NOT clone materials per puff — that causes long stalls.
             self.debugCloudShaderOnce(tag: "after-attach")
-            DispatchQueue.main.async {
-                self.debugCloudShaderOnce(tag: "after-runloop")
-            }
+            DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
         let coreDeg: CGFloat = 6.0
@@ -159,14 +155,10 @@ extension FirstPersonEngine {
         let haloEDR: CGFloat = 2.0
         let haloExponent: CGFloat = 2.2
         let haloPixels: Int = 2048
-
         let sun = makeHDRSunNode(
-            coreAngularSizeDeg: coreDeg,
-            haloScale: haloScale,
-            coreIntensity: coreEDR,
-            haloIntensity: haloEDR,
-            haloExponent: haloExponent,
-            haloPixels: haloPixels
+            coreAngularSizeDeg: coreDeg, haloScale: haloScale,
+            coreIntensity: coreEDR, haloIntensity: haloEDR,
+            haloExponent: haloExponent, haloPixels: haloPixels
         )
         sun.renderingOrder = 100_000
         skyAnchor.addChildNode(sun)

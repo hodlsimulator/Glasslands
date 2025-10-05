@@ -22,7 +22,7 @@ enum CloudBillboardFactory {
         root.castsShadow = false
         root.renderingOrder = -9_990
 
-        // Start from the current cloud material and share per-atlas-image.
+        // Share one material per atlas image.
         let template = CloudBillboardMaterial.makeCurrent()
         var cache: [Int: SCNMaterial] = [:]
 
@@ -37,7 +37,6 @@ enum CloudBillboardFactory {
             } else {
                 m.diffuse.contents = CloudSpriteTexture.fallbackWhite2x2
             }
-            // Ensure no per-sprite tint on the material so it stays shareable.
             m.multiply.contents = UIColor.white
             cache[i] = m
             return m
@@ -62,13 +61,16 @@ enum CloudBillboardFactory {
                 sprite.eulerAngles.z = p.roll
                 sprite.castsShadow = false
 
-                // Per-puff opacity lives on the node so the material remains shared.
-                sprite.opacity = CGFloat(max(0, min(1, p.opacity)))
+                // Per-puff opacity stays on the node so the material is shared.
+                bb.opacity = CGFloat(max(0, min(1, p.opacity)))
 
-                group.addChildNode(sprite)
-                root.addChildNode(group)
+                bb.addChildNode(sprite)
+                group.addChildNode(bb)
             }
+
+            root.addChildNode(group)
         }
+
         return root
     }
 }
