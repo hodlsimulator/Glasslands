@@ -409,6 +409,7 @@ final class FirstPersonEngine: NSObject {
             self.applyCloudSunUniforms()
             self.sanitizeCloudBillboards()
             self.rebindMissingCloudTextures()
+            self.forceReplaceAllCloudBillboards()
         }
 
         // HDR sun (disc + halo).
@@ -799,8 +800,9 @@ final class FirstPersonEngine: NSObject {
         func hasValidDiffuse(_ contents: Any?) -> Bool {
             guard let c = contents else { return false }
             if let ui = c as? UIImage { return ui.cgImage != nil || ui.ciImage != nil }
-            if c is UIColor { return true }           // solid colour is fine
-            return true                                // treat any other non-nil (e.g. CGImage/MTLTexture) as valid
+            if c is UIColor { return true }
+            // Treat any other non-nil (e.g. CGImage/CIImage/MTLTexture) as valid without casting.
+            return true
         }
 
         var scanned = 0
@@ -812,7 +814,6 @@ final class FirstPersonEngine: NSObject {
             guard let geo = node.geometry, let mat = geo.firstMaterial else { return }
             scanned += 1
 
-            // Kill any legacy SCNProgram usage.
             if mat.program != nil {
                 mat.program = nil
                 nukedProgram += 1
@@ -820,17 +821,13 @@ final class FirstPersonEngine: NSObject {
 
             let frag = mat.shaderModifiers?[.fragment] ?? ""
             let usesSampler = frag.contains("texture2d<") || frag.contains("spriteTex") || frag.contains("u_diffuseTexture")
-            let isVolNoSampler = frag.contains("NEVER samples a texture")
-                || frag.contains("alpha gate")
-                || frag.contains("Premultiplied output with sprite alpha gate")
+            let isVolNoSampler = frag.contains("alpha gate") || frag.contains("Premultiplied output with sprite alpha gate")
 
-            // Ensure there's always a real diffuse image so SceneKit pre-samples _output.color.a.
             if !hasValidDiffuse(mat.diffuse.contents) {
                 mat.diffuse.contents = CloudSpriteTexture.fallbackWhite2x2
                 fixedDiffuse += 1
             }
 
-            // Replace anything that still uses a sampler or has no modifier at all.
             if usesSampler || !isVolNoSampler {
                 let newM = CloudBillboardMaterial.makeVolumetricTemplate()
                 newM.diffuse.contents = mat.diffuse.contents ?? CloudSpriteTexture.fallbackWhite2x2
@@ -865,5 +862,26 @@ final class FirstPersonEngine: NSObject {
             }
         }
         if rebound > 0 { print("[Clouds] rebound diffuse on \(rebound) puff materials") }
+    }
+    
+    @MainActor
+    private func forceReplaceAllCloudBillboards() {
+        guard let cloudLayer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            print("[Clouds] forceReplaceAllCloudBillboards: no layer"); return
+        }
+        let template = CloudBillboardMaterial.makeVolumetricTemplate()
+        var count = 0
+        cloudLayer.enumerateChildNodes { node, _ in
+            if let geo = node.geometry {
+                let m = template.copy() as! SCNMaterial
+                m.diffuse.contents = geo.firstMaterial?.diffuse.contents ?? CloudSpriteTexture.fallbackWhite2x2
+                m.transparency = geo.firstMaterial?.transparency ?? 1
+                m.multiply.contents = geo.firstMaterial?.multiply.contents
+                m.program = nil
+                geo.firstMaterial = m
+                count += 1
+            }
+        }
+        print("[Clouds] force-replaced materials on \(count) geometry nodes")
     }
 }

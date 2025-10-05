@@ -36,19 +36,15 @@ enum CloudBillboardFactory {
 
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
 
-                // Independent material per puff (no sharing of state/samplers).
+                // Independent, no-sampler material per puff.
                 let m = template.copy() as! SCNMaterial
 
-                // ALWAYS bind a valid image (guarantees _output.color sampling).
+                // ALWAYS bind a valid image so SceneKit pre-samples diffuse → _output.color.a
                 let count = max(1, atlas.images.count)
-                let safeIndex = ((p.atlasIndex % count) + count) % count
-                var img = atlas.images.isEmpty ? CloudSpriteTexture.fallbackWhite2x2 : atlas.images[safeIndex]
-                if img.cgImage == nil && img.ciImage == nil {
-                    img = CloudSpriteTexture.fallbackWhite2x2
-                }
+                let idx = ((p.atlasIndex % count) + count) % count
+                let img = atlas.images.isEmpty ? CloudSpriteTexture.fallbackWhite2x2 : atlas.images[idx]
                 m.diffuse.contents = img
 
-                // Optional per-puff tint/opacity
                 m.transparency = CGFloat(max(0, min(1, p.opacity)))
                 if let t = p.tint {
                     m.multiply.contents = UIColor(

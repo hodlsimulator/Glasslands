@@ -14,14 +14,12 @@ enum CloudBillboardMaterial {
 
     @MainActor
     static func makeVolumetricTemplate() -> SCNMaterial {
+        // NEVER samples a texture – uses pre-sampled diffuse alpha (alpha gate).
+        // Premultiplied output with sprite alpha gate.
         let fragment = """
         #pragma transparent
 
         #pragma arguments
-        // MUST be typed for iOS 26 Metal
-        texture2d<float> u_diffuseTexture;
-        sampler          u_diffuseTextureSampler;
-
         float3 sunDirView;
         float3 sunTint;
 
@@ -45,9 +43,8 @@ enum CloudBillboardMaterial {
 
         #pragma body
 
-        // Sprite UV + diffuse sample bound via material property.
-        float2 uv = clamp(_surface.diffuseTexcoord, 0.002, 0.998);
-        float  a0 = u_diffuseTexture.sample(u_diffuseTextureSampler, uv).a;
+        float2 uv  = _surface.diffuseTexcoord;
+        float  a0  = saturate1(_output.color.a);
         if (a0 < 0.002) { discard_fragment(); }
 
         float3 rd   = normalize(-_surface.view);
@@ -102,7 +99,6 @@ enum CloudBillboardMaterial {
         m.isDoubleSided = false
         m.shaderModifiers = [.fragment: fragment]
 
-        // Sprite sampling setup
         m.diffuse.wrapS = .clamp
         m.diffuse.wrapT = .clamp
         m.diffuse.mipFilter = .linear
@@ -110,11 +106,9 @@ enum CloudBillboardMaterial {
         m.diffuse.magnificationFilter = .linear
         m.diffuse.maxAnisotropy = 4.0
 
-        // Sun defaults; kept in sync by applyCloudSunUniforms()
         m.setValue(SCNVector3(0, 0, 1),          forKey: "sunDirView")
         m.setValue(SCNVector3(1.00, 0.94, 0.82), forKey: "sunTint")
 
-        // Tuning
         m.setValue(0.42 as CGFloat,              forKey: "coverage")
         m.setValue(1.10 as CGFloat,              forKey: "densityMul")
         m.setValue(1.00 as CGFloat,              forKey: "stepMul")
