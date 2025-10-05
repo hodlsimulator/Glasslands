@@ -373,37 +373,29 @@ final class FirstPersonEngine: NSObject {
 
     // MARK: - Sky
 
-    @MainActor private func buildSky() {
-        let sunAz: Float = 40
-        let sunEl: Float = 65
-
+    @MainActor
+    private func buildSky() {
+        // Clean slate
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
+        scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
+        scene.rootNode.childNodes.filter { $0.name == "SunDiscHDR" }.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
+        // Gradient only (no clouds yet)
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0
 
-        // Volumetric sphere (now stable shader modifier)
-        scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: true)?.removeFromParentNode()
-        let vol = VolumetricCloudLayer.make(
-            radius: CGFloat(cfg.skyDistance),
-            baseY: 1350,
-            topY: 2500,
-            coverage: 0.55
-        )
-        vol.simdTransform = matrix_identity_float4x4
-        vol.renderingOrder = -9_990
-        scene.rootNode.addChildNode(vol)
-
-        // Add EDR sun disc on top
+        // EDR sun disc (additive), drawn after everything else
         let sun = makeHDRSunDiscNode(angularSizeDeg: 1.05)
+        sun.renderingOrder = 9_999
         skyAnchor.addChildNode(sun)
         sunDiscNode = sun
 
-        applySunDirection(azimuthDeg: sunAz, elevationDeg: sunEl)
-        applyCloudSunUniforms()
+        // Point the sun where we want it and push uniforms
+        applySunDirection(azimuthDeg: 40, elevationDeg: 65)
+        applyCloudSunUniforms() // safe even without clouds; keeps billboards in sync later
     }
 
     private func addSafetyGround(at worldPos: simd_float3) {
@@ -640,33 +632,38 @@ final class FirstPersonEngine: NSObject {
     
     // MARK: - Sun sprite (HDR)
 
-    @MainActor private func makeHDRSunDiscNode(angularSizeDeg: CGFloat) -> SCNNode {
+    @MainActor
+    private func makeHDRSunDiscNode(angularSizeDeg: CGFloat) -> SCNNode {
+        // Place the quad on the sun direction at sky distance so its apparent size is right.
         let dist = CGFloat(cfg.skyDistance)
         let radians = angularSizeDeg * .pi / 180.0
         let worldDiameter = 2.0 * dist * tan(0.5 * radians)
 
         let plane = SCNPlane(width: worldDiameter, height: worldDiameter)
-        let mat = SCNMaterial()
-        mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor.clear
-        // Extended-range sprite; keep values > 1.0 inside the image for HDR highlight.
-        mat.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: 512)
-        mat.emission.intensity = 1.0
-        mat.isDoubleSided = false
-        mat.writesToDepthBuffer = false
-        mat.readsFromDepthBuffer = false
-        mat.transparencyMode = .aOne
-        mat.blendMode = .add
-        plane.firstMaterial = mat
+
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.diffuse.contents = UIColor.clear
+        // Emissive sprite with EDR headroom (the image already carries >1.0 values)
+        m.emission.contents = SceneKitHelpers.sunSpriteImage(diameter: 512)
+        m.emission.intensity = 1.0
+        m.isDoubleSided = false
+        m.readsFromDepthBuffer = false
+        m.writesToDepthBuffer = false
+        m.transparencyMode = .aOne
+        m.blendMode = .add
+        plane.firstMaterial = m
 
         let node = SCNNode(geometry: plane)
         node.name = "SunDiscHDR"
         node.castsShadow = false
 
+        // Face the camera at all times
         let bb = SCNBillboardConstraint()
         bb.freeAxes = .all
         node.constraints = [bb]
-        node.renderingOrder = 9_999 // after clouds
+
+        // Position gets set by applySunDirection(...)
         return node
-    }
+    } 
 }
