@@ -47,6 +47,8 @@ extension FirstPersonEngine {
                 }
             }
         }
+        
+        if on { prewarmCloudImpostorPipelines() }
     }
 
     // Called by RendererProxy each frame
@@ -247,5 +249,23 @@ extension FirstPersonEngine {
         }
 
         print("[Clouds] verify: geoms=\(geoms) replaced=\(replaced) ok=\(ok) bad=\(bad)")
+    }
+    
+    @MainActor
+    func prewarmCloudImpostorPipelines() {
+        guard let v = scnView,
+              let root = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true)
+        else { return }
+
+        var seen = Set<ObjectIdentifier>()
+        root.enumerateChildNodes { node, _ in
+            guard let g = node.geometry else { return }
+            for m in g.materials {
+                let id = ObjectIdentifier(m)
+                if seen.insert(id).inserted {
+                    _ = v.prepare(m, shouldAbortBlock: nil)   // prepare each material individually
+                }
+            }
+        }
     }
 }
