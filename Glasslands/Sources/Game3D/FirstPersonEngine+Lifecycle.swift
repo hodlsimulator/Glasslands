@@ -114,10 +114,16 @@ extension FirstPersonEngine {
             .forEach { $0.removeFromParentNode() }
 
         scene.rootNode.addChildNode(skyAnchor)
-        scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
-        scene.lightingEnvironment.contents = nil
-        scene.lightingEnvironment.intensity = 0
 
+        // Background sky (LDR image for the clear gradient).
+        scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
+
+        // Subtle SKY BOUNCE for PBR materials only (trees/rocks).
+        // Lambert terrain is unaffected by lightingEnvironment, so the ground stays as-is.
+        scene.lightingEnvironment.contents = SceneKitHelpers.skyEquirectGradient(width: 1024, height: 512)
+        scene.lightingEnvironment.intensity = 0.18   // tweak 0.12–0.25 to taste
+
+        // Clouds (billboards → impostors).
         CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance)) { [weak self] node in
             guard let self else { return }
             node.name = "CumulusBillboardLayer"
@@ -128,11 +134,12 @@ extension FirstPersonEngine {
             DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
+        // HDR sun disc + halo — keep max brightness/boost.
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
-        let evBoost: CGFloat = pow(2.0, 1.5)   // ≈ 2.828 → compensates the −1.5 EV camera change
-        let coreEDR: CGFloat = 8.0 * evBoost   // was 8.0
-        let haloEDR: CGFloat = 2.0 * evBoost   // was 2.0
+        let evBoost: CGFloat = pow(2.0, 1.5)     // keep the strong, white-hot look
+        let coreEDR: CGFloat = 8.0 * evBoost
+        let haloEDR: CGFloat = 2.0 * evBoost
         let haloExponent: CGFloat = 2.2
         let haloPixels: Int = 2048
 
