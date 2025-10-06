@@ -5,11 +5,6 @@
 //  Created by . . on 9/30/25.
 //
 
-//
-//  RendererProxy.swift
-//  Glasslands
-//
-
 import Foundation
 import SceneKit
 
@@ -17,25 +12,26 @@ import SceneKit
 /// update on the MainActor without touching main-isolated state here.
 final class RendererProxy: NSObject, SCNSceneRendererDelegate {
 
-    // We avoid storing/reading a @MainActor object here. Instead we store a
-    // @Sendable tick closure built on the main thread that hops to MainActor.
+    // We avoid storing/reading a @MainActor object here.
+    // Instead we store a @Sendable tick closure built on the main thread that hops to MainActor.
     private let tick: @Sendable (TimeInterval) -> Void
 
     init(engine: FirstPersonEngine) {
-        // Build the closure on main, capturing the engine weakly and hopping
-        // to MainActor inside the closure body.
+        // Build the closure on main, capturing the engine weakly and hopping to MainActor inside.
         self.tick = { [weak engine] t in
             Task { @MainActor in
                 engine?.stepUpdateMain(at: t)
-                // NEW: give volumetric clouds a stable time input
+                // Keep volumetrics driven by a stable render-time clock.
                 engine?.tickVolumetricClouds(atRenderTime: t)
+                // NEW: drive sun diffusion (light + shadows + halo) from cloud occlusion every frame.
+                engine?.updateSunDiffusion()
             }
         }
         super.init()
     }
 
-    // Nonisolated so SceneKit can call this from its render queue without
-    // any executor assertions. We don't touch main-isolated state here.
+    // Non-isolated so SceneKit can call this from its render queue without assertions.
+    // No main-isolated state is touched directly here.
     nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         tick(time)
     }
