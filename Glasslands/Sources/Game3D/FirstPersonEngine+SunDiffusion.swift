@@ -5,7 +5,8 @@
 //  Created by . . on 10/6/25.
 //
 //  Full sun when nothing touches the disc. Under cloud, shadows soften/lighten,
-//  but a gentle shadow remains unless the cover is truly thick.
+//  but a gentle shadow remains unless the cover is truly thick. The soft-shadow
+//  floor is slightly stronger now when fully diffused.
 //
 
 import SceneKit
@@ -48,8 +49,8 @@ extension FirstPersonEngine {
         sun.shadowRadius = penClear + (penCloud - penClear) * D
         sun.shadowSampleCount = max(1, Int(round(2 + D * 16)))    // 2…18
 
-        let alphaClear: CGFloat   = 0.82
-        let alphaSoftFloor: CGFloat = 0.20                        // normal overcast keeps a gentle shadow
+        let alphaClear: CGFloat     = 0.82
+        let alphaSoftFloor: CGFloat = 0.28                        // ↑ slightly stronger soft-shadow floor
         let alphaThickFloor: CGFloat = 0.06                       // only under really thick cover
         let floorA = mix(alphaSoftFloor, alphaThickFloor, thickF)
         let a = alphaClear + (floorA - alphaClear) * D
@@ -88,12 +89,10 @@ extension FirstPersonEngine {
             return (0.0, 0.0)
         }
 
-        // Camera + sun direction in world space.
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let cam = pov.simdWorldPosition
         let sunW = simd_normalize(sunDirWorld)
 
-        // Stylised solar core radius (radians).
         let sunR: Float = degreesToRadians(6.0) * 0.5
         let feather: Float = 0.15 * (.pi / 180.0)
 
@@ -112,7 +111,7 @@ extension FirstPersonEngine {
             if dist <= 1e-3 { return }
 
             let size: Float = Float(plane.width)
-            let puffR: Float = atanf((size * 0.30) / max(1e-3, dist)) // tight factor
+            let puffR: Float = atanf((size * 0.30) / max(1e-3, dist))
 
             let overlap = (puffR + sunR + feather) - dAngle
             if overlap <= 0 { return }
@@ -120,12 +119,11 @@ extension FirstPersonEngine {
             let denom = max(1e-3, puffR + sunR + feather)
             var t = max(0.0, min(1.0, overlap / denom))
 
-            // Weight tiny distant puffs down by area vs the sun disc.
             let angArea = min(1.0, (puffR * puffR) / (sunR * sunR))
             t *= angArea
 
             peak = max(peak, t)
-            oneMinus *= max(0.0, 1.0 - min(0.98, t))  // union product
+            oneMinus *= max(0.0, 1.0 - min(0.98, t))
         }
 
         let union = 1.0 - oneMinus
