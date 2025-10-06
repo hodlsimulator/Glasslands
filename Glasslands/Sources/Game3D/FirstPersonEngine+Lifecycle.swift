@@ -122,6 +122,7 @@ extension FirstPersonEngine {
     func buildSky() {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
+
         scene.rootNode.childNodes
             .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer"].contains($0.name ?? "") }
             .forEach { $0.removeFromParentNode() }
@@ -134,42 +135,74 @@ extension FirstPersonEngine {
 
         CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
             guard let self else { return }
+
+            @inline(__always) func norm2(_ v: simd_float2) -> simd_float2 {
+                let L = simd_length(v); return (L < 1e-5) ? simd_float2(1, 0) : (v / L)
+            }
+
             node.name = "CumulusBillboardLayer"
             node.eulerAngles.y = self.cloudInitialYaw
             self.skyAnchor.addChildNode(node)
 
-            // Collect billboard nodes (the bb nodes that carry positions), not the sprite geometry.
+            // Build caches: clusters (group nodes) and puff parents (bb nodes).
             self.cloudBillboardNodes.removeAll()
+            self.cloudClusterGroups = node.childNodes
+            self.cloudClusterCentroidLocal.removeAll()
+
             var rMin: Float = .greatestFiniteMagnitude
             var rMax: Float = 0
-            node.enumerateChildNodes { n, _ in
-                if let cons = n.constraints, cons.contains(where: { $0 is SCNBillboardConstraint }) {
-                    self.cloudBillboardNodes.append(n)
-                    let p = n.simdPosition
-                    let r = simd_length(SIMD2<Float>(p.x, p.z))
-                    if r < rMin { rMin = r }
-                    if r > rMax { rMax = r }
+
+            for group in self.cloudClusterGroups {
+                var sum = simd_float3.zero
+                var count = 0
+
+                for bb in group.childNodes {
+                    if let cs = bb.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
+                        let p = bb.simdPosition
+                        self.cloudBillboardNodes.append(bb)
+                        sum += p
+                        count += 1
+
+                        let r = simd_length(SIMD2(p.x, p.z))
+                        if r < rMin { rMin = r }
+                        if r > rMax { rMax = r }
+                    }
                 }
+
+                let c = (count > 0) ? (sum / Float(count)) : .zero
+                self.cloudClusterCentroidLocal[ObjectIdentifier(group)] = c
             }
+
             self.cloudRMin = max(0, rMin.isFinite ? rMin : 0)
             self.cloudRMax = max(self.cloudRMin + 1, rMax.isFinite ? rMax : self.cloudRMin + 1)
 
-            // Pre-assign each bb’s spinFactor for debugging/inspection (not required at runtime).
-            let span = max(1e-5, self.cloudRMax - self.cloudRMin)
-            for n in self.cloudBillboardNodes {
-                let p = n.simdPosition
-                let r = simd_length(SIMD2<Float>(p.x, p.z))
-                let t = max(0, min(1, (r - self.cloudRMin) / span))
-                let factor: Float = 1.5 - t
-                n.setValue(NSNumber(value: factor), forKey: "spinFactor")
+            // Stable one-time alpha ordering: draw from back→front along wind axis; tiny tie-breaker per puff.
+            let w = norm2(self.cloudWind)
+            let R = self.cloudRMax
+            for group in self.cloudClusterGroups {
+                let gid = ObjectIdentifier(group)
+                let c0 = self.cloudClusterCentroidLocal[gid] ?? .zero
+                let ax0 = simd_dot(SIMD2(c0.x, c0.z), w)                  // along-wind coordinate at build time
+                let axNorm = (ax0 + R) / max(1, 2 * R)                    // 0..1 across upwind→downwind span
+                let baseOrder = -9_000 + Int(axNorm * 3000.0)
+
+                for bb in group.childNodes {
+                    let tie = Int(bitPattern: Unmanaged.passUnretained(bb).toOpaque()) & 0x3FF
+                    let order = baseOrder + tie
+                    bb.renderingOrder = order
+                    for s in bb.childNodes { s.renderingOrder = order }
+                    bb.setValue(NSNumber(value: order), forKey: "GL_roKey") // marker (debug)
+                }
             }
 
+            // Keep existing uniforms/impostors
             self.applyCloudSunUniforms()
             self.enableVolumetricCloudImpostors(true)
             self.debugCloudShaderOnce(tag: "after-attach")
             DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
+        // HDR sun nodes (unchanged)
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
         let evBoost: CGFloat = pow(2.0, 1.5)

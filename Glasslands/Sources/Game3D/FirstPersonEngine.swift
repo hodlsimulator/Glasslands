@@ -73,10 +73,14 @@ final class FirstPersonEngine: NSObject {
     var cloudWind: simd_float2 = simd_float2(0.60, 0.20)
     var cloudDomainOffset: simd_float2 = simd_float2(0, 0)
 
-    // Billboard cache + ring stats
-    var cloudBillboardNodes: [SCNNode] = []
+    // Billboard caches and wind state
+    var cloudBillboardNodes: [SCNNode] = []          // puff parents with SCNBillboardConstraint (used by sun diffusion)
+    var cloudClusterGroups: [SCNNode] = []           // each cluster root (group) under CumulusBillboardLayer
+    var cloudClusterCentroidLocal: [ObjectIdentifier: simd_float3] = [:] // per-cluster local centroid at build time
+
     var cloudRMin: Float = 1
     var cloudRMax: Float = 1
+    var cloudWrapMargin: Float = 600                 // how far beyond the rim to recycle along the wind axis
 
     // Frame timing
     var lastTime: TimeInterval = 0
@@ -154,7 +158,7 @@ final class FirstPersonEngine: NSObject {
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
-        // Look delta
+        // Look
         if pendingLookDeltaPts != .zero {
             let yawRadPerPt = cfg.swipeYawDegPerPt * (Float.pi / 180)
             let pitchRadPerPt = cfg.swipePitchDegPerPt * (Float.pi / 180)
@@ -198,62 +202,51 @@ final class FirstPersonEngine: NSObject {
         chunker.updateVisible(center: next)
 
         // --------------------------------------------------------------------
-        // Clouds: linear drift for ALL puffs + stable render order (no flicker)
-        // Near runs ~2×, far ~0.5×, one wind direction, no orbiting.
+        // WIND: cluster-level conveyor. No inner-hole wrap, only far-rim recycle.
+        // Whole clusters drift; puffs keep their relative layout inside the group.
         // --------------------------------------------------------------------
-        if !cloudBillboardNodes.isEmpty {
-            // Normalised wind
-            var wind2 = SIMD2<Float>(cloudWind.x, cloudWind.y)
-            let wlen = simd_length(wind2)
-            wind2 = (wlen < 1e-5) ? SIMD2<Float>(1, 0) : (wind2 / wlen)
+        if !cloudClusterGroups.isEmpty {
+            @inline(__always) func norm2(_ v: simd_float2) -> simd_float2 {
+                let L = simd_length(v); return (L < 1e-5) ? simd_float2(1, 0) : (v / L)
+            }
 
-            // Base speed mapped from former tangential feel: v ≈ ω * rAvg
+            let w = norm2(cloudWind)
+            let span = max(1e-5, cloudRMax - cloudRMin)
+            let R = cloudRMax
+            let wrapLen: Float = (2 * R) + cloudWrapMargin
+
+            // Mid-field base speed mapped from previous tangential feel: v ≈ ω * rAvg
             let rAvg: Float = 0.5 * (cloudRMin + cloudRMax)
-            let baseSpeed: Float = max(0.0, cloudSpinRate * rAvg)   // world units / s
+            let baseSpeed: Float = max(0.0, cloudSpinRate * rAvg)
 
-            let span: Float = max(1e-5, cloudRMax - cloudRMin)
-            let wrapMargin: Float = 300.0
-            let wrapDist: Float = (cloudRMax - cloudRMin) + 800.0
+            for group in cloudClusterGroups {
+                let gid = ObjectIdentifier(group)
+                let c0  = cloudClusterCentroidLocal[gid] ?? .zero
+                let cw  = c0 + group.presentation.simdPosition
 
-            for n in cloudBillboardNodes {
-                var p = n.simdPosition
-
-                // Radial factor 0 (near) → 1 (far)
-                let r  = simd_length(SIMD2<Float>(p.x, p.z))
+                // Near runs ~2×, far ~0.5× (can be tuned later).
+                let r  = simd_length(SIMD2(cw.x, cw.z))
                 let tR = max(0, min(1, (r - cloudRMin) / span))
-
-                // Speed scale: 2× near → 0.5× far
                 let scale: Float = 2.0 * (1.0 - tR) + 0.5 * tR
+
                 let v = baseSpeed * scale
-                let d = wind2 * (v * dt)
+                let d = w * (v * dt)
+                group.simdPosition.x += d.x
+                group.simdPosition.z += d.y
 
-                p.x += d.x
-                p.z += d.y
-
-                // Wrap so the field replenishes upwind/downwind.
-                let rNow = simd_length(SIMD2<Float>(p.x, p.z))
-                if rNow > (cloudRMax + wrapMargin) {
-                    p.x -= wind2.x * wrapDist
-                    p.z -= wind2.y * wrapDist
-                } else if rNow < max(0.0, cloudRMin * 0.6) {
-                    p.x += wind2.x * wrapDist
-                    p.z += wind2.y * wrapDist
-                }
-
-                n.simdPosition = p
-
-                // One-time stable alpha ordering: near draws last. Large tie-breaker.
-                if n.value(forKey: "GL_roKey") == nil {
-                    let tie = Int(bitPattern: Unmanaged.passUnretained(n).toOpaque()) & 0x3FF // 0..1023
-                    let order = -9_000 + Int((1.0 - tR) * 1800.0) + tie
-                    n.setValue(NSNumber(value: order), forKey: "GL_roKey")
-                    n.renderingOrder = order
-                    for c in n.childNodes { c.renderingOrder = order }
+                // Recycle ONLY along the wind axis so clusters enter from far side.
+                let ax = simd_dot(SIMD2(cw.x, cw.z), w)
+                if ax > (R + cloudWrapMargin) {
+                    group.simdPosition.x -= w.x * wrapLen
+                    group.simdPosition.z -= w.y * wrapLen
+                } else if ax < -(R + cloudWrapMargin) {
+                    group.simdPosition.x += w.x * wrapLen
+                    group.simdPosition.z += w.y * wrapLen
                 }
             }
         }
 
-        // Volumetric sphere uniforms (if present).
+        // Volumetric sphere uniforms (if present)
         if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
            let m = sphere.geometry?.firstMaterial {
             m.setValue(CGFloat(t), forKey: "time")
