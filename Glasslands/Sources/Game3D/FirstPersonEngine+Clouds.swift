@@ -58,10 +58,21 @@ extension FirstPersonEngine {
     // Called by RendererProxy each frame
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
+        // --- Stable frame delta (render thread timestamp) ---
+        struct AdvectClock { static var last: TimeInterval = 0 }
+        let rawDt = (AdvectClock.last == 0) ? 1.0/60.0 : max(0, t - AdvectClock.last)
+        AdvectClock.last = t
+        let dt: Float = Float(min(1.0/20.0, max(1.0/180.0, rawDt)))
+
+        // --- Volumetric uniforms (unchanged behaviour) ---
         guard let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
-                ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
+            ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
               let m = sphere.geometry?.firstMaterial
-        else { return }
+        else {
+            // Even if the sphere isn't present yet, still advect billboards.
+            advectAllCloudBillboards(dt: dt)
+            return
+        }
 
         m.setValue(CGFloat(t), forKey: "time")
 
@@ -69,18 +80,170 @@ extension FirstPersonEngine {
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let invView = simd_inverse(pov.simdWorldTransform)
         let sunView4 = invView * simd_float4(sunDirWorld, 0)
-        let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-        let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
-        m.setValue(sunViewV, forKey: "sunDirView")
+        let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
+        m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
         m.setValue(SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z), forKey: "sunDirWorld")
 
         // Slow one-direction drift + per-session formation offset.
         m.setValue(SCNVector3(cloudWind.x, cloudWind.y, 0), forKey: "wind")
         m.setValue(SCNVector3(cloudDomainOffset.x, cloudDomainOffset.y, 0), forKey: "domainOffset")
         m.setValue(0.0 as CGFloat, forKey: "domainRotate")
-
         VolumetricCloudProgram.updateUniforms(from: m)
+
+        // --- Billboard conveyor: move *every* cloud, every frame ---
+        advectAllCloudBillboards(dt: dt)
     }
+
+    // MARK: - Billboard advection (covers every possible parentage)
+    @MainActor
+    private func advectAllCloudBillboards(dt: Float) {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+
+        // World wind → layer-local XZ (so motion is coherent regardless of initial yaw)
+        @inline(__always)
+        func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
+            let c = cosf(yaw), s = sinf(yaw)            // rotate world→layer by −yaw
+            return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
+        }
+
+        let wL = windLocal(cloudWind, layer.presentation.eulerAngles.y)
+        let wLen = simd_length(wL)
+        let wDir = (wLen < 1e-6) ? simd_float2(1, 0) : (wL / wLen)
+
+        // Calibrate to the original far-belt spin speed so existing tuning holds
+        let Rmin: Float = cloudRMin
+        let Rmax: Float = cloudRMax
+        let Rref: Float = max(1, Rmin + 0.85 * (Rmax - Rmin))
+        let vSpinRef: Float = cloudSpinRate * Rref
+
+        // Wind gain around a comfortable reference magnitude
+        let wRef: Float = 0.6324555 // √(0.4) — same scale we used before
+        let windMul = simd_clamp(wLen / max(1e-5, wRef), 0.25, 2.0)
+        let baseSpeedUnits: Float = vSpinRef * windMul
+
+        let span: Float    = max(1e-5, Rmax - Rmin)
+        let wrapLen: Float = (2 * Rmax) + 0.20 * span
+        let wrapCap: Float = Rmax + 0.10 * span
+
+        // Classify direct children: cluster groups vs "orphan" billboard nodes
+        var groups: [SCNNode] = []
+        var orphans: [SCNNode] = []
+        for child in layer.childNodes {
+            // If this node has billboarded children, treat it as a cluster group.
+            var hasPuffs = false
+            for bb in child.childNodes {
+                if let cs = bb.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
+                    hasPuffs = true; break
+                }
+            }
+            if hasPuffs {
+                groups.append(child)
+            } else if let cs = child.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
+                // Rare case: a billboard is attached directly to the layer
+                orphans.append(child)
+            }
+        }
+
+        // Move cluster groups with distance-aware parallax scaling.
+        if !groups.isEmpty {
+            for g in groups {
+                advectCluster(group: g,
+                              dir: wDir,
+                              baseV: baseSpeedUnits,
+                              dt: dt,
+                              Rmin: Rmin,
+                              Rmax: Rmax,
+                              span: span,
+                              wrapCap: wrapCap,
+                              wrapLen: wrapLen,
+                              calmSpin: (wLen < 1e-4))
+            }
+        } else {
+            // Fallback: if no groups were found, move any billboard nodes recursively.
+            layer.enumerateChildNodes { node, _ in
+                guard let cs = node.constraints,
+                      cs.contains(where: { $0 is SCNBillboardConstraint })
+                else { return }
+                let v = baseSpeedUnits
+                let d = wDir * (v * dt)
+                node.simdPosition.x += d.x
+                node.simdPosition.z += d.y
+            }
+        }
+
+        // Also nudge any billboard “orphans” directly under the layer.
+        for n in orphans {
+            let v = baseSpeedUnits
+            let d = wDir * (v * dt)
+            n.simdPosition.x += d.x
+            n.simdPosition.z += d.y
+        }
+    }
+
+    @MainActor
+    private func advectCluster(group: SCNNode,
+                               dir: simd_float2,
+                               baseV: Float,
+                               dt: Float,
+                               Rmin: Float,
+                               Rmax: Float,
+                               span: Float,
+                               wrapCap: Float,
+                               wrapLen: Float,
+                               calmSpin: Bool) {
+
+        // Get (or compute+cache) the cluster’s local centroid
+        let gid = ObjectIdentifier(group)
+        let c0: simd_float3 = {
+            if let cached = cloudClusterCentroidLocal[gid] { return cached }
+            var sum = simd_float3.zero
+            var n = 0
+            for bb in group.childNodes {
+                if let cs = bb.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
+                    sum += bb.simdPosition; n += 1
+                }
+            }
+            let c = (n > 0) ? (sum / Float(n)) : .zero
+            cloudClusterCentroidLocal[gid] = c
+            return c
+        }()
+
+        // Layer-local cluster centre
+        let cw = c0 + group.simdPosition
+
+        // Parallax scaling: faster when near, slower when far (≈2× → 0.5×)
+        let r   = simd_length(SIMD2(cw.x, cw.z))
+        let tR  = simd_clamp((r - Rmin) / span, 0, 1)
+        let parallax: Float = 2.0 * (1.0 - tR) + 0.5 * tR
+
+        if calmSpin {
+            // Keep visible motion even when wind is ~0
+            let theta = cloudSpinRate * dt * parallax
+            let ca = cosf(theta), sa = sinf(theta)
+            let vx = cw.x, vz = cw.z
+            let rx = vx * ca - vz * sa
+            let rz = vx * sa + vz * ca
+            group.simdPosition.x = rx - c0.x
+            group.simdPosition.z = rz - c0.z
+            return
+        }
+
+        // Wind advection
+        let v = baseV * parallax
+        let d = dir * (v * dt)
+        group.simdPosition.x += d.x
+        group.simdPosition.z += d.y
+
+        // Recycle strictly along the wind axis at the far rim
+        let ax = simd_dot(SIMD2(cw.x, cw.z), dir)
+        if ax > wrapCap {
+            group.simdPosition.x -= dir.x * wrapLen
+            group.simdPosition.z -= dir.y * wrapLen
+        } else if ax < -wrapCap {
+            group.simdPosition.x += dir.x * wrapLen
+            group.simdPosition.z += dir.y * wrapLen
+        }
+    } 
 
     // MARK: - Material maintenance / diagnostics
     @MainActor
