@@ -150,9 +150,11 @@ final class FirstPersonEngine: NSObject {
     func stepUpdateMain(at t: TimeInterval) {
         let sp = Signposts.begin("Frame"); defer { Signposts.end("Frame", sp) }
 
+        // Timing
         let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
         lastTime = t
 
+        // Look delta
         if pendingLookDeltaPts != .zero {
             let yawRadPerPt = cfg.swipeYawDegPerPt * (Float.pi / 180)
             let pitchRadPerPt = cfg.swipePitchDegPerPt * (Float.pi / 180)
@@ -162,20 +164,20 @@ final class FirstPersonEngine: NSObject {
             clampAngles()
         }
 
+        // Camera rig
         updateRig()
 
+        // Movement
         let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
         let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
-
-        let moveX: Float = moveInput.x
-        let moveY: Float = moveInput.y
-        let moveVec = (right * moveX) + (forward * moveY)
+        let moveVec = (right * moveInput.x) + (forward * moveInput.y)
         let attemptedDelta = moveVec * (cfg.moveSpeed * dt)
 
         var next = yawNode.simdPosition + attemptedDelta
-        let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
-        let targetY = groundY + cfg.eyeHeight
 
+        // Height follow + descent cap
+        let groundY  = groundHeightFootprint(worldX: next.x, z: next.z)
+        let targetY  = groundY + cfg.eyeHeight
         if !targetY.isFinite {
             next = spawn().simd
         } else if next.y <= targetY {
@@ -185,39 +187,68 @@ final class FirstPersonEngine: NSObject {
             next.y = max(targetY, next.y - maxDrop)
         }
 
+        // Collisions
         next = resolveObstacleCollisions(position: next)
+
+        // Apply position
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
 
         // Stream world
         chunker.updateVisible(center: next)
 
-        // Base spin on the whole layer (the "current speed").
-        if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
-            let base = cloudSpinRate * dt
-            cloudSpinAccum += base
-            var y = cloudInitialYaw + cloudSpinAccum
-            if y >  Float.pi { y -= 2 * Float.pi }
-            if y < -Float.pi { y += 2 * Float.pi }
-            layer.eulerAngles.y = y
+        // --------------------------------------------------------------------
+        // Clouds: linear drift for ALL puffs + stable render order (no flicker)
+        // Near runs ~2×, far ~0.5×, one wind direction, no orbiting.
+        // --------------------------------------------------------------------
+        if !cloudBillboardNodes.isEmpty {
+            // Normalised wind
+            var wind2 = SIMD2<Float>(cloudWind.x, cloudWind.y)
+            let wlen = simd_length(wind2)
+            wind2 = (wlen < 1e-5) ? SIMD2<Float>(1, 0) : (wind2 / wlen)
 
-            // Per-billboard extra spin for parallax: 1.5× near → 0.5× far.
-            if !cloudBillboardNodes.isEmpty {
-                let rSpan = max(1e-5, cloudRMax - cloudRMin)
-                for n in cloudBillboardNodes {
-                    let p = n.simdPosition
-                    let r = simd_length(SIMD2<Float>(p.x, p.z))
-                    let t = max(0, min(1, (r - cloudRMin) / rSpan))
-                    let factor: Float = 1.5 - t // t=0 near→1.5×, t=1 far→0.5×
-                    let extra = base * (factor - 1.0)
-                    if abs(extra) > 1e-8 {
-                        let s = sin(extra), c = cos(extra)
-                        var q = p
-                        let x = q.x, z = q.z
-                        q.x = x * c - z * s
-                        q.z = x * s + z * c
-                        n.simdPosition = q
-                    }
+            // Base speed mapped from former tangential feel: v ≈ ω * rAvg
+            let rAvg: Float = 0.5 * (cloudRMin + cloudRMax)
+            let baseSpeed: Float = max(0.0, cloudSpinRate * rAvg)   // world units / s
+
+            let span: Float = max(1e-5, cloudRMax - cloudRMin)
+            let wrapMargin: Float = 300.0
+            let wrapDist: Float = (cloudRMax - cloudRMin) + 800.0
+
+            for n in cloudBillboardNodes {
+                var p = n.simdPosition
+
+                // Radial factor 0 (near) → 1 (far)
+                let r  = simd_length(SIMD2<Float>(p.x, p.z))
+                let tR = max(0, min(1, (r - cloudRMin) / span))
+
+                // Speed scale: 2× near → 0.5× far
+                let scale: Float = 2.0 * (1.0 - tR) + 0.5 * tR
+                let v = baseSpeed * scale
+                let d = wind2 * (v * dt)
+
+                p.x += d.x
+                p.z += d.y
+
+                // Wrap so the field replenishes upwind/downwind.
+                let rNow = simd_length(SIMD2<Float>(p.x, p.z))
+                if rNow > (cloudRMax + wrapMargin) {
+                    p.x -= wind2.x * wrapDist
+                    p.z -= wind2.y * wrapDist
+                } else if rNow < max(0.0, cloudRMin * 0.6) {
+                    p.x += wind2.x * wrapDist
+                    p.z += wind2.y * wrapDist
+                }
+
+                n.simdPosition = p
+
+                // One-time stable alpha ordering: near draws last. Large tie-breaker.
+                if n.value(forKey: "GL_roKey") == nil {
+                    let tie = Int(bitPattern: Unmanaged.passUnretained(n).toOpaque()) & 0x3FF // 0..1023
+                    let order = -9_000 + Int((1.0 - tR) * 1800.0) + tie
+                    n.setValue(NSNumber(value: order), forKey: "GL_roKey")
+                    n.renderingOrder = order
+                    for c in n.childNodes { c.renderingOrder = order }
                 }
             }
         }
@@ -231,8 +262,8 @@ final class FirstPersonEngine: NSObject {
             let invView = simd_inverse(pov.simdWorldTransform)
             let sunView4 = invView * simd_float4(sunDirWorld, 0)
             let s = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-            m.setValue(SCNVector3(s.x, s.y, s.z), forKey: "sunDirView")
 
+            m.setValue(SCNVector3(s.x, s.y, s.z), forKey: "sunDirView")
             m.setValue(SCNVector3(cloudWind.x, cloudWind.y, 0), forKey: "wind")
             m.setValue(SCNVector3(cloudDomainOffset.x, cloudDomainOffset.y, 0), forKey: "domainOffset")
             m.setValue(0.0 as CGFloat, forKey: "domainRotate")
@@ -241,6 +272,7 @@ final class FirstPersonEngine: NSObject {
         // Diffuse sunlight and soften shadows based on cloud occlusion.
         updateSunDiffusion()
 
+        // Safety ground follow
         if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
             sg.simdPosition = simd_float3(next.x, groundY - 0.02, next.z)
         }
