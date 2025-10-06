@@ -23,11 +23,16 @@ extension FirstPersonEngine {
         cloudSeed = UInt32(bitPattern: Int32(rng.nextInt()))
         cloudInitialYaw = (rng.nextUniform() * 2.0 - 1.0) * Float.pi
         cloudSpinAccum = 0
-        cloudSpinRate = 0.000145 // very slow, consistent drift
-        cloudWind = simd_float2(0.60, 0.20) // gentle push for volumetrics
 
-        // Domain offset gives the volumetric field a different “formation” each launch
-        // without changing structural rules.
+        // Spin rate: 12° per minute (twice the previous 6°/min).
+        // 12 deg/min → 2 * π/1800 rad/s ≈ 0.0034906586
+        cloudSpinRate = 0.0034906586
+
+        // Gentle push for volumetrics (shader advection).
+        cloudWind = simd_float2(0.60, 0.20)
+
+        // Domain offset gives the volumetric field a different “formation”
+        // each launch without changing structural rules.
         let ang = rng.nextUniform() * 6.2831853
         let rad: Float = 87.0
         cloudDomainOffset = simd_float2(cosf(ang), sinf(ang)) * rad
@@ -52,7 +57,7 @@ extension FirstPersonEngine {
         camera.fieldOfView = 70
         camera.wantsHDR = true
         camera.wantsExposureAdaptation = false
-        camera.exposureOffset = -0.25 // 1.25 − 1.5 stops = −0.25
+        camera.exposureOffset = -0.25
         camera.averageGray = 0.18
         camera.whitePoint = 1.0
 
@@ -135,7 +140,7 @@ extension FirstPersonEngine {
         // Subtle SKY BOUNCE for PBR materials only (trees/rocks).
         // Lambert terrain is unaffected by lightingEnvironment, so the ground stays as-is.
         scene.lightingEnvironment.contents = SceneKitHelpers.skyEquirectGradient(width: 1024, height: 512)
-        scene.lightingEnvironment.intensity = 0.18 // tweak 0.12–0.25 to taste
+        scene.lightingEnvironment.intensity = 0.18
 
         // Clouds (billboards → impostors). Seeded per-session and pre-rotated.
         CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
@@ -149,10 +154,10 @@ extension FirstPersonEngine {
             DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
-        // HDR sun disc + halo — keep max brightness/boost.
+        // HDR sun disc + halo.
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
-        let evBoost: CGFloat = pow(2.0, 1.5) // keep the strong, white-hot look
+        let evBoost: CGFloat = pow(2.0, 1.5)
         let coreEDR: CGFloat = 8.0 * evBoost
         let haloEDR: CGFloat = 2.0 * evBoost
         let haloExponent: CGFloat = 2.2
