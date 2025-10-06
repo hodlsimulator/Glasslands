@@ -87,7 +87,7 @@ enum TerrainChunkNode {
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
         let mat = SCNMaterial()
-        // Sun-only pass: use Lambert so direct light covers the ground broadly.
+        // Sun-only: simple diffuse (Lambert), no macro darkening, no normal map.
         mat.lightingModel = .lambert
         mat.isLitPerPixel = true
         mat.emission.contents = UIColor.black
@@ -98,41 +98,22 @@ enum TerrainChunkNode {
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = true
 
-        // Textures (MTL) and setup
         let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
-        let normalMTL = SceneKitHelpers.grassNormalTextureMTL(size: 512, strength: 1.4)
-        let macroMTL  = SceneKitHelpers.grassMacroVariationTextureMTL(size: 256)
-
         mat.diffuse.contents = albedoMTL
-        mat.normal.contents  = normalMTL
-        mat.multiply.contents = macroMTL
+        // REMOVE these two lines if present in your file:
+        // mat.normal.contents  = SceneKitHelpers.grassNormalTextureMTL(size: 512, strength: 1.4)
+        // mat.multiply.contents = SceneKitHelpers.grassMacroVariationTextureMTL(size: 256)
 
         mat.diffuse.wrapS = .repeat;  mat.diffuse.wrapT = .repeat
-        mat.normal.wrapS  = .repeat;  mat.normal.wrapT  = .repeat
-        mat.multiply.wrapS = .repeat; mat.multiply.wrapT = .repeat
-
         mat.diffuse.minificationFilter = .linear
         mat.diffuse.magnificationFilter = .linear
         mat.diffuse.mipFilter = .linear
-
-        mat.normal.minificationFilter = .linear
-        mat.normal.magnificationFilter = .linear
-        mat.normal.mipFilter = .linear
-
-        mat.multiply.minificationFilter = .linear
-        mat.multiply.magnificationFilter = .linear
-        mat.multiply.mipFilter = .linear
 
         let repeatsPerTile = SceneKitHelpers.grassRepeatsPerTile
         let repeatsX = CGFloat(data.tilesX) * repeatsPerTile
         let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
         let scaleT = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
         mat.diffuse.contentsTransform = scaleT
-        mat.normal.contentsTransform = scaleT
-
-        let macroRepeats = SceneKitHelpers.grassMacroRepeatsAcrossChunk
-        let macroScaleT = SCNMatrix4MakeScale(Float(macroRepeats), Float(macroRepeats), 1)
-        mat.multiply.contentsTransform = macroScaleT
 
         geom.materials = [mat]
         node.geometry = geom
