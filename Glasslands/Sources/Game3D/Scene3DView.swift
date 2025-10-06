@@ -21,7 +21,6 @@ struct Scene3DView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
-
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
@@ -44,12 +43,12 @@ struct Scene3DView: UIViewRepresentable {
 
         if let cam = view.pointOfView?.camera {
             cam.wantsHDR = true
-            cam.wantsExposureAdaptation = true
-            cam.exposureOffset = 0.0
+            cam.wantsExposureAdaptation = false
+            cam.exposureOffset = -0.25    // matches resetWorld()
             cam.averageGray = 0.18
             cam.whitePoint = 1.0
-            cam.minimumExposure = -1.0
-            cam.maximumExposure = 2.0
+            cam.minimumExposure = -3.0
+            cam.maximumExposure = 3.0
             cam.bloomThreshold = 1.15
             cam.bloomIntensity = 1.25
             cam.bloomBlurRadius = 12.0

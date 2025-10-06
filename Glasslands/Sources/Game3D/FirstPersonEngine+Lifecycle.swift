@@ -34,12 +34,12 @@ extension FirstPersonEngine {
         camera.zFar = 20_000
         camera.fieldOfView = 70
         camera.wantsHDR = true
-        camera.wantsExposureAdaptation = false   // stop HDR sun/sky crushing exposure
-        camera.exposureOffset = 1.25             // lift baseline for sun-only lighting
+        camera.wantsExposureAdaptation = false
+        camera.exposureOffset = -0.25      // 1.25 − 1.5 stops = −0.25
         camera.averageGray = 0.18
         camera.whitePoint = 1.0
-
         camNode.camera = camera
+
         pitchNode.addChildNode(camNode)
         yawNode.addChildNode(pitchNode)
         scene.rootNode.addChildNode(yawNode)
@@ -64,11 +64,12 @@ extension FirstPersonEngine {
                 self?.obstaclesByChunk.removeValue(forKey: chunk)
             }
         )
-
         chunker.warmupInitial(at: yawNode.simdPosition, radius: 1)
 
         score = 0
-        DispatchQueue.main.async { [score, onScore] in onScore(score) }
+        DispatchQueue.main.async { [score, onScore] in
+            onScore(score)
+        }
     }
 
     // MARK: - Lighting
@@ -123,21 +124,25 @@ extension FirstPersonEngine {
             self.skyAnchor.addChildNode(node)
             self.applyCloudSunUniforms()
             self.enableVolumetricCloudImpostors(true)
-            // DO NOT clone materials per puff — that causes long stalls.
             self.debugCloudShaderOnce(tag: "after-attach")
             DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
-        let coreEDR: CGFloat = 8.0
-        let haloEDR: CGFloat = 2.0
+        let evBoost: CGFloat = pow(2.0, 1.5)   // ≈ 2.828 → compensates the −1.5 EV camera change
+        let coreEDR: CGFloat = 8.0 * evBoost   // was 8.0
+        let haloEDR: CGFloat = 2.0 * evBoost   // was 2.0
         let haloExponent: CGFloat = 2.2
         let haloPixels: Int = 2048
+
         let sun = makeHDRSunNode(
-            coreAngularSizeDeg: coreDeg, haloScale: haloScale,
-            coreIntensity: coreEDR, haloIntensity: haloEDR,
-            haloExponent: haloExponent, haloPixels: haloPixels
+            coreAngularSizeDeg: coreDeg,
+            haloScale: haloScale,
+            coreIntensity: coreEDR,
+            haloIntensity: haloEDR,
+            haloExponent: haloExponent,
+            haloPixels: haloPixels
         )
         sun.renderingOrder = 100_000
         skyAnchor.addChildNode(sun)
