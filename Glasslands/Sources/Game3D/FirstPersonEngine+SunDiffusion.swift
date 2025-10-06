@@ -4,15 +4,13 @@
 //
 //  Created by . . on 10/6/25.
 //
-//  Sun/shadow diffusion driven by a *sun irradiance proxy*:
-//  – If nothing overlaps the sun disc → irradiance snaps to 1.0 (full sun).
-//  – As cloud overlaps grow → irradiance decays smoothly (Beer–Lambert).
-//  – Diffusion = 1 − irradiance, used to soften/lighten shadows and add sky-fill.
+//  Sun/shadow diffusion driven by a sun irradiance proxy taken from *actual*
+//  billboard puffs that overlap the solar disc in angular space.
 //
-//  Notes:
-//  • Only billboard overlap is used here (tight angular test). This avoids a non-zero floor
-//    that could prevent full-sun states.
-//  • A faint shadow always remains under full diffusion.
+//  Behaviour:
+//  • Clear (no overlap) → irradiance snaps to 1 → bright sun, crisp/dark shadows.
+//  • Growing cover → irradiance decays smoothly → softer/lighter shadows, more sky-fill.
+//  • Even at max diffusion a gentle shadow remains, never fully flat.
 //
 
 import SceneKit
@@ -27,23 +25,23 @@ extension FirstPersonEngine {
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
-        // Irradiance proxy ∈ [0,1]: 1 = full sun on the disc, 0 = fully covered.
-        let E_now = sunIrradianceProxy()
+        // 1) Irradiance proxy ∈ [0,1] from real puff overlap.
+        let E_now: CGFloat = sunIrradianceProxyEnumeratingPuffs()
 
-        // Smooth quickly when clearing (so full sun returns decisively), gently when clouding.
+        // 2) Smooth: faster when clearing, gentler when clouding over.
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
         let k: CGFloat = (E_now >= E_prev) ? 0.50 : 0.15
         let E = E_prev + (E_now - E_prev) * k
         sunNode.setValue(E, forKey: "GL_prevIrradiance")
 
-        // Diffusion is the complement.
+        // 3) Diffusion (complement).
         let D = max(0.0, 1.0 - E)
 
-        // --- Direct sun: full when clear; falls with coverage but never zero.
+        // --- Direct sun: full when clear; never totally zero when covered.
         let baseIntensity: CGFloat = 1500
         sun.intensity = baseIntensity * max(0.06, E)
 
-        // --- Shadows: crisp & dark when clear → softer & lighter under cloud, but never gone.
+        // --- Shadows: crisp/dark when clear → softer/lighter under cloud, but never gone.
         let penClear: CGFloat  = 0.35
         let penCloud: CGFloat  = 13.0
         sun.shadowRadius = penClear + (penCloud - penClear) * D
@@ -54,14 +52,14 @@ extension FirstPersonEngine {
         let a = alphaClear + (alphaCloudy - alphaClear) * D
         sun.shadowColor = UIColor(white: 0.0, alpha: a)
 
-        // --- Directional sky fill (no shadows): lifts “back sides” under cloud without flattening.
+        // --- Directional sky-fill (no shadows): lifts backsides under cloud without flattening.
         if let skyFill = scene.rootNode.childNode(withName: "GL_SkyFill", recursively: false)?.light {
             let minFill: CGFloat = 12
             let maxFill: CGFloat = 560
             skyFill.intensity = minFill + (maxFill - minFill) * pow(D, 0.85)
         }
 
-        // --- HDR halo: only when the sun is actually behind cloud.
+        // --- HDR halo only when the sun is occluded.
         if let sunGroup = sunDiscNode,
            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
            let haloMat = halo.geometry?.firstMaterial {
@@ -74,73 +72,75 @@ extension FirstPersonEngine {
         }
     }
 
-    // MARK: - Sun irradiance proxy (tight angular overlap on the sun disc)
+    // MARK: - Irradiance proxy from *real* puff overlap (enumerates scene nodes)
 
-    /// Returns 1 if absolutely nothing overlaps the solar disc; otherwise applies a smooth
-    /// Beer–Lambert decay based on *tight* overlap. This produces decisive full-sun states.
+    /// Returns 1 if absolutely nothing overlaps the solar disc (true full-sun gate).
+    /// Otherwise decays with a Beer–Lambert curve based on tight angular overlap.
     @MainActor
-    private func sunIrradianceProxy() -> CGFloat {
-        let cov = estimateBillboardCoverageTight()  // 0…1 coverage of the disc
-        if cov <= 0.010 { return 1.0 }              // true “clear” gate
-        // Stronger optical depth so cloud actually dims convincingly.
-        let T = expf(-6.0 * cov)                    // 0…1
+    private func sunIrradianceProxyEnumeratingPuffs() -> CGFloat {
+        let cov = estimateBillboardCoverageTightEnumerating()   // 0…1 coverage of the disc
+        if cov <= 0.010 { return 1.0 }                          // decisive “clear” state
+        let T = expf(-6.0 * cov)                                // optical-depth decay
         return CGFloat(T)
     }
 
-    /// Tight coverage of the solar disc by billboards in angular space.
-    /// – Uses smaller feather and smaller puff radius factor to avoid false positives.
-    /// – Weights by apparent angular size so far, tiny puffs barely contribute.
+    /// Tight coverage of the solar disc by billboard puffs in *world space*.
+    /// Walks the actual `CumulusBillboardLayer` and tests sprite planes directly.
     @MainActor
-    private func estimateBillboardCoverageTight() -> Float {
-        guard !cloudBillboardNodes.isEmpty else { return 0.0 }
+    private func estimateBillboardCoverageTightEnumerating() -> Float {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return 0.0
+        }
 
-        let cam = yawNode.presentation.simdPosition
+        // Camera + sun direction in world space.
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let cam = pov.simdWorldPosition
         let sunW = simd_normalize(sunDirWorld)
 
-        // Stylised sun core radius (radians). Authoring uses ~6° diameter.
+        // Stylised solar core radius (radians). Authoring uses ~6° diameter.
         let sunR: Float = degreesToRadians(6.0) * 0.5
 
-        // Smaller feather to avoid “nearly touching” reading as covered.
+        // Small feather to avoid “almost touching” registering as covered.
         let feather: Float = 0.15 * (.pi / 180.0)
 
         var covPeak: Float = 0.0
 
-        for bb in cloudBillboardNodes {
-            let bp = bb.presentation.simdPosition
-            let toP = simd_normalize(bp - cam)
+        layer.enumerateChildNodes { node, _ in
+            // Only consider puff sprites (SCNPlane geometry on a node under a billboarded parent).
+            guard let plane = node.geometry as? SCNPlane else { return }
 
-            // Angular separation between sun direction and puff centre.
+            // Puff centre in world space.
+            let pw = node.presentation.simdWorldPosition
+
+            // Angular separation between sun direction and puff centre direction.
+            let toP = simd_normalize(pw - cam)
             let cosAng = simd_clamp(simd_dot(sunW, toP), -1.0, 1.0)
             let dAngle = acosf(cosAng)
 
-            guard let sprite = bb.childNodes.first,
-                  let plane  = sprite.geometry as? SCNPlane else { continue }
-
-            let dist: Float = simd_length(bp - cam)
-            if dist <= 1e-3 { continue }
-
-            // Apparent puff *radius* (tighter than before: 0.30 factor).
+            // Apparent puff *angular radius* from its world size and distance.
+            let dist: Float = simd_length(pw - cam)
+            if dist <= 1e-3 { return }
             let size: Float = Float(plane.width)
-            let puffR: Float = atanf((size * 0.30) / max(1e-3, dist))
+            let puffR: Float = atanf((size * 0.30) / max(1e-3, dist))  // tight factor
 
-            // Overlap in angular space using radii + small feather.
+            // Overlap test in angular space using radii + feather.
             let overlap = (puffR + sunR + feather) - dAngle
-            if overlap <= 0 { continue }
+            if overlap <= 0 { return }
 
-            // Normalised overlap [0,1], emphasise truly central covers.
+            // Normalised overlap [0,1]; emphasise truly central covers.
             let denom = max(1e-3, puffR + sunR + feather)
             var t = max(0.0, min(1.0, overlap / denom))
 
-            // Weight by apparent angular size so far, tiny puffs don’t dominate.
-            let angArea = min(1.0, (puffR * puffR) / (sunR * sunR)) // rough area ratio clamp
+            // Weight tiny distant puffs down by area vs the sun disc.
+            let angArea = min(1.0, (puffR * puffR) / (sunR * sunR))
             t *= angArea
 
-            // Track the peak (tight union). Avoids “always some cover” accumulation.
+            // Track the maximum (“tight union”), avoids a false “always some cover”.
             covPeak = max(covPeak, t)
-            if covPeak >= 1.0 { return 1.0 }
+            if covPeak >= 1.0 { return }
         }
 
-        // Dead-zone so full sun truly happens.
+        // Dead-zone so clear sky truly reads as clear.
         return (covPeak < 0.01) ? 0.0 : covPeak
     }
 
