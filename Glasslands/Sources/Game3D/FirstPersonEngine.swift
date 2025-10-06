@@ -156,8 +156,9 @@ final class FirstPersonEngine: NSObject {
     func stepUpdateMain(at t: TimeInterval) {
         let sp = Signposts.begin("Frame"); defer { Signposts.end("Frame", sp) }
 
-        // Timing
-        let dt: Float = (lastTime == 0) ? 1/60 : Float(min(1/30, max(0, t - lastTime)))
+        // Timing (avoid zero-dt double-calls from multiple tickers)
+        let rawDt = (lastTime == 0) ? 1/60 : max(0, t - lastTime)
+        let dt: Float = Float(min(1/30, max(1/240, rawDt)))
         lastTime = t
 
         // Look
@@ -202,48 +203,77 @@ final class FirstPersonEngine: NSObject {
         // Stream world
         chunker.updateVisible(center: next)
 
-        // -------------------- WIND: layer-local conveyor per cluster --------------------
+        // -------------------- CLOUD CONVEYOR (wind + visible speed + fallback) --------------------
         if let layer = cloudLayerNode, !cloudClusterGroups.isEmpty {
             @inline(__always)
             func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
-                let c = cosf(yaw), s = sinf(yaw)
-                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c) // world→layer
+                let c = cosf(yaw), s = sinf(yaw)            // rotate world→layer by −yaw
+                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
             }
 
-            // Use BOTH wind direction and magnitude so billboards actually follow the wind.
+            // Layer-local wind direction/magnitude
             let wLocal = windLocal(cloudWind, layer.presentation.eulerAngles.y)
             let wLen   = simd_length(wLocal)
-            let wDir   = (wLen < 1e-5) ? simd_float2(1, 0) : (wLocal / wLen)   // normalised direction
-            let windSpeed = wLen                                              // metres/sec in world terms
+            let wDir   = (wLen < 1e-5) ? simd_float2(1, 0) : (wLocal / wLen)
 
-            let span: Float = max(1e-5, cloudRMax - cloudRMin)
-            let R: Float = cloudRMax
+            // Calibrate advection so it reads like the old 12°/min spin at far range.
+            // Reference: v_ref ≈ ω * R_ref, with ω=cloudSpinRate and R_ref near the far belt.
+            let Rmin: Float = cloudRMin
+            let Rmax: Float = cloudRMax
+            let Rref: Float = max(1, Rmin + 0.85 * (Rmax - Rmin))        // lean to far belt
+            let vSpinRef: Float = cloudSpinRate * Rref                   // units/sec at far belt (old spin)
+
+            // Map wind magnitude to a 0.25×…2× multiplier around vSpinRef.
+            // wRef is the session default magnitude (≈ sqrt(0.6²+0.2²)).
+            let wRef: Float = 0.6324555
+            let windMul = simd_clamp(wLen / max(1e-5, wRef), 0.25, 2.0)
+
+            // Final base speed to use this frame (still parallax-scaled per group below).
+            let baseSpeedUnits: Float = vSpinRef * windMul
+
+            // If wind is essentially zero, fall back to gentle spin so nothing ever looks frozen.
+            let doFallbackSpin = (wLen < 1e-4)
+            let span: Float = max(1e-5, Rmax - Rmin)
+            let R: Float = Rmax
             let wrapLen: Float = (2 * R) + cloudWrapMargin
 
             for group in cloudClusterGroups {
                 let gid = ObjectIdentifier(group)
                 let c0  = cloudClusterCentroidLocal[gid] ?? .zero
-                let cw  = c0 + group.simdPosition
+
+                // Cluster centre in layer-local XZ
+                let cw = c0 + group.simdPosition
 
                 // Parallax: faster near, slower far (2× → 0.5×)
                 let r   = simd_length(SIMD2(cw.x, cw.z))
-                let tR  = max(0, min(1, (r - cloudRMin) / span))
+                let tR  = simd_clamp((r - Rmin) / span, 0, 1)
                 let scale: Float = 2.0 * (1.0 - tR) + 0.5 * tR
 
-                // Move by wind speed along wind direction.
-                let v = windSpeed * scale
-                let d = wDir * (v * dt)
-                group.simdPosition.x += d.x
-                group.simdPosition.z += d.y
+                if doFallbackSpin {
+                    // Tiny angular step around Y (keeps motion when calm).
+                    let theta = cloudSpinRate * dt * scale
+                    let ca = cosf(theta), sa = sinf(theta)
+                    let vx = cw.x, vz = cw.z
+                    let rx = vx * ca - vz * sa
+                    let rz = vx * sa + vz * ca
+                    group.simdPosition.x = rx - c0.x
+                    group.simdPosition.z = rz - c0.z
+                } else {
+                    // Advect along wind axis at a clearly visible speed.
+                    let v = baseSpeedUnits * scale
+                    let d = wDir * (v * dt)
+                    group.simdPosition.x += d.x
+                    group.simdPosition.z += d.y
 
-                // Recycle strictly along the layer-local wind axis (far rim only).
-                let ax = simd_dot(SIMD2(cw.x, cw.z), wDir)
-                if ax > (R + cloudWrapMargin) {
-                    group.simdPosition.x -= wDir.x * wrapLen
-                    group.simdPosition.z -= wDir.y * wrapLen
-                } else if ax < -(R + cloudWrapMargin) {
-                    group.simdPosition.x += wDir.x * wrapLen
-                    group.simdPosition.z += wDir.y * wrapLen
+                    // Recycle strictly along the layer-local wind axis (far rim only).
+                    let ax = simd_dot(SIMD2(cw.x, cw.z), wDir)
+                    if ax > (R + cloudWrapMargin) {
+                        group.simdPosition.x -= wDir.x * wrapLen
+                        group.simdPosition.z -= wDir.y * wrapLen
+                    } else if ax < -(R + cloudWrapMargin) {
+                        group.simdPosition.x += wDir.x * wrapLen
+                        group.simdPosition.z += wDir.y * wrapLen
+                    }
                 }
             }
         }
@@ -262,7 +292,7 @@ final class FirstPersonEngine: NSObject {
             m.setValue(0.0 as CGFloat, forKey: "domainRotate")
         }
 
-        // Diffuse sunlight and soften shadows based on cloud occlusion.
+        // Sun diffusion reacts to billboard occlusion
         updateSunDiffusion()
 
         // Safety ground follow
