@@ -178,12 +178,11 @@ final class FirstPersonEngine: NSObject {
         let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
         let moveVec = (right * moveInput.x) + (forward * moveInput.y)
         let attemptedDelta = moveVec * (cfg.moveSpeed * dt)
-
         var next = yawNode.simdPosition + attemptedDelta
 
         // Height follow + descent cap
-        let groundY  = groundHeightFootprint(worldX: next.x, z: next.z)
-        let targetY  = groundY + cfg.eyeHeight
+        let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
+        let targetY = groundY + cfg.eyeHeight
         if !targetY.isFinite {
             next = spawn().simd
         } else if next.y <= targetY {
@@ -205,49 +204,46 @@ final class FirstPersonEngine: NSObject {
 
         // -------------------- WIND: layer-local conveyor per cluster --------------------
         if let layer = cloudLayerNode, !cloudClusterGroups.isEmpty {
-            @inline(__always) func norm2(_ v: simd_float2) -> simd_float2 {
-                let L = simd_length(v); return (L < 1e-5) ? simd_float2(1, 0) : (v / L)
-            }
-            @inline(__always) func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
+            @inline(__always)
+            func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
                 let c = cosf(yaw), s = sinf(yaw)
-                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
+                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c) // world→layer
             }
 
-            let wL = norm2(windLocal(cloudWind, layer.presentation.eulerAngles.y))
-            let span = max(1e-5, cloudRMax - cloudRMin)
-            let R = cloudRMax
-            let wrapLen: Float = (2 * R) + cloudWrapMargin
+            // Use BOTH wind direction and magnitude so billboards actually follow the wind.
+            let wLocal = windLocal(cloudWind, layer.presentation.eulerAngles.y)
+            let wLen   = simd_length(wLocal)
+            let wDir   = (wLen < 1e-5) ? simd_float2(1, 0) : (wLocal / wLen)   // normalised direction
+            let windSpeed = wLen                                              // metres/sec in world terms
 
-            // Mid-field base speed mapped from the old tangential feel: v ≈ ω * rAvg
-            let rAvg: Float = 0.5 * (cloudRMin + cloudRMax)
-            let baseSpeed: Float = max(0.0, cloudSpinRate * rAvg)
+            let span: Float = max(1e-5, cloudRMax - cloudRMin)
+            let R: Float = cloudRMax
+            let wrapLen: Float = (2 * R) + cloudWrapMargin
 
             for group in cloudClusterGroups {
                 let gid = ObjectIdentifier(group)
                 let c0  = cloudClusterCentroidLocal[gid] ?? .zero
+                let cw  = c0 + group.simdPosition
 
-                // Cluster centre in the layer’s local space (no presentation lag).
-                let cw = c0 + group.simdPosition
-
-                // Speed scale: 2× near → 0.5× far
-                let r  = simd_length(SIMD2(cw.x, cw.z))
-                let tR = max(0, min(1, (r - cloudRMin) / span))
+                // Parallax: faster near, slower far (2× → 0.5×)
+                let r   = simd_length(SIMD2(cw.x, cw.z))
+                let tR  = max(0, min(1, (r - cloudRMin) / span))
                 let scale: Float = 2.0 * (1.0 - tR) + 0.5 * tR
 
-                let v = baseSpeed * scale
-                let d = wL * (v * dt)
-
+                // Move by wind speed along wind direction.
+                let v = windSpeed * scale
+                let d = wDir * (v * dt)
                 group.simdPosition.x += d.x
                 group.simdPosition.z += d.y
 
                 // Recycle strictly along the layer-local wind axis (far rim only).
-                let ax = simd_dot(SIMD2(cw.x, cw.z), wL)
+                let ax = simd_dot(SIMD2(cw.x, cw.z), wDir)
                 if ax > (R + cloudWrapMargin) {
-                    group.simdPosition.x -= wL.x * wrapLen
-                    group.simdPosition.z -= wL.y * wrapLen
+                    group.simdPosition.x -= wDir.x * wrapLen
+                    group.simdPosition.z -= wDir.y * wrapLen
                 } else if ax < -(R + cloudWrapMargin) {
-                    group.simdPosition.x += wL.x * wrapLen
-                    group.simdPosition.z += wL.y * wrapLen
+                    group.simdPosition.x += wDir.x * wrapLen
+                    group.simdPosition.z += wDir.y * wrapLen
                 }
             }
         }
@@ -256,12 +252,10 @@ final class FirstPersonEngine: NSObject {
         if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
            let m = sphere.geometry?.firstMaterial {
             m.setValue(CGFloat(t), forKey: "time")
-
             let pov = (scnView?.pointOfView ?? camNode).presentation
             let invView = simd_inverse(pov.simdWorldTransform)
             let sunView4 = invView * simd_float4(sunDirWorld, 0)
             let s = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-
             m.setValue(SCNVector3(s.x, s.y, s.z), forKey: "sunDirView")
             m.setValue(SCNVector3(cloudWind.x, cloudWind.y, 0), forKey: "wind")
             m.setValue(SCNVector3(cloudDomainOffset.x, cloudDomainOffset.y, 0), forKey: "domainOffset")
