@@ -81,6 +81,8 @@ final class FirstPersonEngine: NSObject {
     var cloudRMin: Float = 1
     var cloudRMax: Float = 1
     var cloudWrapMargin: Float = 600                 // how far beyond the rim to recycle along the wind axis
+    var cloudLayerNode: SCNNode?   // reference to the CumulusBillboardLayer root
+
 
     // Frame timing
     var lastTime: TimeInterval = 0
@@ -201,52 +203,56 @@ final class FirstPersonEngine: NSObject {
         // Stream world
         chunker.updateVisible(center: next)
 
-        // --------------------------------------------------------------------
-        // WIND: cluster-level conveyor. No inner-hole wrap, only far-rim recycle.
-        // Whole clusters drift; puffs keep their relative layout inside the group.
-        // --------------------------------------------------------------------
-        if !cloudClusterGroups.isEmpty {
+        // -------------------- WIND: layer-local conveyor per cluster --------------------
+        if let layer = cloudLayerNode, !cloudClusterGroups.isEmpty {
             @inline(__always) func norm2(_ v: simd_float2) -> simd_float2 {
                 let L = simd_length(v); return (L < 1e-5) ? simd_float2(1, 0) : (v / L)
             }
+            @inline(__always) func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
+                let c = cosf(yaw), s = sinf(yaw)
+                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
+            }
 
-            let w = norm2(cloudWind)
+            let wL = norm2(windLocal(cloudWind, layer.presentation.eulerAngles.y))
             let span = max(1e-5, cloudRMax - cloudRMin)
             let R = cloudRMax
             let wrapLen: Float = (2 * R) + cloudWrapMargin
 
-            // Mid-field base speed mapped from previous tangential feel: v ≈ ω * rAvg
+            // Mid-field base speed mapped from the old tangential feel: v ≈ ω * rAvg
             let rAvg: Float = 0.5 * (cloudRMin + cloudRMax)
             let baseSpeed: Float = max(0.0, cloudSpinRate * rAvg)
 
             for group in cloudClusterGroups {
                 let gid = ObjectIdentifier(group)
                 let c0  = cloudClusterCentroidLocal[gid] ?? .zero
-                let cw  = c0 + group.presentation.simdPosition
 
-                // Near runs ~2×, far ~0.5× (can be tuned later).
+                // Cluster centre in the layer’s local space (no presentation lag).
+                let cw = c0 + group.simdPosition
+
+                // Speed scale: 2× near → 0.5× far
                 let r  = simd_length(SIMD2(cw.x, cw.z))
                 let tR = max(0, min(1, (r - cloudRMin) / span))
                 let scale: Float = 2.0 * (1.0 - tR) + 0.5 * tR
 
                 let v = baseSpeed * scale
-                let d = w * (v * dt)
+                let d = wL * (v * dt)
+
                 group.simdPosition.x += d.x
                 group.simdPosition.z += d.y
 
-                // Recycle ONLY along the wind axis so clusters enter from far side.
-                let ax = simd_dot(SIMD2(cw.x, cw.z), w)
+                // Recycle strictly along the layer-local wind axis (far rim only).
+                let ax = simd_dot(SIMD2(cw.x, cw.z), wL)
                 if ax > (R + cloudWrapMargin) {
-                    group.simdPosition.x -= w.x * wrapLen
-                    group.simdPosition.z -= w.y * wrapLen
+                    group.simdPosition.x -= wL.x * wrapLen
+                    group.simdPosition.z -= wL.y * wrapLen
                 } else if ax < -(R + cloudWrapMargin) {
-                    group.simdPosition.x += w.x * wrapLen
-                    group.simdPosition.z += w.y * wrapLen
+                    group.simdPosition.x += wL.x * wrapLen
+                    group.simdPosition.z += wL.y * wrapLen
                 }
             }
         }
 
-        // Volumetric sphere uniforms (if present)
+        // Volumetric uniforms (if present)
         if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
            let m = sphere.geometry?.firstMaterial {
             m.setValue(CGFloat(t), forKey: "time")

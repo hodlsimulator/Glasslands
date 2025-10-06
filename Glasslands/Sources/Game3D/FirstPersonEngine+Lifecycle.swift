@@ -139,12 +139,18 @@ extension FirstPersonEngine {
             @inline(__always) func norm2(_ v: simd_float2) -> simd_float2 {
                 let L = simd_length(v); return (L < 1e-5) ? simd_float2(1, 0) : (v / L)
             }
+            @inline(__always) func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
+                let c = cosf(yaw), s = sinf(yaw)
+                // rotate world→layer: rot(-yaw) * w
+                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
+            }
 
             node.name = "CumulusBillboardLayer"
             node.eulerAngles.y = self.cloudInitialYaw
             self.skyAnchor.addChildNode(node)
+            self.cloudLayerNode = node
 
-            // Build caches: clusters (group nodes) and puff parents (bb nodes).
+            // Cache clusters (direct children) and puff parents.
             self.cloudBillboardNodes.removeAll()
             self.cloudClusterGroups = node.childNodes
             self.cloudClusterCentroidLocal.removeAll()
@@ -176,14 +182,15 @@ extension FirstPersonEngine {
             self.cloudRMin = max(0, rMin.isFinite ? rMin : 0)
             self.cloudRMax = max(self.cloudRMin + 1, rMax.isFinite ? rMax : self.cloudRMin + 1)
 
-            // Stable one-time alpha ordering: draw from back→front along wind axis; tiny tie-breaker per puff.
-            let w = norm2(self.cloudWind)
+            // Stable one-time alpha order: back→front along *layer-local* wind axis.
+            let wL = norm2(windLocal(self.cloudWind, node.eulerAngles.y))
             let R = self.cloudRMax
+
             for group in self.cloudClusterGroups {
                 let gid = ObjectIdentifier(group)
                 let c0 = self.cloudClusterCentroidLocal[gid] ?? .zero
-                let ax0 = simd_dot(SIMD2(c0.x, c0.z), w)                  // along-wind coordinate at build time
-                let axNorm = (ax0 + R) / max(1, 2 * R)                    // 0..1 across upwind→downwind span
+                let ax0 = simd_dot(SIMD2(c0.x, c0.z), wL)         // local along-wind coordinate
+                let axNorm = (ax0 + R) / max(1, 2 * R)             // 0..1
                 let baseOrder = -9_000 + Int(axNorm * 3000.0)
 
                 for bb in group.childNodes {
@@ -191,18 +198,17 @@ extension FirstPersonEngine {
                     let order = baseOrder + tie
                     bb.renderingOrder = order
                     for s in bb.childNodes { s.renderingOrder = order }
-                    bb.setValue(NSNumber(value: order), forKey: "GL_roKey") // marker (debug)
+                    bb.setValue(NSNumber(value: order), forKey: "GL_roKey")
                 }
             }
 
-            // Keep existing uniforms/impostors
             self.applyCloudSunUniforms()
             self.enableVolumetricCloudImpostors(true)
             self.debugCloudShaderOnce(tag: "after-attach")
             DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
-        // HDR sun nodes (unchanged)
+        // HDR sun (unchanged)
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
         let evBoost: CGFloat = pow(2.0, 1.5)
