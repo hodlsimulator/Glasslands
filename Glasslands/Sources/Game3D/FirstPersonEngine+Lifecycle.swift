@@ -35,6 +35,8 @@ extension FirstPersonEngine {
         beacons.removeAll()
         obstaclesByChunk.removeAll()
         cloudBillboardNodes.removeAll()
+        cloudRMin = 1
+        cloudRMax = 1
 
         buildLighting()
         buildSky()
@@ -136,17 +138,30 @@ extension FirstPersonEngine {
             node.eulerAngles.y = self.cloudInitialYaw
             self.skyAnchor.addChildNode(node)
 
-            // Cache geometry leaves and precompute per-node spin multipliers:
-            // 0.5× at horizon (low Y) → 1.5× at zenith (high Y).
+            // Collect billboard nodes (the bb nodes that carry positions), not the sprite geometry.
             self.cloudBillboardNodes.removeAll()
+            var rMin: Float = .greatestFiniteMagnitude
+            var rMax: Float = 0
             node.enumerateChildNodes { n, _ in
-                if n.geometry != nil {
+                if let cons = n.constraints, cons.contains(where: { $0 is SCNBillboardConstraint }) {
                     self.cloudBillboardNodes.append(n)
                     let p = n.simdPosition
-                    let h = max(0, min(1, p.y / self.cfg.skyDistance))
-                    let factor: Float = 0.5 + h
-                    n.setValue(NSNumber(value: factor), forKey: "spinFactor")
+                    let r = simd_length(SIMD2<Float>(p.x, p.z))
+                    if r < rMin { rMin = r }
+                    if r > rMax { rMax = r }
                 }
+            }
+            self.cloudRMin = max(0, rMin.isFinite ? rMin : 0)
+            self.cloudRMax = max(self.cloudRMin + 1, rMax.isFinite ? rMax : self.cloudRMin + 1)
+
+            // Pre-assign each bb’s spinFactor for debugging/inspection (not required at runtime).
+            let span = max(1e-5, self.cloudRMax - self.cloudRMin)
+            for n in self.cloudBillboardNodes {
+                let p = n.simdPosition
+                let r = simd_length(SIMD2<Float>(p.x, p.z))
+                let t = max(0, min(1, (r - self.cloudRMin) / span))
+                let factor: Float = 1.5 - t
+                n.setValue(NSNumber(value: factor), forKey: "spinFactor")
             }
 
             self.applyCloudSunUniforms()

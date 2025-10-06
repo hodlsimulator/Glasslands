@@ -73,8 +73,10 @@ final class FirstPersonEngine: NSObject {
     var cloudWind: simd_float2 = simd_float2(0.60, 0.20)
     var cloudDomainOffset: simd_float2 = simd_float2(0, 0)
 
-    // Billboard node cache for per-ring motion
+    // Billboard cache + ring stats
     var cloudBillboardNodes: [SCNNode] = []
+    var cloudRMin: Float = 1
+    var cloudRMax: Float = 1
 
     // Frame timing
     var lastTime: TimeInterval = 0
@@ -190,35 +192,37 @@ final class FirstPersonEngine: NSObject {
         // Stream world
         chunker.updateVisible(center: next)
 
-        // Altitude-aware drift for billboarded cumulus.
-        // Overhead (high Y) rotates 1.5×; far/horizon (low Y) rotates 0.5×.
-        if !cloudBillboardNodes.isEmpty {
+        // Base spin on the whole layer (the "current speed").
+        if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             let base = cloudSpinRate * dt
-            for n in cloudBillboardNodes {
-                // Cached multiplier computed in buildSky(); fallback computes on the fly.
-                let factor: Float
-                if let num = n.value(forKey: "spinFactor") as? NSNumber {
-                    factor = num.floatValue
-                } else {
-                    let p = n.simdPosition
-                    let h = max(0, min(1, p.y / cfg.skyDistance))
-                    factor = 0.5 + h
-                    n.setValue(NSNumber(value: factor), forKey: "spinFactor")
-                }
+            cloudSpinAccum += base
+            var y = cloudInitialYaw + cloudSpinAccum
+            if y >  Float.pi { y -= 2 * Float.pi }
+            if y < -Float.pi { y += 2 * Float.pi }
+            layer.eulerAngles.y = y
 
-                let d = base * factor
-                if abs(d) > 1e-8 {
-                    let s = sin(d), c = cos(d)
-                    var p = n.simdPosition
-                    let x = p.x, z = p.z
-                    p.x = x * c - z * s
-                    p.z = x * s + z * c
-                    n.simdPosition = p
+            // Per-billboard extra spin for parallax: 1.5× near → 0.5× far.
+            if !cloudBillboardNodes.isEmpty {
+                let rSpan = max(1e-5, cloudRMax - cloudRMin)
+                for n in cloudBillboardNodes {
+                    let p = n.simdPosition
+                    let r = simd_length(SIMD2<Float>(p.x, p.z))
+                    let t = max(0, min(1, (r - cloudRMin) / rSpan))
+                    let factor: Float = 1.5 - t // t=0 near→1.5×, t=1 far→0.5×
+                    let extra = base * (factor - 1.0)
+                    if abs(extra) > 1e-8 {
+                        let s = sin(extra), c = cos(extra)
+                        var q = p
+                        let x = q.x, z = q.z
+                        q.x = x * c - z * s
+                        q.z = x * s + z * c
+                        n.simdPosition = q
+                    }
                 }
             }
         }
 
-        // Keep volumetric sphere in sync, if present.
+        // Volumetric sphere uniforms (if present).
         if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
            let m = sphere.geometry?.firstMaterial {
             m.setValue(CGFloat(t), forKey: "time")
