@@ -35,18 +35,13 @@ extension FirstPersonEngine {
 
         sunDirWorld = dir
 
+        // Directional lights emit along node −Z, so aim along the incoming light = −dir.
         if let sunLightNode {
             let origin = yawNode.presentation.position
-            let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
+            let incoming = SCNVector3(-dir.x, -dir.y, -dir.z)
+            let target = SCNVector3(origin.x + incoming.x, origin.y + incoming.y, origin.z + incoming.z)
             sunLightNode.position = origin
             sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
-        }
-
-        if let vegSunLightNode {
-            let origin = yawNode.presentation.position
-            let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
-            vegSunLightNode.position = origin
-            vegSunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
         }
 
         if let disc = sunDiscNode {

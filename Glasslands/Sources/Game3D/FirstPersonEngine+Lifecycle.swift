@@ -34,12 +34,10 @@ extension FirstPersonEngine {
         camera.zFar = 20_000
         camera.fieldOfView = 70
         camera.wantsHDR = true
-        camera.wantsExposureAdaptation = true
-        camera.exposureOffset = 0.0
+        camera.wantsExposureAdaptation = false   // stop HDR sun/sky crushing exposure
+        camera.exposureOffset = 1.25             // lift baseline for sun-only lighting
         camera.averageGray = 0.18
         camera.whitePoint = 1.0
-        camera.minimumExposure = -1.0
-        camera.maximumExposure = 2.0
 
         camNode.camera = camera
         pitchNode.addChildNode(camNode)
@@ -81,19 +79,9 @@ extension FirstPersonEngine {
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        let amb = SCNLight()
-        amb.type = .ambient
-        amb.intensity = 400
-        amb.color = UIColor(white: 1.0, alpha: 1.0)
-        amb.categoryBitMask = 0x00000401
-
-        let ambNode = SCNNode()
-        ambNode.light = amb
-        scene.rootNode.addChildNode(ambNode)
-
         let sun = SCNLight()
         sun.type = .directional
-        sun.intensity = 1100
+        sun.intensity = 1500
         sun.color = UIColor.white
         sun.castsShadow = true
         sun.shadowMapSize = CGSize(width: 512, height: 512)
@@ -101,24 +89,15 @@ extension FirstPersonEngine {
         sun.shadowRadius = 2.0
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
         sun.automaticallyAdjustsShadowProjection = true
-        sun.categoryBitMask = 0x00000401
+        // Terrain (0x400) + props (0x001) + vegetation (0x002) = 0x403
+        sun.categoryBitMask = 0x00000403
 
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
+
         self.sunLightNode = sunNode
-
-        let vegSun = SCNLight()
-        vegSun.type = .directional
-        vegSun.intensity = 650
-        vegSun.color = UIColor.white
-        vegSun.castsShadow = false
-        vegSun.categoryBitMask = 0x00000002
-
-        let vegNode = SCNNode()
-        vegNode.light = vegSun
-        scene.rootNode.addChildNode(vegNode)
-        self.vegSunLightNode = vegNode
+        self.vegSunLightNode = nil
 
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }

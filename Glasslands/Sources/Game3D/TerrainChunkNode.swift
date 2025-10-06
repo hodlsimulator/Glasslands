@@ -56,104 +56,88 @@ enum TerrainChunkNode {
         let node = SCNNode()
         node.name = "chunk_\(data.originChunkX)_\(data.originChunkY)"
 
-        // Interleaved buffers → SceneKit sources
         let posData = data.positions.withUnsafeBytes { Data($0) }
         let nrmData = data.normals.withUnsafeBytes { Data($0) }
         let uvData  = data.uvs.withUnsafeBytes { Data($0) }
         let idxData = data.indices.withUnsafeBytes { Data($0) }
 
         let posSrc = SCNGeometrySource(
-            data: posData, semantic: .vertex,
-            vectorCount: data.positions.count,
-            usesFloatComponents: true,
-            componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0,
-            dataStride: MemoryLayout<simd_float3>.stride
-        )
+            data: posData, semantic: .vertex, vectorCount: data.positions.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD3<Float>>.stride)
+
         let nrmSrc = SCNGeometrySource(
-            data: nrmData, semantic: .normal,
-            vectorCount: data.normals.count,
-            usesFloatComponents: true,
-            componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0,
-            dataStride: MemoryLayout<simd_float3>.stride
-        )
+            data: nrmData, semantic: .normal, vectorCount: data.normals.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD3<Float>>.stride)
+
         let uvSrc = SCNGeometrySource(
-            data: uvData, semantic: .texcoord,
-            vectorCount: data.uvs.count,
-            usesFloatComponents: true,
-            componentsPerVector: 2,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0,
-            dataStride: MemoryLayout<simd_float2>.stride
-        )
+            data: uvData, semantic: .texcoord, vectorCount: data.uvs.count,
+            usesFloatComponents: true, componentsPerVector: 2,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD2<Float>>.stride)
+
         let element = SCNGeometryElement(
-            data: idxData,
-            primitiveType: .triangles,
+            data: idxData, primitiveType: .triangles,
             primitiveCount: data.indices.count / 3,
-            bytesPerIndex: MemoryLayout<UInt32>.size
-        )
+            bytesPerIndex: MemoryLayout<UInt32>.size)
 
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
-        // --- Material using seamless MTLTextures ---
         let mat = SCNMaterial()
-        mat.lightingModel = .physicallyBased
-        mat.metalness.contents = 0.0
-        mat.roughness.contents = 0.95
+        // Sun-only pass: use Lambert so direct light covers the ground broadly.
+        mat.lightingModel = .lambert
+        mat.isLitPerPixel = true
         mat.emission.contents = UIColor.black
-        mat.isDoubleSided = true
+        mat.specular.contents = UIColor.black
+        mat.shininess = 0.0
+        mat.isDoubleSided = false
         mat.cullMode = .back
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = true
 
-        // Prebuilt, wrap-aware mipmapped textures
+        // Textures (MTL) and setup
         let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
-        let normalMTL = SceneKitHelpers.grassNormalTextureMTL(size: 512, strength: 1.6)
+        let normalMTL = SceneKitHelpers.grassNormalTextureMTL(size: 512, strength: 1.4)
         let macroMTL  = SceneKitHelpers.grassMacroVariationTextureMTL(size: 256)
 
         mat.diffuse.contents = albedoMTL
         mat.normal.contents  = normalMTL
         mat.multiply.contents = macroMTL
 
-        // Repeat settings (integer repeats per chunk = seam-safe)
-        let repeatsPerTile = SceneKitHelpers.grassRepeatsPerTile
-        let repeatsX = CGFloat(data.tilesX) * repeatsPerTile
-        let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
+        mat.diffuse.wrapS = .repeat;  mat.diffuse.wrapT = .repeat
+        mat.normal.wrapS  = .repeat;  mat.normal.wrapT  = .repeat
+        mat.multiply.wrapS = .repeat; mat.multiply.wrapT = .repeat
 
-        mat.diffuse.wrapS = .repeat;    mat.diffuse.wrapT = .repeat
-        mat.normal.wrapS  = .repeat;    mat.normal.wrapT  = .repeat
-        mat.multiply.wrapS = .repeat;   mat.multiply.wrapT = .repeat
-
-        // Use linear sampling; our custom mip chain is already seamless.
         mat.diffuse.minificationFilter = .linear
         mat.diffuse.magnificationFilter = .linear
         mat.diffuse.mipFilter = .linear
+
         mat.normal.minificationFilter = .linear
         mat.normal.magnificationFilter = .linear
         mat.normal.mipFilter = .linear
+
         mat.multiply.minificationFilter = .linear
         mat.multiply.magnificationFilter = .linear
         mat.multiply.mipFilter = .linear
 
-        // Scale repeats across the chunk
+        let repeatsPerTile = SceneKitHelpers.grassRepeatsPerTile
+        let repeatsX = CGFloat(data.tilesX) * repeatsPerTile
+        let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
         let scaleT = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
         mat.diffuse.contentsTransform = scaleT
-        mat.normal.contentsTransform  = scaleT
+        mat.normal.contentsTransform = scaleT
 
-        // Macro variation repeats a small integer count across the chunk
         let macroRepeats = SceneKitHelpers.grassMacroRepeatsAcrossChunk
         let macroScaleT = SCNMatrix4MakeScale(Float(macroRepeats), Float(macroRepeats), 1)
         mat.multiply.contentsTransform = macroScaleT
 
         geom.materials = [mat]
         node.geometry = geom
-
         node.castsShadow = false
         node.categoryBitMask = 0x00000400
-
         return node
     }
 }
