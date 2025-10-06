@@ -4,8 +4,6 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  Modularised: core runtime + movement/collision kept here; sky/lighting/clouds/lifecycle split into extensions.
-//
 
 import SceneKit
 import GameplayKit
@@ -23,17 +21,13 @@ final class FirstPersonEngine: NSObject {
         let heightScale: Float = 24.0
         let chunkTiles = IVec2(64, 64)
         let preloadRadius: Int = 2
-
         let moveSpeed: Float = 6.0
         let eyeHeight: Float = 1.62
         let playerRadius: Float = 0.34
         let maxDescentRate: Float = 8.0
-
         let skyDistance: Float = 4600
-
         let swipeYawDegPerPt: Float = 0.22
         let swipePitchDegPerPt: Float = 0.18
-
         var tilesX: Int { chunkTiles.x }
         var tilesZ: Int { chunkTiles.y }
     }
@@ -44,7 +38,6 @@ final class FirstPersonEngine: NSObject {
 
     var scene = SCNScene()
     weak var scnView: SCNView?
-
     var recipe: BiomeRecipe!
     var noise: NoiseFields!
     var chunker: ChunkStreamer3D!
@@ -55,8 +48,8 @@ final class FirstPersonEngine: NSObject {
     let camNode = SCNNode()
 
     // Movement / input
-    var moveInput = SIMD2<Float>(repeating: 0)
-    var pendingLookDeltaPts = SIMD2<Float>(repeating: 0)
+    var moveInput: SIMD2<Float> = .zero
+    var pendingLookDeltaPts: SIMD2<Float> = .zero
     var yaw: Float = 0
     var pitch: Float = -0.1
 
@@ -71,6 +64,14 @@ final class FirstPersonEngine: NSObject {
     let cloudSunTint = simd_float3(1.00, 0.94, 0.82)
     let cloudSunBacklight: CGFloat = 0.45
     let cloudHorizonFade: CGFloat = 0.20
+
+    // Cloud motion / formation (per-session)
+    var cloudSeed: UInt32 = 0
+    var cloudInitialYaw: Float = 0
+    var cloudSpinAccum: Float = 0
+    var cloudSpinRate: Float = 0.000145
+    var cloudWind: simd_float2 = simd_float2(0.60, 0.20)
+    var cloudDomainOffset: simd_float2 = simd_float2(0, 0)
 
     // Frame timing
     var lastTime: TimeInterval = 0
@@ -101,15 +102,12 @@ final class FirstPersonEngine: NSObject {
     func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
-
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = true
         view.isPlaying = true
-
         view.isOpaque = true
-        view.backgroundColor = UIColor.black
 
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
@@ -126,19 +124,10 @@ final class FirstPersonEngine: NSObject {
         apply(recipe: recipe, force: true)
     }
 
-    func setPaused(_ paused: Bool) {
-        scnView?.isPlaying = !paused
-    }
-
-    func setMoveInput(_ v: SIMD2<Float>) {
-        moveInput = v
-    }
-
+    func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }
+    func setMoveInput(_ v: SIMD2<Float>) { moveInput = v }
     func setLookRate(_ _: SIMD2<Float>) { }
-
-    func applyLookDelta(points: SIMD2<Float>) {
-        pendingLookDeltaPts += points
-    }
+    func applyLookDelta(points: SIMD2<Float>) { pendingLookDeltaPts += points }
 
     func apply(recipe: BiomeRecipe, force: Bool = false) {
         if !force, let r = self.recipe, r == recipe { return }
@@ -148,9 +137,7 @@ final class FirstPersonEngine: NSObject {
     }
 
     @MainActor
-    func snapshot() -> UIImage? {
-        scnView?.snapshot()
-    }
+    func snapshot() -> UIImage? { scnView?.snapshot() }
 
     // MARK: - Per-frame
 
@@ -172,12 +159,15 @@ final class FirstPersonEngine: NSObject {
 
         updateRig()
 
-        let forward = SIMD3<Float>(-sinf(yaw), 0, -cosf(yaw))
-        let right   = SIMD3<Float>( cosf(yaw), 0, -sinf(yaw))
-        let attemptedDelta = (right * moveInput.x + forward * moveInput.y) * (cfg.moveSpeed * dt)
+        let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
+        let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
+
+        let moveX: Float = moveInput.x
+        let moveY: Float = moveInput.y
+        let moveVec = (right * moveX) + (forward * moveY)
+        let attemptedDelta = moveVec * (cfg.moveSpeed * dt)
 
         var next = yawNode.simdPosition + attemptedDelta
-
         let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
         let targetY = groundY + cfg.eyeHeight
 
@@ -191,17 +181,24 @@ final class FirstPersonEngine: NSObject {
         }
 
         next = resolveObstacleCollisions(position: next)
-
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
 
+        // Stream world
         chunker.updateVisible(center: next)
 
-        collectNearbyBeacons(playerXZ: SIMD2(next.x, next.z))
+        // Very slow sky drift for billboarded cumulus (single, consistent direction).
+        if let bill = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
+            cloudSpinAccum += cloudSpinRate * dt
+            var y = cloudInitialYaw + cloudSpinAccum
+            if y > Float.pi { y -= 2 * Float.pi }
+            if y < -Float.pi { y += 2 * Float.pi }
+            bill.eulerAngles.y = y
+        }
 
+        // Keep volumetric sphere in sync, if present.
         if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false),
-           let m = sphere.geometry?.firstMaterial
-        {
+           let m = sphere.geometry?.firstMaterial {
             m.setValue(CGFloat(t), forKey: "time")
 
             let pov = (scnView?.pointOfView ?? camNode).presentation
@@ -209,6 +206,11 @@ final class FirstPersonEngine: NSObject {
             let sunView4 = invView * simd_float4(sunDirWorld, 0)
             let s = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
             m.setValue(SCNVector3(s.x, s.y, s.z), forKey: "sunDirView")
+
+            // Sync slow drift + per-session formation offset to volumetric program.
+            m.setValue(SCNVector3(cloudWind.x, cloudWind.y, 0), forKey: "wind")
+            m.setValue(SCNVector3(cloudDomainOffset.x, cloudDomainOffset.y, 0), forKey: "domainOffset")
+            m.setValue(0.0 as CGFloat, forKey: "domainRotate")
         }
 
         if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
@@ -218,15 +220,13 @@ final class FirstPersonEngine: NSObject {
 
     // MARK: - Movement / rig
 
-    @inline(__always)
-    func updateRig() {
-        yawNode.eulerAngles = SCNVector3(0, yaw, 0)
+    @inline(__always) func updateRig() {
+        yawNode.eulerAngles   = SCNVector3(0, yaw, 0)
         pitchNode.eulerAngles = SCNVector3(pitch, 0, 0)
         camNode.position = SCNVector3(0, 0, 0)
     }
 
-    @inline(__always)
-    func clampAngles() {
+    @inline(__always) func clampAngles() {
         let halfPi = Float.pi / 2
         pitch = max(-halfPi + 0.01, min(halfPi - 0.01, pitch))
         if yaw >  Float.pi { yaw -= 2 * Float.pi }
@@ -238,19 +238,18 @@ final class FirstPersonEngine: NSObject {
     func groundHeightFootprint(worldX x: Float, z: Float) -> Float {
         if let y = groundHeightRaycast(worldX: x, z: z) { return y }
         let r: Float = 0.35
-        let h0 = TerrainMath.heightWorld(x: x,       z: z,       cfg: cfg, noise: noise)
-        let h1 = TerrainMath.heightWorld(x: x - r,   z: z - r,   cfg: cfg, noise: noise)
-        let h2 = TerrainMath.heightWorld(x: x + r,   z: z - r,   cfg: cfg, noise: noise)
-        let h3 = TerrainMath.heightWorld(x: x - r,   z: z + r,   cfg: cfg, noise: noise)
-        let h4 = TerrainMath.heightWorld(x: x + r,   z: z + r,   cfg: cfg, noise: noise)
+        let h0 = TerrainMath.heightWorld(x: x,     z: z,     cfg: cfg, noise: noise)
+        let h1 = TerrainMath.heightWorld(x: x - r, z: z - r, cfg: cfg, noise: noise)
+        let h2 = TerrainMath.heightWorld(x: x + r, z: z - r, cfg: cfg, noise: noise)
+        let h3 = TerrainMath.heightWorld(x: x - r, z: z + r, cfg: cfg, noise: noise)
+        let h4 = TerrainMath.heightWorld(x: x + r, z: z + r, cfg: cfg, noise: noise)
         return max(h0, h1, h2, h3, h4)
     }
 
     func groundHeightRaycast(worldX x: Float, z: Float) -> Float? {
-        let from = SCNVector3(x,  10_000, z)
+        let from = SCNVector3(x, 10_000, z)
         let to   = SCNVector3(x, -10_000, z)
         let hits = scene.rootNode.hitTestWithSegment(from: from, to: to, options: nil)
-
         if let hit = hits.first(where: {
             let n = $0.node
             return (n.categoryBitMask & 0x00000400) != 0 || (n.name?.hasPrefix("chunk_") ?? false)
@@ -328,7 +327,6 @@ final class FirstPersonEngine: NSObject {
             for dx in -1...1 {
                 let key = IVec2(ci.x + dx, ci.y + dz)
                 guard let arr = obstaclesByChunk[key], !arr.isEmpty else { continue }
-
                 for o in arr {
                     guard o.node != nil else { continue }
                     let d = SIMD2(pos.x, pos.z) - o.position
@@ -367,9 +365,7 @@ final class FirstPersonEngine: NSObject {
             let p = n.worldPosition
             let dx = playerXZ.x - p.x
             let dz = playerXZ.y - p.z
-            if dx*dx + dz*dz < 1.25 * 1.25 {
-                picked.append(n)
-            }
+            if dx*dx + dz*dz < 1.25 * 1.25 { picked.append(n) }
         }
 
         if !picked.isEmpty {

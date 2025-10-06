@@ -10,6 +10,7 @@ import simd
 import UIKit
 import QuartzCore
 import CoreGraphics
+import GameplayKit
 
 extension FirstPersonEngine {
 
@@ -17,6 +18,21 @@ extension FirstPersonEngine {
 
     @MainActor
     func resetWorld() {
+        // Fresh per-session cloud parameters (formation + motion).
+        let rng = GKRandomSource.sharedRandom()
+        cloudSeed = UInt32(bitPattern: Int32(rng.nextInt()))
+        cloudInitialYaw = (rng.nextUniform() * 2.0 - 1.0) * Float.pi
+        cloudSpinAccum = 0
+        cloudSpinRate = 0.000145 // very slow, consistent drift
+        cloudWind = simd_float2(0.60, 0.20) // gentle push for volumetrics
+
+        // Domain offset gives the volumetric field a different “formation” each launch
+        // without changing structural rules.
+        let ang = rng.nextUniform() * 6.2831853
+        let rad: Float = 87.0
+        cloudDomainOffset = simd_float2(cosf(ang), sinf(ang)) * rad
+
+        // Clear scene
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
         beacons.removeAll()
         obstaclesByChunk.removeAll()
@@ -29,17 +45,18 @@ extension FirstPersonEngine {
         yawNode.position = spawn()
         updateRig()
 
+        // Camera
         let camera = SCNCamera()
         camera.zNear = 0.02
         camera.zFar = 20_000
         camera.fieldOfView = 70
         camera.wantsHDR = true
         camera.wantsExposureAdaptation = false
-        camera.exposureOffset = -0.25      // 1.25 − 1.5 stops = −0.25
+        camera.exposureOffset = -0.25 // 1.25 − 1.5 stops = −0.25
         camera.averageGray = 0.18
         camera.whitePoint = 1.0
-        camNode.camera = camera
 
+        camNode.camera = camera
         pitchNode.addChildNode(camNode)
         yawNode.addChildNode(pitchNode)
         scene.rootNode.addChildNode(yawNode)
@@ -64,12 +81,10 @@ extension FirstPersonEngine {
                 self?.obstaclesByChunk.removeValue(forKey: chunk)
             }
         )
-        chunker.warmupInitial(at: yawNode.simdPosition, radius: 1)
 
+        chunker.warmupInitial(at: yawNode.simdPosition, radius: 1)
         score = 0
-        DispatchQueue.main.async { [score, onScore] in
-            onScore(score)
-        }
+        DispatchQueue.main.async { [score, onScore] in onScore(score) }
     }
 
     // MARK: - Lighting
@@ -96,7 +111,6 @@ extension FirstPersonEngine {
         let sunNode = SCNNode()
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
-
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
 
@@ -121,12 +135,13 @@ extension FirstPersonEngine {
         // Subtle SKY BOUNCE for PBR materials only (trees/rocks).
         // Lambert terrain is unaffected by lightingEnvironment, so the ground stays as-is.
         scene.lightingEnvironment.contents = SceneKitHelpers.skyEquirectGradient(width: 1024, height: 512)
-        scene.lightingEnvironment.intensity = 0.18   // tweak 0.12–0.25 to taste
+        scene.lightingEnvironment.intensity = 0.18 // tweak 0.12–0.25 to taste
 
-        // Clouds (billboards → impostors).
-        CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance)) { [weak self] node in
+        // Clouds (billboards → impostors). Seeded per-session and pre-rotated.
+        CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
             guard let self else { return }
             node.name = "CumulusBillboardLayer"
+            node.eulerAngles.y = self.cloudInitialYaw
             self.skyAnchor.addChildNode(node)
             self.applyCloudSunUniforms()
             self.enableVolumetricCloudImpostors(true)
@@ -137,7 +152,7 @@ extension FirstPersonEngine {
         // HDR sun disc + halo — keep max brightness/boost.
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
-        let evBoost: CGFloat = pow(2.0, 1.5)     // keep the strong, white-hot look
+        let evBoost: CGFloat = pow(2.0, 1.5) // keep the strong, white-hot look
         let coreEDR: CGFloat = 8.0 * evBoost
         let haloEDR: CGFloat = 2.0 * evBoost
         let haloExponent: CGFloat = 2.2
@@ -175,10 +190,8 @@ extension FirstPersonEngine {
 
         let node = SCNNode(geometry: plane)
         node.eulerAngles = SCNVector3(-Float.pi/2, 0, 0)
-
         let y = TerrainMath.heightWorld(x: worldPos.x, z: worldPos.z, cfg: cfg, noise: noise) - 0.02
         node.simdPosition = simd_float3(worldPos.x, y, worldPos.z)
-
         node.renderingOrder = -500
         node.name = "SafetyGround"
         node.categoryBitMask = 0

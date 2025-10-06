@@ -16,22 +16,24 @@ import os.lock
 private struct CloudUniforms {
     var sunDirWorld : simd_float4
     var sunTint     : simd_float4
-    var params0     : simd_float4   // x=time, y=wind.x, z=wind.y, w=baseY
-    var params1     : simd_float4   // x=topY, y=coverage, z=densityMul, w=stepMul
-    var params2     : simd_float4   // x=mieG, y=powderK, z=horizonLift, w=detailMul
+    var params0     : simd_float4 // x=time, y=wind.x, z=wind.y, w=baseY
+    var params1     : simd_float4 // x=topY, y=coverage, z=densityMul, w=stepMul
+    var params2     : simd_float4 // x=mieG, y=powderK, z=horizonLift, w=detailMul
+    var params3     : simd_float4 // x=domainOffX, y=domainOffY, z=domainRotate, w=0
 }
 
-// Simple lock‑protected POD store.
+// Simple lock-protected POD store.
 private final class CloudUniformStore {
     static let shared = CloudUniformStore()
-
     private var lock = os_unfair_lock_s()
+
     private var U = CloudUniforms(
         sunDirWorld: simd_float4(0, 1, 0, 0),
-        sunTint:     simd_float4(1.00, 0.94, 0.82, 0),
-        params0:     simd_float4(0, 6, 2, 1350),      // time, windX, windY, baseY
-        params1:     simd_float4(2500, 0.42, 1.30, 0.95), // topY, coverage, densityMul, stepMul
-        params2:     simd_float4(0.65, 1.80, 0.18, 1.00)  // g, powderK, horizonLift, detailMul
+        sunTint: simd_float4(1.00, 0.94, 0.82, 0),
+        params0: simd_float4(0, 6, 2, 1350),              // time, windX, windY, baseY
+        params1: simd_float4(2500, 0.42, 1.30, 0.95),     // topY, coverage, densityMul, stepMul
+        params2: simd_float4(0.65, 1.80, 0.18, 1.00),     // g, powderK, horizonLift, detailMul
+        params3: simd_float4(0.0, 0.0, 0.0, 0.0)          // domain offset / rotate
     )
 
     func snapshot() -> CloudUniforms {
@@ -43,7 +45,7 @@ private final class CloudUniformStore {
         os_unfair_lock_lock(&lock); U = newValue; os_unfair_lock_unlock(&lock)
     }
 
-    // Per‑frame update (main thread safe).
+    // Per-frame update (main thread safe).
     func setTimeSun(time: Float, sun: simd_float3) {
         os_unfair_lock_lock(&lock)
         U.params0.x = time
@@ -58,13 +60,13 @@ enum VolumetricCloudProgram {
         let m = SCNMaterial()
         m.isDoubleSided = true
         m.lightingModel = .constant
-        m.blendMode = .alpha          // composite with the skydome behind
+        m.blendMode = .alpha         // composite with the skydome behind
         m.transparencyMode = .aOne
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
 
         let prog = SCNProgram()
-        prog.vertexFunctionName   = "clouds_vertex"
+        prog.vertexFunctionName = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
         m.program = prog
 
@@ -75,19 +77,22 @@ enum VolumetricCloudProgram {
         }
 
         // Defaults exposed via KVC (so gameplay code can tweak live):
-        m.setValue(SCNVector3(0, 1, 0),                         forKey: "sunDirWorld")
-        m.setValue(SCNVector3(1.00, 0.94, 0.82),                forKey: "sunTint")
-        m.setValue(0.0 as CGFloat,                              forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0),                   forKey: "wind")
-        m.setValue(1350.0 as CGFloat,                           forKey: "baseY")
-        m.setValue(2500.0 as CGFloat,                           forKey: "topY")
-        m.setValue(0.42 as CGFloat,                             forKey: "coverage")
-        m.setValue(1.30 as CGFloat,                             forKey: "densityMul")
-        m.setValue(0.95 as CGFloat,                             forKey: "stepMul")
-        m.setValue(0.18 as CGFloat,                             forKey: "horizonLift")
-        m.setValue(0.65 as CGFloat,                             forKey: "mieG")
-        m.setValue(1.80 as CGFloat,                             forKey: "powderK")
-        m.setValue(1.00 as CGFloat,                             forKey: "detailMul")
+        m.setValue(SCNVector3(0, 1, 0),               forKey: "sunDirWorld")
+        m.setValue(SCNVector3(1.00, 0.94, 0.82),      forKey: "sunTint")
+        m.setValue(0.0 as CGFloat,                    forKey: "time")
+        m.setValue(SCNVector3(6.0, 2.0, 0.0),         forKey: "wind")
+        m.setValue(1350.0 as CGFloat,                 forKey: "baseY")
+        m.setValue(2500.0 as CGFloat,                 forKey: "topY")
+        m.setValue(0.42 as CGFloat,                   forKey: "coverage")
+        m.setValue(1.30 as CGFloat,                   forKey: "densityMul")
+        m.setValue(0.95 as CGFloat,                   forKey: "stepMul")
+        m.setValue(0.18 as CGFloat,                   forKey: "horizonLift")
+        m.setValue(0.65 as CGFloat,                   forKey: "mieG")
+        m.setValue(1.80 as CGFloat,                   forKey: "powderK")
+        m.setValue(1.00 as CGFloat,                   forKey: "detailMul")
+        // New: domain offset/rotation for per-session formation variation.
+        m.setValue(SCNVector3(0.0, 0.0, 0.0),         forKey: "domainOffset")
+        m.setValue(0.0 as CGFloat,                    forKey: "domainRotate")
 
         // Prime the store from these defaults.
         updateUniforms(from: m)
@@ -105,38 +110,30 @@ enum VolumetricCloudProgram {
             return simd_float3(Float(v.x), Float(v.y), Float(v.z))
         }
 
-        let sunW   = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
-        let tint   = v3("sunTint", SCNVector3(1, 1, 1))
-        let wind3  = v3("wind",    SCNVector3(6, 2, 0))
+        let sunW  = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
+        let tint  = v3("sunTint", SCNVector3(1, 1, 1))
+        let wind3 = v3("wind",    SCNVector3(6, 2, 0))
+        let dom   = v3("domainOffset", SCNVector3(0, 0, 0))
 
         var U = CloudUniformStore.shared.snapshot()
         U.sunDirWorld = simd_float4(sunW, 0)
         U.sunTint     = simd_float4(tint, 0)
-
-        U.params0 = simd_float4(
-            f("time", 0),
-            wind3.x, wind3.y,
-            f("baseY", 1350)
+        U.params0     = simd_float4(
+            f("time", 0), wind3.x, wind3.y, f("baseY", 1350)
         )
-
-        U.params1 = simd_float4(
-            f("topY", 2500),
-            f("coverage", 0.42),
-            f("densityMul", 1.30),
-            f("stepMul", 0.95)
+        U.params1     = simd_float4(
+            f("topY", 2500), f("coverage", 0.42), f("densityMul", 1.30), f("stepMul", 0.95)
         )
-
-        U.params2 = simd_float4(
-            f("mieG", 0.65),
-            f("powderK", 1.80),
-            f("horizonLift", 0.18),
-            f("detailMul", 1.00)
+        U.params2     = simd_float4(
+            f("mieG", 0.65), f("powderK", 1.80), f("horizonLift", 0.18), f("detailMul", 1.00)
         )
-
+        U.params3     = simd_float4(
+            dom.x, dom.y, f("domainRotate", 0.0), 0.0
+        )
         CloudUniformStore.shared.set(U)
     }
 
-    // Per‑frame call from the renderer.
+    // Per-frame call from the renderer.
     static func setPerFrame(time: Float, sunDirWorld: simd_float3) {
         CloudUniformStore.shared.setTimeSun(time: time, sun: sunDirWorld)
     }
