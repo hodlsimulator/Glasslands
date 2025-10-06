@@ -69,9 +69,12 @@ final class FirstPersonEngine: NSObject {
     var cloudSeed: UInt32 = 0
     var cloudInitialYaw: Float = 0
     var cloudSpinAccum: Float = 0
-    var cloudSpinRate: Float = 0.000145
+    var cloudSpinRate: Float = 0.0034906586   // 12°/min in rad/s
     var cloudWind: simd_float2 = simd_float2(0.60, 0.20)
     var cloudDomainOffset: simd_float2 = simd_float2(0, 0)
+
+    // Billboard node cache for per-ring motion
+    var cloudBillboardNodes: [SCNNode] = []
 
     // Frame timing
     var lastTime: TimeInterval = 0
@@ -187,13 +190,32 @@ final class FirstPersonEngine: NSObject {
         // Stream world
         chunker.updateVisible(center: next)
 
-        // Very slow sky drift for billboarded cumulus (single, consistent direction).
-        if let bill = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
-            cloudSpinAccum += cloudSpinRate * dt
-            var y = cloudInitialYaw + cloudSpinAccum
-            if y > Float.pi { y -= 2 * Float.pi }
-            if y < -Float.pi { y += 2 * Float.pi }
-            bill.eulerAngles.y = y
+        // Altitude-aware drift for billboarded cumulus.
+        // Overhead (high Y) rotates 1.5×; far/horizon (low Y) rotates 0.5×.
+        if !cloudBillboardNodes.isEmpty {
+            let base = cloudSpinRate * dt
+            for n in cloudBillboardNodes {
+                // Cached multiplier computed in buildSky(); fallback computes on the fly.
+                let factor: Float
+                if let num = n.value(forKey: "spinFactor") as? NSNumber {
+                    factor = num.floatValue
+                } else {
+                    let p = n.simdPosition
+                    let h = max(0, min(1, p.y / cfg.skyDistance))
+                    factor = 0.5 + h
+                    n.setValue(NSNumber(value: factor), forKey: "spinFactor")
+                }
+
+                let d = base * factor
+                if abs(d) > 1e-8 {
+                    let s = sin(d), c = cos(d)
+                    var p = n.simdPosition
+                    let x = p.x, z = p.z
+                    p.x = x * c - z * s
+                    p.z = x * s + z * c
+                    n.simdPosition = p
+                }
+            }
         }
 
         // Keep volumetric sphere in sync, if present.
@@ -207,7 +229,6 @@ final class FirstPersonEngine: NSObject {
             let s = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
             m.setValue(SCNVector3(s.x, s.y, s.z), forKey: "sunDirView")
 
-            // Sync slow drift + per-session formation offset to volumetric program.
             m.setValue(SCNVector3(cloudWind.x, cloudWind.y, 0), forKey: "wind")
             m.setValue(SCNVector3(cloudDomainOffset.x, cloudDomainOffset.y, 0), forKey: "domainOffset")
             m.setValue(0.0 as CGFloat, forKey: "domainRotate")

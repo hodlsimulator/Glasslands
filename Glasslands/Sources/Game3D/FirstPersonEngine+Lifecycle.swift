@@ -18,29 +18,23 @@ extension FirstPersonEngine {
 
     @MainActor
     func resetWorld() {
-        // Fresh per-session cloud parameters (formation + motion).
         let rng = GKRandomSource.sharedRandom()
         cloudSeed = UInt32(bitPattern: Int32(rng.nextInt()))
         cloudInitialYaw = (rng.nextUniform() * 2.0 - 1.0) * Float.pi
         cloudSpinAccum = 0
 
-        // Spin rate: 12° per minute (twice the previous 6°/min).
-        // 12 deg/min → 2 * π/1800 rad/s ≈ 0.0034906586
+        // 12° per minute (radians/second)
         cloudSpinRate = 0.0034906586
-
-        // Gentle push for volumetrics (shader advection).
         cloudWind = simd_float2(0.60, 0.20)
 
-        // Domain offset gives the volumetric field a different “formation”
-        // each launch without changing structural rules.
         let ang = rng.nextUniform() * 6.2831853
         let rad: Float = 87.0
         cloudDomainOffset = simd_float2(cosf(ang), sinf(ang)) * rad
 
-        // Clear scene
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
         beacons.removeAll()
         obstaclesByChunk.removeAll()
+        cloudBillboardNodes.removeAll()
 
         buildLighting()
         buildSky()
@@ -50,7 +44,6 @@ extension FirstPersonEngine {
         yawNode.position = spawn()
         updateRig()
 
-        // Camera
         let camera = SCNCamera()
         camera.zNear = 0.02
         camera.zFar = 20_000
@@ -110,7 +103,6 @@ extension FirstPersonEngine {
         sun.shadowRadius = 2.0
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
         sun.automaticallyAdjustsShadowProjection = true
-        // Terrain (0x400) + props (0x001) + vegetation (0x002) = 0x403
         sun.categoryBitMask = 0x00000403
 
         let sunNode = SCNNode()
@@ -134,27 +126,35 @@ extension FirstPersonEngine {
 
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Background sky (LDR image for the clear gradient).
         scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
-
-        // Subtle SKY BOUNCE for PBR materials only (trees/rocks).
-        // Lambert terrain is unaffected by lightingEnvironment, so the ground stays as-is.
         scene.lightingEnvironment.contents = SceneKitHelpers.skyEquirectGradient(width: 1024, height: 512)
         scene.lightingEnvironment.intensity = 0.18
 
-        // Clouds (billboards → impostors). Seeded per-session and pre-rotated.
         CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
             guard let self else { return }
             node.name = "CumulusBillboardLayer"
             node.eulerAngles.y = self.cloudInitialYaw
             self.skyAnchor.addChildNode(node)
+
+            // Cache geometry leaves and precompute per-node spin multipliers:
+            // 0.5× at horizon (low Y) → 1.5× at zenith (high Y).
+            self.cloudBillboardNodes.removeAll()
+            node.enumerateChildNodes { n, _ in
+                if n.geometry != nil {
+                    self.cloudBillboardNodes.append(n)
+                    let p = n.simdPosition
+                    let h = max(0, min(1, p.y / self.cfg.skyDistance))
+                    let factor: Float = 0.5 + h
+                    n.setValue(NSNumber(value: factor), forKey: "spinFactor")
+                }
+            }
+
             self.applyCloudSunUniforms()
             self.enableVolumetricCloudImpostors(true)
             self.debugCloudShaderOnce(tag: "after-attach")
             DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
-        // HDR sun disc + halo.
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
         let evBoost: CGFloat = pow(2.0, 1.5)

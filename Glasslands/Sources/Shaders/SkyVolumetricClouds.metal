@@ -4,41 +4,30 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  Volumetric cumulus via fast ray-march (single scattering + light-march
-//  self-shadowing, HG phase, powder effect, horizon lift). Drawn on an inside-out
-//  sphere using SceneKit’s SCNProgram pipeline.
-//
 
 #include <metal_stdlib>
 using namespace metal;
 #include <SceneKit/scn_metal>
 #include <simd/simd.h>
 
-// -----------------------------------------------------------------------------
-// Constants / small helpers
-// -----------------------------------------------------------------------------
 static constant float kPI = 3.14159265358979323846f;
 inline float deg2rad(float degrees) { return degrees * (kPI / 180.0f); }
 
-// ------------------------------- POD uniforms -------------------------------
 struct CloudUniforms {
-    float4 sunDirWorld; // xyz = world-space sun dir (normalised)
-    float4 sunTint;     // xyz = sunlight tint (sRGB-ish)
-    // Packed for 16-byte alignment:
-    float4 params0;     // x=time, y=wind.x, z=wind.y, w=baseY
-    float4 params1;     // x=topY, y=coverage, z=densityMul, w=stepMul
-    float4 params2;     // x=mieG, y=powderK, z=horizonLift, w=detailMul
-    float4 params3;     // x=domainOffX, y=domainOffY, z=domainRotate, w=0
+    float4 sunDirWorld;
+    float4 sunTint;
+    float4 params0; // x=time, y=wind.x, z=wind.y, w=baseY
+    float4 params1; // x=topY, y=coverage, z=densityMul, w=stepMul
+    float4 params2; // x=mieG, y=powderK, z=horizonLift, w=detailMul
+    float4 params3; // x=domainOffX, y=domainOffY, z=domainRotate, w=0
 };
 
-// ------------------------------ VS I/O structs ------------------------------
 struct VSIn { float3 position [[attribute(SCNVertexSemanticPosition)]]; };
 struct VSOut {
     float4 position [[position]];
     float3 worldPos;
 };
 
-// --------------------------------- Vertex -----------------------------------
 vertex VSOut clouds_vertex(
     VSIn vin [[stage_in]],
     constant SCNSceneBuffer& scn_frame [[buffer(0)]]
@@ -51,14 +40,12 @@ vertex VSOut clouds_vertex(
     return o;
 }
 
-// --------------------------------- Helpers ----------------------------------
 inline float  saturate1(float x) { return clamp(x, 0.0f, 1.0f); }
 inline float3 saturate3(float3 v) { return clamp(v, float3(0.0), float3(1.0)); }
 inline float  frac1(float x) { return x - floor(x); }
 inline float  lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float3 lerp3(float3 a,float3 b,float t){ return a + (b - a) * t; }
 
-// Value noise
 inline float hash1(float n) { return frac1(sin(n) * 43758.5453123f); }
 inline float noise3(float3 x){
     float3 p = floor(x);
@@ -92,7 +79,6 @@ inline float fbm(float3 p){
     return a;
 }
 
-// Tiny 2D curl
 inline float2 curl2(float2 xz){
     const float e = 0.02f;
     float n1 = noise3(float3(xz.x + e, 0.0, xz.y)) - noise3(float3(xz.x - e, 0.0, xz.y));
@@ -127,9 +113,12 @@ inline float densityAt(float3 wp, constant CloudUniforms& U){
 
     float3 q = float3(xzr.x, wp.y, xzr.y) * 0.00115f;
 
-    // Slow advection (matches gameplay-set wind)
+    // Slow advection with altitude-based speed multiplier:
+    // 0.5× at base/horizon → 1.5× at top/zenith.
     float2 flow = wind * 0.0012f + 1.12f * curl2(q.xz + time * 0.07f);
-    q.xz += flow * time;
+    float h01 = saturate1((wp.y - baseY) / max(1.0f, (topY - baseY)));
+    float speedMul = lerp1(0.5f, 1.5f, h01);
+    q.xz += flow * time * speedMul;
 
     // Domain warp + FBM
     float3 warp = float3(fbm(q * 1.6f + 31.0f), fbm(q * 1.7f + 57.0f), fbm(q * 1.8f + 83.0f));
@@ -162,7 +151,6 @@ inline float phaseHG(float cosTheta, float g){
     return (1.0f - gg) / (4.0f * kPI * pow(denom, 1.5f));
 }
 
-// Short shadow-march along the sun ray
 inline float lightTransmittance(float3 p, float3 sunW, constant CloudUniforms& U){
     const int   LSTEPS = 6;
     const float LSTEP  = 140.0f;
@@ -177,7 +165,6 @@ inline float lightTransmittance(float3 p, float3 sunW, constant CloudUniforms& U
     return exp(-tau);
 }
 
-// -------------------------------- Fragment ----------------------------------
 fragment float4 clouds_fragment(
     VSOut in [[stage_in]],
     constant SCNSceneBuffer& scn_frame [[buffer(0)]],
@@ -186,7 +173,6 @@ fragment float4 clouds_fragment(
     const float3 ro = (scn_frame.inverseViewTransform * float4(0, 0, 0, 1)).xyz;
     const float3 rd = normalize(in.worldPos - ro);
 
-    // Clear sky gradient + HDR sun behind clouds.
     const float3 SKY_TOP = float3(0.30, 0.56, 0.96);
     const float3 SKY_BOT = float3(0.88, 0.93, 0.99);
     float tSky = saturate1(rd.y * 0.60f + 0.40f);
@@ -195,7 +181,6 @@ fragment float4 clouds_fragment(
     const float3 sunW = normalize(U.sunDirWorld.xyz);
     base += sunGlow(rd, sunW, U.sunTint.xyz);
 
-    // Intersect cloud slab
     const float baseY = U.params0.w;
     const float topY  = U.params1.x;
     float denom = rd.y;
