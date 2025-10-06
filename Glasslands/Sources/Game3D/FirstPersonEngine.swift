@@ -203,76 +203,89 @@ final class FirstPersonEngine: NSObject {
         // Stream world
         chunker.updateVisible(center: next)
 
-        // -------------------- CLOUD CONVEYOR (wind + visible speed + fallback) --------------------
-        if let layer = cloudLayerNode, !cloudClusterGroups.isEmpty {
-            @inline(__always)
-            func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
-                let c = cosf(yaw), s = sinf(yaw)            // rotate world→layer by −yaw
-                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
-            }
+        // -------------------- CLOUD CONVEYOR (robust: re-scan groups + centroid fallback) --------------------
+        if let layer = cloudLayerNode {
+            // Always use current children in case anything changed after buildSky()
+            let groups = layer.childNodes
+            if !groups.isEmpty {
+                @inline(__always)
+                func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
+                    let c = cosf(yaw), s = sinf(yaw)           // rotate world→layer by −yaw
+                    return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
+                }
 
-            // Layer-local wind direction/magnitude
-            let wLocal = windLocal(cloudWind, layer.presentation.eulerAngles.y)
-            let wLen   = simd_length(wLocal)
-            let wDir   = (wLen < 1e-5) ? simd_float2(1, 0) : (wLocal / wLen)
+                // Layer-local wind direction/magnitude
+                let wLocal = windLocal(cloudWind, layer.eulerAngles.y)
+                let wLen   = simd_length(wLocal)
+                let wDir   = (wLen < 1e-5) ? simd_float2(1, 0) : (wLocal / wLen)
 
-            // Calibrate advection so it reads like the old 12°/min spin at far range.
-            // Reference: v_ref ≈ ω * R_ref, with ω=cloudSpinRate and R_ref near the far belt.
-            let Rmin: Float = cloudRMin
-            let Rmax: Float = cloudRMax
-            let Rref: Float = max(1, Rmin + 0.85 * (Rmax - Rmin))        // lean to far belt
-            let vSpinRef: Float = cloudSpinRate * Rref                   // units/sec at far belt (old spin)
+                // Match the old far-belt spin speed as a reference
+                let Rmin: Float = cloudRMin
+                let Rmax: Float = cloudRMax
+                let Rref: Float = max(1, Rmin + 0.85 * (Rmax - Rmin))
+                let vSpinRef: Float = cloudSpinRate * Rref
 
-            // Map wind magnitude to a 0.25×…2× multiplier around vSpinRef.
-            // wRef is the session default magnitude (≈ sqrt(0.6²+0.2²)).
-            let wRef: Float = 0.6324555
-            let windMul = simd_clamp(wLen / max(1e-5, wRef), 0.25, 2.0)
+                // Wind gain around that reference (kept visible)
+                let wRef: Float = 0.6324555
+                let windMul = simd_clamp(wLen / max(1e-5, wRef), 0.25, 2.0)
+                let baseSpeedUnits: Float = vSpinRef * windMul
 
-            // Final base speed to use this frame (still parallax-scaled per group below).
-            let baseSpeedUnits: Float = vSpinRef * windMul
+                // Fallback when calm: tiny spin so nothing stalls
+                let doFallbackSpin = (wLen < 1e-4)
+                let span: Float = max(1e-5, Rmax - Rmin)
+                let wrapLen: Float = (2 * Rmax) + cloudWrapMargin
 
-            // If wind is essentially zero, fall back to gentle spin so nothing ever looks frozen.
-            let doFallbackSpin = (wLen < 1e-4)
-            let span: Float = max(1e-5, Rmax - Rmin)
-            let R: Float = Rmax
-            let wrapLen: Float = (2 * R) + cloudWrapMargin
+                for group in groups {
+                    let gid = ObjectIdentifier(group)
 
-            for group in cloudClusterGroups {
-                let gid = ObjectIdentifier(group)
-                let c0  = cloudClusterCentroidLocal[gid] ?? .zero
+                    // Get centroid; if missing, compute once and cache
+                    let c0: simd_float3 = {
+                        if let cached = cloudClusterCentroidLocal[gid] { return cached }
+                        var sum = simd_float3.zero
+                        var n = 0
+                        for bb in group.childNodes {
+                            if let cs = bb.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
+                                sum += bb.simdPosition; n += 1
+                            }
+                        }
+                        let c = (n > 0) ? (sum / Float(n)) : .zero
+                        cloudClusterCentroidLocal[gid] = c
+                        return c
+                    }()
 
-                // Cluster centre in layer-local XZ
-                let cw = c0 + group.simdPosition
+                    // Cluster centre in layer-local XZ
+                    let cw = c0 + group.simdPosition
 
-                // Parallax: faster near, slower far (2× → 0.5×)
-                let r   = simd_length(SIMD2(cw.x, cw.z))
-                let tR  = simd_clamp((r - Rmin) / span, 0, 1)
-                let scale: Float = 2.0 * (1.0 - tR) + 0.5 * tR
+                    // Parallax: faster near, slower far (2× → 0.5×)
+                    let r   = simd_length(SIMD2(cw.x, cw.z))
+                    let tR  = simd_clamp((r - Rmin) / span, 0, 1)
+                    let scale: Float = 2.0 * (1.0 - tR) + 0.5 * tR
 
-                if doFallbackSpin {
-                    // Tiny angular step around Y (keeps motion when calm).
-                    let theta = cloudSpinRate * dt * scale
-                    let ca = cosf(theta), sa = sinf(theta)
-                    let vx = cw.x, vz = cw.z
-                    let rx = vx * ca - vz * sa
-                    let rz = vx * sa + vz * ca
-                    group.simdPosition.x = rx - c0.x
-                    group.simdPosition.z = rz - c0.z
-                } else {
-                    // Advect along wind axis at a clearly visible speed.
-                    let v = baseSpeedUnits * scale
-                    let d = wDir * (v * dt)
-                    group.simdPosition.x += d.x
-                    group.simdPosition.z += d.y
+                    if doFallbackSpin {
+                        // Keep motion when wind ≈ 0
+                        let theta = cloudSpinRate * dt * scale
+                        let ca = cosf(theta), sa = sinf(theta)
+                        let vx = cw.x, vz = cw.z
+                        let rx = vx * ca - vz * sa
+                        let rz = vx * sa + vz * ca
+                        group.simdPosition.x = rx - c0.x
+                        group.simdPosition.z = rz - c0.z
+                    } else {
+                        // Advect along wind axis
+                        let v = baseSpeedUnits * scale
+                        let d = wDir * (v * dt)
+                        group.simdPosition.x += d.x
+                        group.simdPosition.z += d.y
 
-                    // Recycle strictly along the layer-local wind axis (far rim only).
-                    let ax = simd_dot(SIMD2(cw.x, cw.z), wDir)
-                    if ax > (R + cloudWrapMargin) {
-                        group.simdPosition.x -= wDir.x * wrapLen
-                        group.simdPosition.z -= wDir.y * wrapLen
-                    } else if ax < -(R + cloudWrapMargin) {
-                        group.simdPosition.x += wDir.x * wrapLen
-                        group.simdPosition.z += wDir.y * wrapLen
+                        // Recycle strictly along the wind axis at the far rim
+                        let ax = simd_dot(SIMD2(cw.x, cw.z), wDir)
+                        if ax > (Rmax + cloudWrapMargin) {
+                            group.simdPosition.x -= wDir.x * wrapLen
+                            group.simdPosition.z -= wDir.y * wrapLen
+                        } else if ax < -(Rmax + cloudWrapMargin) {
+                            group.simdPosition.x += wDir.x * wrapLen
+                            group.simdPosition.z += wDir.y * wrapLen
+                        }
                     }
                 }
             }
