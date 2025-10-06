@@ -44,7 +44,7 @@ struct Scene3DView: UIViewRepresentable {
         if let cam = view.pointOfView?.camera {
             cam.wantsHDR = true
             cam.wantsExposureAdaptation = false
-            cam.exposureOffset = -0.25    // matches resetWorld()
+            cam.exposureOffset = -0.25
             cam.averageGray = 0.18
             cam.whitePoint = 1.0
             cam.minimumExposure = -3.0
@@ -85,12 +85,11 @@ struct Scene3DView: UIViewRepresentable {
         var engine: FirstPersonEngine?
         var link: CADisplayLink?
 
-        // No deinit body; cleanup happens in dismantleUIView
-
         @objc func onTick(_ link: CADisplayLink) {
             let t = link.timestamp
             engine?.stepUpdateMain(at: t)
             engine?.tickVolumetricClouds(atRenderTime: t)
+            engine?.updateSunDiffusion()  // ← NEW: drive sunlight/shadow every frame
         }
     }
 }

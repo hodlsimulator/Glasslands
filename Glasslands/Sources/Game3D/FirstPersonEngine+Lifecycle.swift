@@ -91,10 +91,12 @@ extension FirstPersonEngine {
 
     @MainActor
     func buildLighting() {
+        // Remove any existing lights.
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
+        // Directional sun (casts shadows).
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1500
@@ -105,11 +107,25 @@ extension FirstPersonEngine {
         sun.shadowRadius = 2.0
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
         sun.automaticallyAdjustsShadowProjection = true
-        sun.categoryBitMask = 0x00000403
+        sun.categoryBitMask = 0x0000_0403
 
         let sunNode = SCNNode()
+        sunNode.name = "GL_SunLight"
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
+
+        // Ambient skylight: used to lift shadows under clouds; driven in updateSunDiffusion().
+        let sky = SCNLight()
+        sky.type = .ambient
+        sky.color = UIColor.white
+        sky.intensity = 0  // clear sky → almost zero fill
+        sky.categoryBitMask = 0x0000_0403
+
+        let skyNode = SCNNode()
+        skyNode.name = "GL_Skylight"
+        skyNode.light = sky
+        scene.rootNode.addChildNode(skyNode)
+
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
 
