@@ -87,7 +87,6 @@ enum TerrainChunkNode {
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
         let mat = SCNMaterial()
-        // Sun-only: simple diffuse (Lambert), no macro darkening, no normal map.
         mat.lightingModel = .lambert
         mat.isLitPerPixel = true
         mat.emission.contents = UIColor.black
@@ -98,13 +97,19 @@ enum TerrainChunkNode {
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = true
 
+        // Textures
         let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
         mat.diffuse.contents = albedoMTL
-        // REMOVE these two lines if present in your file:
-        // mat.normal.contents  = SceneKitHelpers.grassNormalTextureMTL(size: 512, strength: 1.4)
-        // mat.multiply.contents = SceneKitHelpers.grassMacroVariationTextureMTL(size: 256)
+        // Leave normal/macro OFF for this sun-only pass.
 
-        mat.diffuse.wrapS = .repeat;  mat.diffuse.wrapT = .repeat
+        // Make the ground reflect less light (darker) without touching exposure or the sun.
+        // -2.0 stops → 0.25; adjust to taste (e.g. -1.5 → 0.3536).
+        let groundStops: CGFloat = -2.0
+        mat.diffuse.intensity = pow(2.0, groundStops)
+
+        // Tiling + filtering
+        mat.diffuse.wrapS = .repeat
+        mat.diffuse.wrapT = .repeat
         mat.diffuse.minificationFilter = .linear
         mat.diffuse.magnificationFilter = .linear
         mat.diffuse.mipFilter = .linear
