@@ -91,21 +91,20 @@ extension FirstPersonEngine {
 
     @MainActor
     func buildLighting() {
-        // Remove any existing lights.
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Directional sun (casts shadows).
+        // Sun (casts shadows)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1500
         sun.color = UIColor.white
         sun.castsShadow = true
-        sun.shadowMapSize = CGSize(width: 512, height: 512)
+        sun.shadowMapSize = CGSize(width: 1024, height: 1024)
         sun.shadowSampleCount = 4
-        sun.shadowRadius = 2.0
-        sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
+        sun.shadowRadius = 1.2
+        sun.shadowColor = UIColor(white: 0.0, alpha: 0.65)
         sun.automaticallyAdjustsShadowProjection = true
         sun.categoryBitMask = 0x0000_0403
 
@@ -114,17 +113,25 @@ extension FirstPersonEngine {
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
 
-        // Ambient skylight: used to lift shadows under clouds; driven in updateSunDiffusion().
-        let sky = SCNLight()
-        sky.type = .ambient
-        sky.color = UIColor.white
-        sky.intensity = 0  // clear sky → almost zero fill
-        sky.categoryBitMask = 0x0000_0403
+        // Directional sky fill (no shadows) to lift shadowed sides without flattening
+        let skyFill = SCNLight()
+        skyFill.type = .directional
+        skyFill.color = UIColor.white
+        skyFill.intensity = 0
+        skyFill.castsShadow = false
+        skyFill.categoryBitMask = 0x0000_0403
 
-        let skyNode = SCNNode()
-        skyNode.name = "GL_Skylight"
-        skyNode.light = sky
-        scene.rootNode.addChildNode(skyNode)
+        let skyFillNode = SCNNode()
+        skyFillNode.name = "GL_SkyFill"
+        skyFillNode.light = skyFill
+        scene.rootNode.addChildNode(skyFillNode)
+
+        // Aim sky fill straight down (world −Y)
+        let origin = yawNode.presentation.position
+        skyFillNode.position = origin
+        skyFillNode.look(at: SCNVector3(origin.x, origin.y - 1.0, origin.z),
+                         up: scene.rootNode.worldUp,
+                         localFront: SCNVector3(0, 0, -1))
 
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
