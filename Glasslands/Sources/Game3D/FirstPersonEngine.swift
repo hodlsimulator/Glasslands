@@ -238,6 +238,9 @@ final class FirstPersonEngine: NSObject {
             m.setValue(0.0 as CGFloat, forKey: "domainRotate")
         }
 
+        // Diffuse sunlight and soften shadows based on cloud occlusion.
+        updateSunDiffusion()
+
         if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
             sg.simdPosition = simd_float3(next.x, groundY - 0.02, next.z)
         }
