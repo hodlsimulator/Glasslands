@@ -145,6 +145,19 @@ extension FirstPersonEngine {
             .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer", "SkyAtmosphere"].contains($0.name ?? "") }
             .forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
+        
+        // After scene.rootNode.addChildNode(skyAnchor)
+
+        let skyR = CGFloat(cfg.skyDistance) * 0.995
+        let skySphere = SCNSphere(radius: max(10, skyR))
+        skySphere.segmentCount = 96
+        let skyMat = SkyAtmosphereMaterial.make()
+        skySphere.firstMaterial = skyMat
+        let skyNode = SCNNode(geometry: skySphere)
+        skyNode.name = "SkyAtmosphere"
+        skyNode.castsShadow = false
+        skyNode.renderingOrder = -20_000
+        skyAnchor.addChildNode(skyNode)
 
         skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
 
