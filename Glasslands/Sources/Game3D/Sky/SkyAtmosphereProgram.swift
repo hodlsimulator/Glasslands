@@ -31,7 +31,6 @@ enum SkyAtmosphereProgram {
         p.vertexFunctionName   = "sky_vertex"
         p.fragmentFunctionName = "sky_fragment"
 
-        // 4-parameter closure: (stream, node, shadable, renderer)
         p.handleBinding(ofBufferNamed: "U", frequency: .perFrame) { stream, _, _, _ in
             var u = U
             withUnsafeBytes(of: &u) { raw in
@@ -44,13 +43,12 @@ enum SkyAtmosphereProgram {
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = false
-        m.cullMode = .front               // inside of sphere
+        m.cullMode = .front
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
         m.blendMode = .alpha
         m.program = p
 
-        // Defaults (engine updates)
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirWorld")
         m.setValue(SCNVector3(1, 1, 1), forKey: "sunTint")
         m.setValue(2.5 as CGFloat, forKey: "turbidity")
@@ -60,7 +58,7 @@ enum SkyAtmosphereProgram {
         return m
     }
 
-    @MainActor
+    // Not @MainActor: safe to call from render queue
     static func updateUniforms(from m: SCNMaterial) {
         func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
         func v3(_ v: Any?) -> SIMD3<Float> {

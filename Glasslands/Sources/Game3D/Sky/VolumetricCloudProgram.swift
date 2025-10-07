@@ -51,13 +51,13 @@ enum VolumetricCloudProgram {
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = false
-        m.cullMode = .front
+        m.cullMode = .front                 // render interior of skydome
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
         m.blendMode = .alpha
         m.program = prog
 
-        // Defaults; engine updates every frame
+        // Default keys; engine updates these every frame
         m.setValue(NSNumber(value: 0.0), forKey: "time")
         m.setValue(SCNVector3(0.60, 0.20, 0), forKey: "wind")
         m.setValue(NSNumber(value: 400.0), forKey: "baseY")
@@ -76,13 +76,9 @@ enum VolumetricCloudProgram {
         return m
     }
 
-    /// Pack SCNMaterial custom keys into the GPU uniform buffer layout.
-    @MainActor
+    // Not @MainActor: SceneKit calls the tick on its render queue
     static func updateUniforms(from m: SCNMaterial) {
-        func f(_ v: Any?) -> Float {
-            if let n = v as? NSNumber { return n.floatValue }
-            return 0
-        }
+        func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
         func v3(_ v: Any?) -> SIMD3<Float> {
             if let v = v as? SCNVector3 { return SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z)) }
             return .zero

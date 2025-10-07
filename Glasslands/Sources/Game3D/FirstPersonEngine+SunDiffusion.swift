@@ -5,6 +5,7 @@
 //  Created by . . on 10/6/25.
 //
 //  Direct sun response + cloud shadow projection (gobo via modulated shadows).
+//  NOTE: No @MainActor here — SceneKit drives these on its render queue.
 //
 
 import SceneKit
@@ -15,7 +16,6 @@ import UIKit
 
 extension FirstPersonEngine {
 
-    @MainActor
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
@@ -29,11 +29,10 @@ extension FirstPersonEngine {
         let D = max(0.0, 1.0 - E)
         let thickF = CGFloat(smoothstep(0.82, 0.97, cover.union))
 
-        // Sun (the only illuminant)
+        // Sun is the only illuminant
         let baseIntensity: CGFloat = 1500
         sun.intensity = baseIntensity * max(0.06, E)
 
-        // Softness and darkness react to cover
         let penClear: CGFloat = 0.35
         let penCloudBase: CGFloat = 13.0
         let penCloud = penCloudBase + 3.0 * thickF
@@ -47,12 +46,11 @@ extension FirstPersonEngine {
         let a = alphaClear + (floorA - alphaClear) * D
         sun.shadowColor = UIColor(white: 0.0, alpha: a)
 
-        // No extra sky fill: keep it at zero so sun is the only light
+        // No sky fill; keep off so shaded areas stay shaded
         if let skyFill = scene.rootNode.childNode(withName: "GL_SkyFill", recursively: false)?.light {
             skyFill.intensity = 0
         }
 
-        // HDR halo visibility
         if let sunGroup = sunDiscNode,
            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
            let haloMat = halo.geometry?.firstMaterial {
@@ -68,7 +66,6 @@ extension FirstPersonEngine {
         updateCloudShadowTextureAndProject()
     }
 
-    @MainActor
     private func measureSunCover() -> (peak: Float, union: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return (0.0, 0.0)
@@ -168,7 +165,7 @@ private final class CloudShadowRenderer {
 
         func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
         func v3(_ v: Any?) -> SIMD3<Float> {
-            if let v = v as? SCNVector3 { return SIMD3(Float(v.x), Float(v.y), Float(v.z)) }
+            if let v = v as? SCNVector3 { return SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z)) }
             return .zero
         }
 
@@ -214,7 +211,6 @@ private var _cloudShadowNode: SCNNode?
 
 private extension FirstPersonEngine {
 
-    @MainActor
     func ensureCloudShadowProjector() {
         if _cloudShadowRenderer == nil, let dev = scnView?.device {
             _cloudShadowRenderer = CloudShadowRenderer(engine: self, device: dev)
@@ -223,24 +219,23 @@ private extension FirstPersonEngine {
             let L = SCNLight()
             L.type = .directional
 
-            // ⬇️ CRITICAL: for SCNShadowMode.modulated to work, this light must cast shadows.
+            // Modulated shadows need castsShadow = true; gobo drives the “shadow”.
             L.castsShadow = true
             L.shadowMode = .modulated
             L.shadowMapSize = CGSize(width: 1024, height: 1024)
             L.shadowSampleCount = 1
             L.shadowRadius = 0
-            L.shadowColor = UIColor(white: 0, alpha: 1.0) // darken fully where gobo is dark
+            L.shadowColor = UIColor(white: 0, alpha: 1.0)
 
-            L.intensity = 0                 // does not illuminate, only modulates
-            L.orthographicScale = 2400.0    // coverage (metres)
+            L.intensity = 0                 // no additive light
+            L.orthographicScale = 2400.0
             L.zNear = 0.1
             L.zFar  = 20000
             L.automaticallyAdjustsShadowProjection = false
 
-            // Only affect ground (matches TerrainChunkNode)
+            // Match ground receivers
             L.categoryBitMask = 0x0000_0400
 
-            // Set up the gobo property once; bind contents every frame.
             if let g = L.gobo {
                 g.wrapS = .clamp
                 g.wrapT = .clamp
@@ -267,27 +262,22 @@ private extension FirstPersonEngine {
         }
     }
 
-    @MainActor
     func updateCloudShadowTextureAndProject() {
         guard let proj = _cloudShadowNode?.light,
               let renderer = _cloudShadowRenderer else { return }
 
-        // Get cloud parameters from the volumetric layer material
         guard let cloudMat = scene.rootNode
             .childNode(withName: "VolumetricCloudLayer", recursively: true)?
             .geometry?.firstMaterial else { return }
 
-        // Centre the orthographic gobo around the camera XZ; sync scale
         let pos = (scnView?.pointOfView ?? camNode).presentation.simdWorldPosition
         let centerXZ = SIMD2<Float>(pos.x, pos.z)
         let halfSize: Float = 1200
         proj.orthographicScale = CGFloat(halfSize * 2)
 
-        // Generate the cloud transmittance texture
         let t = Float(CACurrentMediaTime())
         renderer.update(from: cloudMat, centerXZ: centerXZ, halfSize: halfSize, time: t)
 
-        // Bind as gobo; modulated shadows read the gobo as the “shadow”
         if let gobo = proj.gobo {
             gobo.contents = renderer.texture
             gobo.intensity = 1.0
