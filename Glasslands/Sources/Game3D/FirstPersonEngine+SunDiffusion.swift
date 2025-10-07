@@ -5,8 +5,6 @@
 //  Created by . . on 10/6/25.
 //
 //  Direct sun response and cloud-shadow projection (gobo).
-//  Fixed to avoid references to missing cloud* engine vars and to stop
-//  using a non-existent SCNMaterialProperty.layer.
 //
 
 import SceneKit
@@ -187,7 +185,7 @@ private final class CloudShadowRenderer {
         let powderK   = f(mat.value(forKey: "powderK"))
         let horizon   = f(mat.value(forKey: "horizonLift"))
         let detailMul = f(mat.value(forKey: "detailMul"))
-        let domOff    = v3(mat.value(forKey: "domainOffset"))
+        let domOff3   = v3(mat.value(forKey: "domainOffset"))
         let domRot    = f(mat.value(forKey: "domainRotate"))
         let sunW3     = v3(mat.value(forKey: "sunDirWorld"))
         let sunTint3  = v3(mat.value(forKey: "sunTint"))
@@ -198,7 +196,7 @@ private final class CloudShadowRenderer {
             params0    : SIMD4<Float>( time, wind.x, wind.y, baseY ),
             params1    : SIMD4<Float>( topY, coverage, max(0, density), 1.0 ),
             params2    : SIMD4<Float>( mieG, max(0, powderK), horizon, max(0, detailMul) ),
-            params3    : SIMD4<Float>( domOff.x, domOff.y, domRot, 0 )
+            params3    : SIMD4<Float>( domOff3.x, domOff3.y, domRot, 0 )
         )
         var SU = ShadowUniforms(centerXZ: centerXZ, halfSize: halfSize, pad0: 0)
 
@@ -232,6 +230,7 @@ private extension FirstPersonEngine {
             L.castsShadow = false
             L.shadowMode = .modulated
             L.orthographicScale = 2400.0
+
             let node = SCNNode()
             node.name = "GL_CloudShadows"
             node.light = L
@@ -253,7 +252,7 @@ private extension FirstPersonEngine {
         guard let proj = _cloudShadowNode?.light,
               let renderer = _cloudShadowRenderer else { return }
 
-        // Find the volumetric cloud material
+        // Volumetric cloud material
         guard let cloudMat = scene.rootNode
             .childNode(withName: "VolumetricCloudLayer", recursively: true)?
             .geometry?.firstMaterial else { return }
@@ -267,10 +266,10 @@ private extension FirstPersonEngine {
         let t = Float(CACurrentMediaTime())
         renderer.update(from: cloudMat, centerXZ: centerXZ, halfSize: halfSize, time: t)
 
-        if proj.gobo == nil {
-            proj.gobo = SCNMaterialProperty(contents: renderer.texture)
+        // gobo is get-only; set its contents/intensity
+        if let gobo = proj.gobo {
+            gobo.contents = renderer.texture
+            gobo.intensity = 1.0
         }
-        proj.gobo?.contents = renderer.texture
-        proj.gobo?.intensity = 1.0
     }
 }

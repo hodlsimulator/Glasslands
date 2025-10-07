@@ -6,7 +6,6 @@
 //
 //  SCNProgram for SkyVolumetricClouds.metal. Binds a tightly-packed uClouds
 //  constant buffer each frame from SCNMaterial custom keys.
-
 //
 
 import SceneKit
@@ -39,22 +38,26 @@ enum VolumetricCloudProgram {
         prog.vertexFunctionName   = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
 
-        // Bind CloudUniforms for the Metal parameter named "uClouds"
-        prog.handleBinding(ofBufferNamed: "uClouds", frequency: .perFrame) { bufferStream, _, _ in
+        // 4-parameter closure: (stream, node, shadable, renderer)
+        prog.handleBinding(ofBufferNamed: "uClouds", frequency: .perFrame) { stream, _, _, _ in
             var U = Self.currentU
-            bufferStream.writeBytes(&U, length: MemoryLayout<CloudUniforms>.size)
+            withUnsafeBytes(of: &U) { rawBuf in
+                if let base = rawBuf.baseAddress {
+                    stream.writeBytes(base, count: rawBuf.count)
+                }
+            }
         }
 
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = false
-        m.cullMode = .front                 // render interior of skydome
+        m.cullMode = .front
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
         m.blendMode = .alpha
         m.program = prog
 
-        // Default keys; engine will update these every frame
+        // Defaults; engine updates every frame
         m.setValue(NSNumber(value: 0.0), forKey: "time")
         m.setValue(SCNVector3(0.60, 0.20, 0), forKey: "wind")
         m.setValue(NSNumber(value: 400.0), forKey: "baseY")
