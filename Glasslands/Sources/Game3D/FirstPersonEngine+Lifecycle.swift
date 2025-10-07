@@ -138,42 +138,25 @@ extension FirstPersonEngine {
     // MARK: - Sky
     @MainActor
     func buildSky() {
+        // Clear old sky nodes/materials that might compile shaders
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.childNodes
             .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer", "SkyAtmosphere"].contains($0.name ?? "") }
             .forEach { $0.removeFromParentNode() }
-
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Disable IBL so shaded areas stay shaded (sun-only lighting)
-        scene.background.contents = UIColor.black
+        // Background = static blue gradient image (no SCNProgram / shader)
+        let bg = SkyGradientImage.make()
+        scene.background.contents = bg
+        scene.background.wrapS = .clamp
+        scene.background.wrapT = .clamp
+
+        // Kill IBL so sun is the only light, but keep things visible
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0.0
 
-        // Sky atmosphere sphere (inside-out)
-        let skyR = CGFloat(cfg.skyDistance) * 0.995
-        let skySphere = SCNSphere(radius: max(10, skyR))
-        skySphere.segmentCount = 96
-        let skyMat = SkyAtmosphereMaterial.make()
-        skySphere.firstMaterial = skyMat
-        let skyNode = SCNNode(geometry: skySphere)
-        skyNode.name = "SkyAtmosphere"
-        skyNode.castsShadow = false
-        skyNode.renderingOrder = -20_000
-        skyAnchor.addChildNode(skyNode)
-
-        // Volumetric cloud layer (unchanged; still sun-lit in its shader)
-        let clouds = VolumetricCloudLayer.make(
-            radius: CGFloat(cfg.skyDistance),
-            baseY: 400.0,
-            topY: 1400.0,
-            coverage: 0.42
-        )
-        clouds.renderingOrder = -9_990
-        skyAnchor.addChildNode(clouds)
-
-        // Billboard cumulus
+        // DO NOT add the volumetric cloud sphere (it’s the lag). Keep billboards.
         CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
             guard let self else { return }
             node.name = "CumulusBillboardLayer"
@@ -184,24 +167,22 @@ extension FirstPersonEngine {
             self.enableVolumetricCloudImpostors(true)
         }
 
-        // HDR sun sprites
-        let coreDeg: CGFloat = 6.0
-        let haloScale: CGFloat = 2.6
+        // HDR sun sprites (unchanged)
+        let coreDeg: CGFloat = 6.0, haloScale: CGFloat = 2.6
         let evBoost: CGFloat = pow(2.0, 1.5)
-        let coreEDR: CGFloat = 8.0 * evBoost
-        let haloEDR: CGFloat = 2.0 * evBoost
-        let haloExponent: CGFloat = 2.2
-        let haloPixels: Int = 2048
-        let sun = makeHDRSunNode(coreAngularSizeDeg: coreDeg, haloScale: haloScale,
-                                 coreIntensity: coreEDR, haloIntensity: haloEDR,
-                                 haloExponent: haloExponent, haloPixels: haloPixels)
+        let sun = makeHDRSunNode(coreAngularSizeDeg: coreDeg,
+                                 haloScale: haloScale,
+                                 coreIntensity: 8.0 * evBoost,
+                                 haloIntensity: 2.0 * evBoost,
+                                 haloExponent: 2.2,
+                                 haloPixels: 2048)
         sun.renderingOrder = 100_000
         skyAnchor.addChildNode(sun)
         sunDiscNode = sun
 
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         applyCloudSunUniforms()
-    }
+    } 
 
     // MARK: - Safety ground
 
