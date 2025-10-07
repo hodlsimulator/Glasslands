@@ -9,8 +9,8 @@
 //
 
 #include <metal_stdlib>
-#include <SceneKit/scn_metal>
 using namespace metal;
+#include <SceneKit/scn_metal>
 
 static constant float kPI = 3.14159265358979323846f;
 inline float clamp01(float x) { return clamp(x, 0.0f, 1.0f); }
@@ -229,7 +229,6 @@ fragment FragOut clouds_fragment(
     }
 
     float3 col = C + skyCol * T;
-
     out.color = half4(half3(clamp01(col)), half(1.0));
     return out;
 }
