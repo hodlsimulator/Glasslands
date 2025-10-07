@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Volumetric impostor for billboards: no textures or 2D shapes.
-//  Each puff ray-marches true vapour inside a local sphere and samples the same field as the dome.
+//  Volumetric billboard impostor with NO 2D shapes.
+//  Samples the same vapour field as the dome; integrates in a thin slab around the billboard plane.
 //
 
 #include <metal_stdlib>
@@ -14,7 +14,7 @@ using namespace metal;
 
 static constant float kPI = 3.14159265358979323846f;
 
-// Must match Swift's GLCloudUniforms.
+// Must match Swift GLCloudUniforms (VolCloudUniformsStore).
 struct GLCloudUniforms {
     float4 sunDirWorld;
     float4 sunTint;
@@ -25,43 +25,29 @@ struct GLCloudUniforms {
     float4 params4; // x=puffStrength, y=quality(fast), z=macroScale, w=macroThreshold
 };
 
-// Must match Swift's GLImpostorUniforms.
-struct GLImpostorUniforms {
-    float3 centerWorld;
-    float  radius;
-    float  thickness;
-    float  soften;
-    float  pad;
-};
+// Per-material uniform: half sizes of the quad in LOCAL space.
+struct HalfSize { float2 v; };
 
-// Per-node model matrix (bound from Swift).
-struct NodeModel {
-    float4x4 modelTransform;
-};
-
-struct VSIn {
-    float3 position [[attribute(SCNVertexSemanticPosition)]];
-};
-
+struct VSIn  { float3 position [[attribute(SCNVertexSemanticPosition)]]; };
 struct VSOut {
     float4 position [[position]];
     float2 ndcXY; // clip.xy / clip.w
 };
 
-vertex VSOut cloud_impostor_vertex(VSIn in                               [[stage_in]],
-                                   constant SCNSceneBuffer& scn_frame    [[buffer(0)]],
-                                   constant NodeModel& uModel            [[buffer(4)]])
+vertex VSOut cloud_impostor_vertex(VSIn vin                        [[stage_in]],
+                                   constant SCNSceneBuffer& frame  [[buffer(0)]],
+                                   constant float4x4& uModel       [[buffer(1)]])
 {
     VSOut o;
-    float4 world = uModel.modelTransform * float4(in.position, 1.0);
-    float4 view  = scn_frame.viewTransform * world;
-    float4 clip  = scn_frame.projectionTransform * view;
+    float4 world = uModel * float4(vin.position, 1.0);
+    float4 view  = frame.viewTransform * world;
+    float4 clip  = frame.projectionTransform * view;
     o.position   = clip;
     o.ndcXY      = clip.xy / clip.w;
     return o;
 }
 
-// ---- noise helpers (same flavour as the dome shader) ----
+// ---- noise helpers (same flavour as the dome) ----
 inline float h1(float n){ return fract(sin(n) * 43758.5453123f); }
 inline float h12(float2 p){ return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123f); }
 
@@ -122,7 +108,7 @@ inline float phaseHG(float mu, float g){
     return (1.0 - g2) / max(1e-4, 4.0*kPI*pow(1.0 + g2 - 2.0*g*mu, 1.5));
 }
 
-// Same density function as the dome, so looks match.
+// Same density function as the dome.
 inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float time        = U.params0.x;
     float2 wind       = float2(U.params0.y, U.params0.z);
@@ -174,81 +160,85 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     return dens;
 }
 
-fragment half4 cloud_impostor_fragment(VSOut in                              [[stage_in]],
-                                       constant SCNSceneBuffer& scn_frame    [[buffer(0)]],
-                                       constant GLCloudUniforms& uCloudsGL   [[buffer(2)]],
-                                       constant GLImpostorUniforms& uImp     [[buffer(3)]])
+fragment half4 cloud_impostor_fragment(VSOut in                           [[stage_in]],
+                                       constant SCNSceneBuffer& frame     [[buffer(0)]],
+                                       constant GLCloudUniforms& U        [[buffer(2)]],
+                                       constant HalfSize& uHalfSize       [[buffer(3)]],
+                                       constant float4x4& uModel          [[buffer(1)]])
 {
-    // Camera world position
-    float4 camW4 = scn_frame.inverseViewTransform * float4(0,0,0,1);
+    // Camera → view ray
+    float4 camW4 = frame.inverseViewTransform * float4(0,0,0,1);
     float3 camPos = camW4.xyz / camW4.w;
 
-    // Reconstruct a view ray from NDC
     float4 ndc  = float4(in.ndcXY, 1.0, 1.0);
-    float4 view = scn_frame.inverseProjectionTransform * ndc;
+    float4 view = frame.inverseProjectionTransform * ndc;
     float3 Vvs  = normalize(view.xyz / max(view.w, 1e-5));
-    float3 V    = normalize((scn_frame.inverseViewTransform * float4(Vvs, 0)).xyz);
+    float3 V    = normalize((frame.inverseViewTransform * float4(Vvs, 0)).xyz);
 
-    // Intersect ray with impostor sphere
-    float3 C = uImp.centerWorld;
-    float  R = max(1e-3, uImp.radius);
-    float3 OC = camPos - C;
+    // Plane basis from model matrix (columns).
+    float3 ux = normalize(uModel[0].xyz);
+    float3 vy = normalize(uModel[1].xyz);
+    float3 nrm = normalize(cross(ux, vy));
+    float3 origin = (uModel * float4(0,0,0,1)).xyz;
 
-    float B = dot(V, OC);
-    float Cq = dot(OC, OC) - R*R;
-    float disc = B*B - Cq;
-    if (disc < 0.0) discard_fragment();
+    // Ray/plane intersection
+    float denom = dot(V, nrm);
+    if (fabs(denom) < 1e-4) discard_fragment();
+    float tPlane = dot(origin - camPos, nrm) / denom;
+    if (tPlane < 0.0) discard_fragment();
 
-    float sdisc = sqrt(max(disc, 0.0));
-    float t0 = -B - sdisc;
-    float t1 = -B + sdisc;
+    // Slab thickness & local half extents in world units
+    float worldHalfX = length(uModel[0].xyz) * uHalfSize.v.x;
+    float worldHalfY = length(uModel[1].xyz) * uHalfSize.v.y;
+    float slabHalf   = max(worldHalfX, worldHalfY) * 0.9;
 
-    float tEnt = max(0.0, t0);
-    float tExt = min(t1, tEnt + min(uImp.thickness, 2.0*R));
-    if (tExt <= tEnt + 1e-5) discard_fragment();
+    float tEnt = max(0.0, tPlane - slabHalf);
+    float tExt =         tPlane + slabHalf;
+    float Lm   = tExt - tEnt;
+    if (Lm <= 1e-5) discard_fragment();
 
-    float span = tExt - tEnt;
-
-    // Step count based on projected size + global stepMul
-    float dist   = length(C - camPos);
-    float pxSpan = R / max(dist, 1.0);
-    float lod    = clamp(pxSpan * 320.0, 0.0, 1.0);
-    float stepMul = clamp(uCloudsGL.params1.w, 0.60, 1.35);
-    int   Nbase   = int(round(mix(8.0, 16.0, lod)));
-    int   N       = clamp(int(round(float(Nbase) * stepMul)), 6, 20);
-    float dt      = span / float(N);
+    // Steps (LOD + external step multiplier)
+    float distLOD   = clamp(Lm / 2500.0, 0.0, 1.2);
+    float stepMul   = clamp(U.params1.w, 0.60, 1.35);
+    int   baseSteps = int(round(mix(10.0, 18.0, 1.0 - distLOD*0.7)));
+    int   numSteps  = clamp(int(round(float(baseSteps) * stepMul)), 8, 24);
+    float dt        = Lm / float(numSteps);
 
     // Jitter
     float j = fract(sin(dot(in.ndcXY, float2(12.9898, 78.233))) * 43758.5453);
     float t = tEnt + (0.25 + 0.5*j) * dt;
 
-    half3 S  = half3(normalize(uCloudsGL.sunDirWorld.xyz));
-    half mu  = half(clamp(dot(normalize(C - camPos), float3(S)), -1.0, 1.0));
-    half g   = half(clamp(uCloudsGL.params2.x, 0.0, 0.95));
+    half3 S  = half3(normalize(U.sunDirWorld.xyz));
+    half mu  = half(clamp(dot(V, float3(S)), -1.0, 1.0));
+    half g   = half(clamp(U.params2.x, 0.0, 0.95));
 
     half T = half(1.0);
-    const half rhoGate   = half(0.0028);
+    const half rhoGate   = half(0.0025);
     const half refineMul = half(0.45);
     const int  refineMax = 2;
 
-    for (int i=0; i < N && T > half(0.004); ++i) {
+    for (int i=0; i < numSteps && T > half(0.004); ++i) {
         float3 sp = camPos + V * t;
 
-        // Soft edge inside sphere
-        float edge = clamp(1.0 - (length(sp - C) / R), 0.0, 1.0);
-        edge = smoothstep(0.0, uImp.soften, edge);
+        // Local (in-plane) coordinates via projection onto basis
+        float3 d = sp - origin;
+        float lpX = dot(d, ux);
+        float lpY = dot(d, vy);
+        float2 hn = float2(max(worldHalfX, 1e-4), max(worldHalfY, 1e-4));
+        float  er = length(float2(lpX, lpY) / hn); // 0 centre … 1 at edge
+        float  edgeMask = smoothstep(1.0, 0.92, 1.0 - er);
 
-        half rho  = half(densityAt(sp, uCloudsGL)) * half(edge);
+        half rho = half(densityAt(sp, U)) * half(edgeMask);
         if (rho < rhoGate) { t += dt; continue; }
 
         // One-tap sun probe
         {
-            float baseY = uCloudsGL.params0.w;
-            float topY  = uCloudsGL.params1.x;
+            float baseY = U.params0.w;
+            float topY  = U.params1.x;
             float dL = (topY - baseY) * 0.20;
-            float3 lp = sp + float3(S) * dL;
-            half occ  = half(densityAt(lp, uCloudsGL));
-            half aL   = half(1.0) - half(exp(-float(occ) * max(0.0f, uCloudsGL.params1.z) * dL * 0.010));
+            float3 lpSun = sp + float3(S) * dL;
+            half occ  = half(densityAt(lpSun, U));
+            half aL   = half(1.0) - half(exp(-float(occ) * max(0.0f, U.params1.z) * dL * 0.010));
             rho = half(min(1.0f, float(rho) * (1.0f - 0.55f * float(aL))));
         }
 
@@ -256,9 +246,9 @@ fragment half4 cloud_impostor_fragment(VSOut in                              [[s
         half td = half(dt) * refineMul;
         for (int k=0; k < refineMax && T > half(0.004); ++k) {
             float3 sp2 = sp + V * (float(td) * float(k));
-            half rho2  = half(densityAt(sp2, uCloudsGL));
+            half rho2  = half(densityAt(sp2, U));
 
-            half sigma = half(max(0.0f, uCloudsGL.params1.z) * 0.036);
+            half sigma = half(max(0.0f, U.params1.z) * 0.036);
             half aStep = half(1.0) - half(exp(-float(rho2) * float(sigma) * float(td)));
 
             half ph    = half(phaseHG(float(mu), float(g)));

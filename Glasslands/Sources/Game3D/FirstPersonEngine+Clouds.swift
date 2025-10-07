@@ -23,21 +23,32 @@ extension FirstPersonEngine {
         coverage: CGFloat = 0.42,
         horizonLift: CGFloat = 0.14
     ) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
-            return
-        }
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
-            for m in g.materials {
-                if on {
-                    let newMat = CloudBillboardMaterial.makeVolumetricImpostor()
-                    // Preserve whatever diffuse was there; program ignores it but keeps sharing sane.
-                    newMat.diffuse.contents = m.diffuse.contents
-                    node.geometry?.firstMaterial = newMat
+
+            if on {
+                var half: simd_float2 = .init(1, 1)
+
+                if let p = g as? SCNPlane {
+                    half = simd_float2(Float(p.width * 0.5), Float(p.height * 0.5))
                 } else {
+                    let bb = g.boundingBox
+                    half = simd_float2(Float((bb.max.x - bb.min.x) * 0.5),
+                                       Float((bb.max.y - bb.min.y) * 0.5))
+                }
+
+                let newMat = CloudImpostorProgram.makeMaterial(halfSize: half)
+                if let old = g.firstMaterial?.diffuse.contents {
+                    newMat.diffuse.contents = old
+                }
+                g.firstMaterial = newMat
+            } else {
+                g.materials.forEach { m in
                     m.program = nil
                     m.shaderModifiers = nil
+                    m.setValue(nil, forKey: "uHalfSize")
                 }
             }
         }

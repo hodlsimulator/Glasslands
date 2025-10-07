@@ -15,9 +15,10 @@ enum CloudBillboardMaterial {
     static let volumetricMarker = "/* VOL_IMPOSTOR_VAPOUR */"
 
     @MainActor
-    static func makeVolumetricImpostor() -> SCNMaterial {
-        // Route billboards to the volumetric SCNProgram (true vapour).
-        return CloudImpostorProgram.makeMaterial()
+    static func makeVolumetricImpostor(defaultHalfSize: simd_float2 = .init(1, 1)) -> SCNMaterial {
+        let m = CloudImpostorProgram.makeMaterial(halfSize: defaultHalfSize)
+        m.setValue(volumetricMarker, forKey: "vapourTag")
+        return m
     }
 
     // Kept in case you ever want to A/B
