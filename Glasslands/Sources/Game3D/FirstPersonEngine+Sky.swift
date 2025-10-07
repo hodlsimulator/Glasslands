@@ -56,10 +56,10 @@ extension FirstPersonEngine {
     func applyCloudSunUniforms() {
         let sunW = simd_normalize(sunDirWorld)
 
-        // Bright, daylight white; keeps both sky and puffs lit
+        // Daylight white; guarantees bright sky and white puffs
         let tintV = SCNVector3(1.0, 0.97, 0.92)
 
-        // Billboards
+        // Billboards (white, sun-only)
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             let pov = (scnView?.pointOfView ?? camNode).presentation
             let invView = simd_inverse(pov.simdWorldTransform)
@@ -71,31 +71,27 @@ extension FirstPersonEngine {
                 guard let g = node.geometry else { return }
                 for m in g.materials {
                     m.setValue(sunViewV, forKey: "sunDirView")
-                    m.setValue(tintV,    forKey: "sunTint")
-                    // Make puffs brighter and less grey
+                    // Ensure bright white clouds
+                    m.setValue(0.56 as CGFloat, forKey: "hgG")
+                    m.setValue(0.74 as CGFloat, forKey: "baseWhite") // whiteness floor
+                    m.setValue(0.60 as CGFloat, forKey: "hiGain")    // sun highlight gain
                     m.setValue(0.06 as CGFloat, forKey: "edgeSoft")
-                    m.setValue(1.45 as CGFloat, forKey: "densityMul")
-                    m.setValue(0.26 as CGFloat, forKey: "skyBackK")
-                    m.setValue(0.42 as CGFloat, forKey: "msLiftK")
-                    m.setValue(0.56 as CGFloat, forKey: "mieG")
-                    m.setValue(2.4  as CGFloat, forKey: "turbidity")
                 }
             }
         }
 
-        // Physics sky
+        // Physics sky (Rayleigh + Mie)
         if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: false),
            let mat = sky.geometry?.firstMaterial
         {
             mat.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
             mat.setValue(tintV, forKey: "sunTint")
-            // Bright midday settings; tweak for TOD later
-            mat.setValue(2.4  as CGFloat, forKey: "turbidity")
-            mat.setValue(0.50 as CGFloat, forKey: "mieG")
-            mat.setValue(2.05 as CGFloat, forKey: "exposure")
+            mat.setValue(2.2  as CGFloat, forKey: "turbidity")
+            mat.setValue(0.48 as CGFloat, forKey: "mieG")
+            mat.setValue(2.40 as CGFloat, forKey: "exposure")
             mat.setValue(0.12 as CGFloat, forKey: "horizonLift")
         }
-    } 
+    }
 
     // MARK: - HDR Sun (disc + halo)
 
