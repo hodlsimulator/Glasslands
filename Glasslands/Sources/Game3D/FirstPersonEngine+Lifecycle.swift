@@ -138,16 +138,15 @@ extension FirstPersonEngine {
     // MARK: - Sky
     @MainActor
     func buildSky() {
-        // Clear old sky nodes/materials that might compile shaders
+        // Clear old sky bits
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
         scene.rootNode.childNodes
             .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer", "SkyAtmosphere"].contains($0.name ?? "") }
             .forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
-        
-        // After scene.rootNode.addChildNode(skyAnchor)
 
+        // Atmosphere dome
         let skyR = CGFloat(cfg.skyDistance) * 0.995
         let skySphere = SCNSphere(radius: max(10, skyR))
         skySphere.segmentCount = 96
@@ -158,48 +157,30 @@ extension FirstPersonEngine {
         skyNode.castsShadow = false
         skyNode.renderingOrder = -200_000
         skyAnchor.addChildNode(skyNode)
-
         skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
 
-        // Precompute the same band radii as the builder and seed the advection bounds
-        do {
-            let R = Float(cfg.skyDistance)
-            let rNearMax : Float = max(560, R * 0.22)
-            let rNearHole: Float = rNearMax * 0.34
-            let rBridge0 : Float = rNearMax * 1.06
-            let rBridge1 : Float = rBridge0 + max(900,  R * 0.42)
-            let rMid0    : Float = rBridge1 - 100
-            let rMid1    : Float = rMid0    + max(2100, R * 1.05)
-            let rFar0    : Float = rMid1    + max(650,  R * 0.34)
-            let rFar1    : Float = rFar0    + max(3000, R * 1.40)
-            let rUltra0  : Float = rFar1    + max(700,  R * 0.40)
-            let rUltra1  : Float = rUltra0  + max(1600, R * 0.60)
-            cloudRMin = rNearHole
-            cloudRMax = rUltra1
-        }
-
-        // Background = static blue gradient image (no SCNProgram / shader)
+        // Background gradient, no IBL (sun is sole illuminant)
         let bg = SkyGradientImage.make()
         scene.background.contents = bg
         scene.background.wrapS = .clamp
         scene.background.wrapT = .clamp
-
-        // Kill IBL so sun is the only light, but keep things visible
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0.0
 
-        // DO NOT add the volumetric cloud sphere (it’s the lag). Keep billboards.
-        CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
-            guard let self else { return }
-            node.name = "CumulusBillboardLayer"
-            node.eulerAngles.y = self.cloudInitialYaw
-            self.skyAnchor.addChildNode(node)
-            self.cloudLayerNode = node
-            self.applyCloudSunUniforms()
-            self.enableVolumetricCloudImpostors(true)
-        }
+        // True volumetric vapour (no billboard sprites = no circles)
+        let vol = VolumetricCloudLayer.make(
+            radius: CGFloat(cfg.skyDistance),
+            baseY: 400, topY: 1400, coverage: 0.50
+        )
+        skyAnchor.addChildNode(vol)
 
-        // HDR sun sprites (unchanged)
+        // Ensure any leftover billboard layer is gone/disabled
+        scene.rootNode.childNodes
+            .filter { $0.name == "CumulusBillboardLayer" }
+            .forEach { $0.removeFromParentNode() }
+        enableVolumetricCloudImpostors(false)
+
+        // HDR sun sprites
         let coreDeg: CGFloat = 6.0, haloScale: CGFloat = 2.6
         let evBoost: CGFloat = pow(2.0, 1.5)
         let sun = makeHDRSunNode(coreAngularSizeDeg: coreDeg,
@@ -214,7 +195,7 @@ extension FirstPersonEngine {
 
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         applyCloudSunUniforms()
-    } 
+    }
 
     // MARK: - Safety ground
 
