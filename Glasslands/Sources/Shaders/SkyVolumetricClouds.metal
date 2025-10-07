@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  Volumetric vapour: micro “puffs” (Worley/fBm on XZ) that coalesce into cumulus.
-//  Premultiplied pure white; sun/self-shadowing lives in alpha.
+//  Volumetric vapour via micro “puffs” coalescing into cumulus.
+//  Premultiplied pure white; sun/self-shadowing only changes alpha.
 //
 
 #include <metal_stdlib>
@@ -15,13 +15,13 @@ using namespace metal;
 static constant float kPI = 3.14159265358979323846f;
 
 struct GLCloudUniforms {
-    float4 sunDirWorld;   // xyz: sun direction (world)
-    float4 sunTint;       // reserved for future
-    float4 params0;       // x=time, y=wind.x, z=wind.y, w=baseY
-    float4 params1;       // x=topY, y=coverage, z=densityMul, w=stepMul
-    float4 params2;       // x=mieG, y=powderK, z=horizonLift, w=detailMul
-    float4 params3;       // x=domainOffX, y=domainOffY, z=domainRotate, w=puffScale
-    float4 params4;       // x=puffStrength, y/z/w unused
+    float4 sunDirWorld;
+    float4 sunTint;
+    float4 params0;   // x=time, y=wind.x, z=wind.y, w=baseY
+    float4 params1;   // x=topY, y=coverage, z=densityMul, w=stepMul
+    float4 params2;   // x=mieG, y=powderK, z=horizonLift, w=detailMul
+    float4 params3;   // x=domainOffX, y=domainOffY, z=domainRotate, w=puffScale
+    float4 params4;   // x=puffStrength
 };
 
 struct GLVSIn {
@@ -44,13 +44,12 @@ vertex GLVSOut gl_vapour_vertex(GLVSIn vin [[stage_in]],
     return o;
 }
 
-// ----------------- helpers (inline) -----------------
+// ---- inline helpers (no out-of-line definitions) ----
 inline float hash1(float n) { return fract(sin(n) * 43758.5453123f); }
 inline float hash12(float2 p){ return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123f); }
 
 inline float noise3(float3 x) {
-    float3 p = floor(x);
-    float3 f = x - p;
+    float3 p = floor(x), f = x - p;
     f = f * f * (3.0 - 2.0 * f);
     const float3 off = float3(1.0, 57.0, 113.0);
     float n = dot(p, off);
@@ -70,7 +69,6 @@ inline float fbm4(float3 p){
     return a;
 }
 
-// Cheap 2D Worley (F1) on XZ for micro “puffs”
 inline float worley2(float2 x){
     float2 i = floor(x), f = x - i;
     float d = 1e9;
@@ -85,7 +83,6 @@ inline float worley2(float2 x){
     return sqrt(max(d,0.0));
 }
 
-// 1 - Worley octaves → cauliflower micro-cells
 inline float puffFBM(float2 x) {
     float a = 0.0, w = 0.55, s = 1.0;
     for (int i=0; i<3; ++i){
@@ -116,7 +113,6 @@ inline float phaseHG(float mu, float g){
     return (1.0 - g2) / max(1e-4, 4.0*kPI*pow(1.0 + g2 - 2.0*g*mu, 1.5));
 }
 
-// Density field: base mass + micro-cells coalescing
 inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float time         = U.params0.x;
     float2 wind        = float2(U.params0.y, U.params0.z);
@@ -138,15 +134,12 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float adv = mix(0.55, 1.55, h01);
     float2 advXY = xzr + wind * adv * (time * 0.0035);
 
-    // Low-frequency mass
     float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00110;
     float base = fbm4(P0 * float3(1.0, 0.35, 1.0));
 
-    // Micro puffs: Worley/Fbm on XZ with a tiny Y warp
     float yy = wp.y * 0.002 + 5.37;
     float puffs = puffFBM(advXY * puffScale + float2(yy, -yy*0.7));
 
-    // Erosion + curl give cauliflower edges and avoid mush
     float3 P1 = float3(advXY.x, wp.y*1.8, advXY.y) * 0.0046 + float3(2.7,0.0,-5.1);
     float erode = fbm4(P1);
     float2 cr = curl2(advXY * 0.0022);
@@ -162,7 +155,6 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                                   constant SCNSceneBuffer& scn_frame [[buffer(0)]],
                                   constant GLCloudUniforms& uCloudsGL [[buffer(1)]])
 {
-    // Camera + view ray
     float4 camW4 = scn_frame.inverseViewTransform * float4(0,0,0,1);
     float3 camPos = camW4.xyz / camW4.w;
     float3 V = normalize(in.worldPos - camPos);
@@ -170,7 +162,6 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float baseY = uCloudsGL.params0.w;
     float topY  = uCloudsGL.params1.x;
 
-    // Intersect cloud slab
     float vdY   = V.y;
     float t0    = (baseY - camPos.y) / max(1e-5, vdY);
     float t1    = (topY  - camPos.y) / max(1e-5, vdY);
@@ -178,13 +169,11 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float tExt  = min(tEnt + 5000.0, max(t0, t1));
     if (tExt <= tEnt + 1e-5) discard_fragment();
 
-    // March quality
     int   Nbase = 32;
     int   N  = clamp(int(round(float(Nbase) * clamp(uCloudsGL.params1.w, 0.35, 1.25))), 16, 60);
     float Lm = tExt - tEnt;
     float dt = Lm / float(N);
 
-    // Dither to reduce banding
     float2 st = float2(in.position.x, in.position.y);
     float  j  = fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453);
     float  t  = tEnt + (0.25 + 0.5*j) * dt;
@@ -200,7 +189,6 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
         float  rho = densityAt(sp, uCloudsGL);
         if (rho < 1e-4) { t += dt * 1.6; continue; }
 
-        // Short sun probe for self-occlusion
         float Lsun = 1.0;
         {
             const int NL = 4;
@@ -225,8 +213,7 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
         t += dt;
     }
 
-    // Premultiplied pure white — shading only in alpha
     float alpha = clamp(1.0 - T, 0.0, 1.0);
-    float3 rgb  = float3(1.0) * alpha;
+    float3 rgb  = float3(1.0) * alpha;   // premultiplied pure white
     return half4(half3(rgb), half(alpha));
 }
