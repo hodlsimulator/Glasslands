@@ -4,28 +4,23 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  SCNProgram wrapper for SkyVolumetricClouds.metal (unique symbols).
-//  Binder copies bytes from VolCloudUniformsStore; it never touches SCNMaterial.
+//  CNProgram wrapper for SkyVolumetricClouds.metal (gl_vapour_*).
+//  Binder copies bytes from VolCloudUniformsStore into the buffer named "uCloudsGL".
 //
 
 import SceneKit
 import simd
 import UIKit
 
-@objc
-final class VolCloudBinder: NSObject {
+@objc final class VolCloudBinder: NSObject {
     @objc static func bind(_ stream: SCNBufferStream,
                            node: SCNNode?,
                            shadable: SCNShadable?,
-                           renderer: SCNRenderer)
-    {
-        let U = VolCloudUniformsStore.shared.snapshot()
-        let size = MemoryLayout<GLCloudUniforms>.size
-        let ptr = UnsafeMutablePointer<GLCloudUniforms>.allocate(capacity: 1)
-        ptr.initialize(to: U)
-        stream.writeBytes(UnsafeRawPointer(ptr), count: size)
-        ptr.deinitialize(count: 1)
-        ptr.deallocate()
+                           renderer: SCNRenderer) {
+        var U = VolCloudUniformsStore.shared.snapshot()
+        withUnsafePointer(to: &U) { ptr in
+            stream.writeBytes(UnsafeRawPointer(ptr), count: MemoryLayout<GLCloudUniforms>.size)
+        }
     }
 }
 
@@ -34,7 +29,8 @@ enum VolumetricCloudProgram {
         let prog = SCNProgram()
         prog.vertexFunctionName   = "gl_vapour_vertex"
         prog.fragmentFunctionName = "gl_vapour_fragment"
-        // Name must match the Metal parameter `uCloudsGL`
+
+        // Name must match the Metal parameter in SkyVolumetricClouds.metal
         prog.handleBinding(ofBufferNamed: "uCloudsGL",
                            frequency: .perFrame,
                            handler: VolCloudBinder.bind)
@@ -48,6 +44,8 @@ enum VolumetricCloudProgram {
         m.blendMode = .alpha
         m.transparencyMode = .aOne
         m.program = prog
+        m.diffuse.contents = UIColor.white
+        m.multiply.contents = UIColor.white
         return m
     }
 }

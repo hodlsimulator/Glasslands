@@ -18,28 +18,23 @@ extension FirstPersonEngine {
     // MARK: - Volumetric cloud impostors
     @MainActor
     func enableVolumetricCloudImpostors(_ on: Bool) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return
+        }
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
-
             if on {
-                // World slab thickness proportional to the quad size (safe for SCNPlane).
-                var slabHalf: Float = 1.0
-                if let p = g as? SCNPlane {
-                    slabHalf = Float(max(p.width, p.height)) * 0.6
-                } else {
-                    let bb = g.boundingBox
-                    slabHalf = Float(max(bb.max.x - bb.min.x, bb.max.y - bb.min.y)) * 0.6
+                let m = CloudImpostorProgram.makeMaterial()
+                if let old = g.firstMaterial {
+                    m.multiply.contents = old.multiply.contents
+                    m.transparency = old.transparency
                 }
-
-                let m = CloudBillboardMaterial.makeVolumetricImpostor(defaultSlabHalf: slabHalf)
-                m.diffuse.contents = UIColor.white
                 g.firstMaterial = m
             } else {
                 for m in g.materials {
+                    m.program = nil
                     m.shaderModifiers = nil
-                    m.setValue(nil, forKey: "vapourTag")
                 }
             }
         }
@@ -57,17 +52,17 @@ extension FirstPersonEngine {
             let R = Float(cfg.skyDistance)
             let rNearMax: Float = max(560, R * 0.22)
             let rNearHole: Float = rNearMax * 0.34
-            let rBridge0: Float  = rNearMax * 1.06
-            let rBridge1: Float  = rBridge0 + max(900, R * 0.42)
-            let rMid0: Float     = rBridge1 - 100
-            let rMid1: Float     = rMid0 + max(2100, R * 1.05)
-            let rFar0: Float     = rMid1 + max(650, R * 0.34)
-            let rFar1: Float     = rFar0 + max(3000, R * 1.40)
-            let rUltra0: Float   = rFar1 + max(700, R * 0.40)
-            let rUltra1: Float   = rUltra0 + max(1600, R * 0.60)
+            let rBridge0: Float = rNearMax * 1.06
+            let rBridge1: Float = rBridge0 + max(900, R * 0.42)
+            let rMid0: Float = rBridge1 - 100
+            let rMid1: Float = rMid0 + max(2100, R * 1.05)
+            let rFar0: Float = rMid1 + max(650, R * 0.34)
+            let rFar1: Float = rFar0 + max(3000, R * 1.40)
+            let rUltra0: Float = rFar1 + max(700, R * 0.40)
+            let rUltra1: Float = rUltra0 + max(1600, R * 0.60)
             cloudRMin = rNearHole
             cloudRMax = rUltra1
-            _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1, rUltra0) // silence unused in some configs
+            _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1, rUltra0) // silence
         }
 
         // Per-frame uniforms for volumetric clouds (fast scattered-cumulus path).
@@ -75,12 +70,10 @@ extension FirstPersonEngine {
             time: Float(t),
             sunDirWorld: simd_normalize(sunDirWorld),
             wind: cloudWind,
-            domainOffset: cloudDomainOffset
+            domainOffset: cloudDomainOffset // remains global; impostors now anchor locally in shader
         )
-        
-        CloudBillboardMaterial.syncFromVolStore()
 
-        // Advance any billboard fallbacks at a fixed rate to keep cost predictable.
+        // Advance billboard positions at a fixed rate to keep cost predictable.
         let dt: Float = 1.0 / 60.0
         advectAllCloudBillboards(dt: dt)
     }
