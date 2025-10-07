@@ -63,7 +63,6 @@ inline float fbmN(float3 p, int oct){
     return a;
 }
 
-// Cheap 2D Worley (F1) on XZ for micro “puffs”
 inline float worley2(float2 x){
     float2 i = floor(x), f = x - i;
     float d = 1e9;
@@ -98,7 +97,7 @@ inline float phaseHG(float mu, float g){
     return (1.0 - g2) / max(1e-4, 4.0*kPI*pow(1.0 + g2 - 2.0*g*mu, 1.5));
 }
 
-// Density field with friendlier coverage mapping (avoids “zero density”)
+// Density field (coalescing micro-puffs) — adaptive but friendly
 inline float densityAt(float3 wp, constant GLCloudUniforms& U, float Q){
     float time         = U.params0.x;
     float2 wind        = float2(U.params0.y, U.params0.z);
@@ -135,8 +134,7 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U, float Q){
 
     float shape = base + puffStrength*(puffs - 0.5) - (1.0 - erode) * (0.34 * detailMul);
 
-    // Friendlier coverage map: wide soft knee so thin vapour survives
-    float thLo = (1.0 - coverage) - 0.16;   // was too high → zero density
+    float thLo = (1.0 - coverage) - 0.16;
     float thHi = (1.0 - coverage) + 0.56;
     float t    = smoothstep(thLo, thHi, shape);
     float dens = pow(clamp(t, 0.0, 1.0), 0.90);
@@ -147,16 +145,16 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U, float Q){
 
 fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                                   constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-                                  constant GLCloudUniforms& u [[buffer(1)]])
+                                  constant GLCloudUniforms& uCloudsGL [[buffer(1)]])
 {
-    float Q = clamp(u.params4.y, 0.3, 1.0);
+    float Q = clamp(uCloudsGL.params4.y, 0.3, 1.0);
 
     float4 camW4 = scn_frame.inverseViewTransform * float4(0,0,0,1);
     float3 camPos = camW4.xyz / camW4.w;
     float3 V = normalize(in.worldPos - camPos);
 
-    float baseY = u.params0.w;
-    float topY  = u.params1.x;
+    float baseY = uCloudsGL.params0.w;
+    float topY  = uCloudsGL.params1.x;
 
     float vdY   = V.y;
     float t0    = (baseY - camPos.y) / max(1e-5, vdY);
@@ -175,28 +173,27 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float  j  = fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453);
     float  t  = tEnt + (0.25 + 0.5*j) * dt;
 
-    float3 S  = normalize(u.sunDirWorld.xyz);
+    float3 S  = normalize(uCloudsGL.sunDirWorld.xyz);
     float  mu = clamp(dot(V, S), -1.0, 1.0);
-    float  g  = clamp(u.params2.x, 0.0, 0.95);
+    float  g  = clamp(uCloudsGL.params2.x, 0.0, 0.95);
 
     float T = 1.0;
 
-    // Tweaked gates: lower density gate and slightly stronger sigma
-    const float rhoGate = 0.006;           // was 0.025 → caused empty passes
+    const float rhoGate = 0.006;
     const float refineMul = 0.45;
     const int   refineMax = 4;
     const float skipMul = (0.9 + (1.6 - 0.9) * (1.0 - Q));
 
     for (int i=0; i<N && T>0.005; ++i) {
         float3 sp  = camPos + V * t;
-        float  rho = densityAt(sp, u, Q);
+        float  rho = densityAt(sp, uCloudsGL, Q);
 
         if (rho < rhoGate) { t += dt * skipMul; continue; }
 
         float td = dt * refineMul;
         for (int k=0; k<refineMax && T>0.005; ++k){
             float3 sp2 = sp + V * (td * float(k));
-            float  rho2 = densityAt(sp2, u, Q);
+            float  rho2 = densityAt(sp2, uCloudsGL, Q);
 
             float Lsun = 1.0;
             {
@@ -205,17 +202,17 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                 float3 lp = sp2;
                 for (int j2=0; j2<NL && Lsun > 0.02; ++j2){
                     lp += S * dL;
-                    float occ = densityAt(lp, u, Q);
-                    float aL  = 1.0 - exp(-occ * max(0.0, u.params1.z) * dL * 0.012); // +20%
+                    float occ = densityAt(lp, uCloudsGL, Q);
+                    float aL  = 1.0 - exp(-occ * max(0.0, uCloudsGL.params1.z) * dL * 0.012);
                     Lsun *= (1.0 - aL);
                 }
             }
 
-            float sigma = max(0.0, u.params1.z) * 0.028;   // was 0.022
+            float sigma = max(0.0, uCloudsGL.params1.z) * 0.028;
             float aStep = 1.0 - exp(-rho2 * sigma * td);
 
             float ph    = phaseHG(mu, g);
-            float shade = Lsun * exp(-u.params2.y * (1.0 - rho2));
+            float shade = Lsun * exp(-uCloudsGL.params2.y * (1.0 - rho2));
             float gain  = clamp(0.85 + 0.30 * ph * shade, 0.0, 1.4);
 
             T *= (1.0 - aStep * gain);
@@ -226,6 +223,6 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     }
 
     float alpha = clamp(1.0 - T, 0.0, 1.0);
-    float3 rgb  = float3(1.0) * alpha;   // premultiplied pure white
+    float3 rgb  = float3(1.0) * alpha;
     return half4(half3(rgb), half(alpha));
 }
