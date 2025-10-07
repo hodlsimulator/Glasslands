@@ -4,7 +4,8 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  SCNProgram bridge for SkyAtmosphere.metal
+//  SCNProgram bridge for SkyAtmosphere.metal.
+//  Binder is a top-level function that reads directly from the material.
 //
 
 import SceneKit
@@ -17,29 +18,43 @@ private struct SkyUniforms {
     var params0     : SIMD4<Float> // x=turbidity, y=mieG, z=exposure, w=horizonLift
 }
 
-enum SkyAtmosphereProgram {
+// Top-level, non-isolated binder for SceneKit’s render queue.
+func GL_bindSky(_ stream: SCNBufferStream, _ node: SCNNode, _ shadable: any SCNShadable, _ renderer: SCNRenderer) { 
+    guard let m = shadable as? SCNMaterial else { return }
 
-    private static var U = SkyUniforms(
-        sunDirWorld: SIMD4<Float>(0, 1, 0, 0),
-        sunTint    : SIMD4<Float>(1, 1, 1, 0),
-        params0    : SIMD4<Float>(2.5, 0.6, 1.25, 0.12)
+    func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
+    func v3(_ v: Any?) -> SIMD3<Float> {
+        if let s = v as? SCNVector3 { return SIMD3(Float(s.x), Float(s.y), Float(s.z)) }
+        return .zero
+    }
+
+    let sun = v3(m.value(forKey: "sunDirWorld"))
+    let tint = v3(m.value(forKey: "sunTint"))
+    let turbidity  = f(m.value(forKey: "turbidity"))
+    let mieG       = f(m.value(forKey: "mieG"))
+    let exposure   = max(0, f(m.value(forKey: "exposure")))
+    let horizon    = max(0, f(m.value(forKey: "horizonLift")))
+
+    var U = SkyUniforms(
+        sunDirWorld: SIMD4<Float>(normalize(SIMD3<Float>(sun)), 0),
+        sunTint    : SIMD4<Float>(tint, 0),
+        params0    : SIMD4<Float>(turbidity, mieG, exposure, horizon)
     )
 
-    // Non-isolated binder used by SceneKit render queue
-    private static func bindSky(stream: SCNBufferStream, _: SCNNode, _: any SCNShadable, _: SCNRenderer) {
-        var u = U
-        withUnsafeBytes(of: &u) { raw in
-            if let base = raw.baseAddress {
-                stream.writeBytes(base, count: raw.count)
-            }
+    withUnsafeBytes(of: &U) { raw in
+        if let base = raw.baseAddress {
+            stream.writeBytes(base, count: raw.count)
         }
     }
+}
+
+enum SkyAtmosphereProgram {
 
     static func makeMaterial() -> SCNMaterial {
         let p = SCNProgram()
         p.vertexFunctionName   = "sky_vertex"
         p.fragmentFunctionName = "sky_fragment"
-        p.handleBinding(ofBufferNamed: "U", frequency: .perFrame, handler: bindSky)
+        p.handleBinding(ofBufferNamed: "U", frequency: .perFrame, handler: GL_bindSky)
 
         let m = SCNMaterial()
         m.lightingModel = .constant
@@ -59,22 +74,6 @@ enum SkyAtmosphereProgram {
         return m
     }
 
-    // Called from render queue by your tick
-    static func updateUniforms(from m: SCNMaterial) {
-        func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
-        func v3(_ v: Any?) -> SIMD3<Float> {
-            if let s = v as? SCNVector3 { return SIMD3(Float(s.x), Float(s.y), Float(s.z)) }
-            return .zero
-        }
-        let sun = v3(m.value(forKey: "sunDirWorld"))
-        let tint = v3(m.value(forKey: "sunTint"))
-        U.sunDirWorld = SIMD4<Float>(normalize(SIMD3<Float>(sun)), 0)
-        U.sunTint     = SIMD4<Float>(tint, 0)
-        U.params0     = SIMD4<Float>(
-            f(m.value(forKey: "turbidity")),
-            f(m.value(forKey: "mieG")),
-            max(0, f(m.value(forKey: "exposure"))),
-            max(0, f(m.value(forKey: "horizonLift")))
-        )
-    }
+    // Kept for compatibility; binder reads from the material directly.
+    static func updateUniforms(from _: SCNMaterial) {}
 }
