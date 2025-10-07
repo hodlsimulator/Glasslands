@@ -146,16 +146,16 @@ extension FirstPersonEngine {
 
         scene.rootNode.addChildNode(skyAnchor)
 
-        // Disable environment lighting so shaded areas are truly in shade
+        // Disable IBL so shaded areas stay shaded (sun-only lighting)
         scene.background.contents = UIColor.black
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0.0
 
-        // Sky atmosphere (inside-out sphere)
+        // Sky atmosphere sphere (inside-out)
         let skyR = CGFloat(cfg.skyDistance) * 0.995
         let skySphere = SCNSphere(radius: max(10, skyR))
         skySphere.segmentCount = 96
-        let skyMat = SkyAtmosphereProgram.makeMaterial()
+        let skyMat = SkyAtmosphereMaterial.make()
         skySphere.firstMaterial = skyMat
         let skyNode = SCNNode(geometry: skySphere)
         skyNode.name = "SkyAtmosphere"
@@ -163,7 +163,7 @@ extension FirstPersonEngine {
         skyNode.renderingOrder = -20_000
         skyAnchor.addChildNode(skyNode)
 
-        // Volumetric cloud layer
+        // Volumetric cloud layer (unchanged; still sun-lit in its shader)
         let clouds = VolumetricCloudLayer.make(
             radius: CGFloat(cfg.skyDistance),
             baseY: 400.0,
@@ -173,7 +173,7 @@ extension FirstPersonEngine {
         clouds.renderingOrder = -9_990
         skyAnchor.addChildNode(clouds)
 
-        // Billboard cumulus (async build remains)
+        // Billboard cumulus
         CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
             guard let self else { return }
             node.name = "CumulusBillboardLayer"

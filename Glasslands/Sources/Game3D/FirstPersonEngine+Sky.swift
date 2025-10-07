@@ -75,8 +75,9 @@ extension FirstPersonEngine {
             }
         }
 
-        // Volumetric sphere (world + view)
-        if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false) ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
+        // Volumetric cloud sphere
+        if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
+            ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
            let m = sphere.geometry?.firstMaterial
         {
             let pov = (scnView?.pointOfView ?? camNode).presentation
@@ -89,15 +90,15 @@ extension FirstPersonEngine {
             m.setValue(tintV, forKey: "sunTint")
         }
 
-        // Sky atmosphere
+        // Sky (shader-modifier material, no SCNProgram binder)
         if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: false),
            let mat = sky.geometry?.firstMaterial
         {
             mat.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
             mat.setValue(tintV, forKey: "sunTint")
-            SkyAtmosphereProgram.updateUniforms(from: mat)
+            // turbidity / mieG / exposure / horizonLift remain as set in SkyAtmosphereMaterial.make()
         }
-    }
+    } 
 
     // MARK: - HDR Sun (disc + halo)
 
