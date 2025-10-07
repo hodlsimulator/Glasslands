@@ -55,41 +55,41 @@ extension FirstPersonEngine {
     @MainActor
     func applyCloudSunUniforms() {
         let sunW = simd_normalize(sunDirWorld)
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let invView = simd_inverse(pov.simdWorldTransform)
+        let sunView4 = invView * simd_float4(sunW, 0)
+        let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
+        let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
 
-        // Daylight white; guarantees bright sky and white puffs
-        let tintV = SCNVector3(1.0, 0.97, 0.92)
-
-        // Billboards (white, sun-only)
+        // Billboards (white, sun-only; semi-transparent + self-shadow)
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
-            let pov = (scnView?.pointOfView ?? camNode).presentation
-            let invView = simd_inverse(pov.simdWorldTransform)
-            let sunView4 = invView * simd_float4(sunW, 0)
-            let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-            let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
-
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
-                    m.setValue(sunViewV, forKey: "sunDirView")
-                    // Ensure bright white clouds
+                    m.setValue(sunViewV,        forKey: "sunDirView")
                     m.setValue(0.56 as CGFloat, forKey: "hgG")
-                    m.setValue(0.74 as CGFloat, forKey: "baseWhite") // whiteness floor
-                    m.setValue(0.60 as CGFloat, forKey: "hiGain")    // sun highlight gain
+                    m.setValue(0.70 as CGFloat, forKey: "baseWhite")
+                    m.setValue(0.65 as CGFloat, forKey: "hiGain")
                     m.setValue(0.06 as CGFloat, forKey: "edgeSoft")
+
+                    m.setValue(1.90 as CGFloat, forKey: "opaK")       // alpha strength
+                    m.setValue(1.00 as CGFloat, forKey: "densBias")   // overall thickness
+                    m.setValue(0.18 as CGFloat, forKey: "microAmp")   // texture amount
+                    m.setValue(1.10 as CGFloat, forKey: "occK")       // self-shadow
                 }
             }
         }
 
-        // Physics sky (Rayleigh + Mie)
+        // Physics sky (lighter blue)
         if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: false),
            let mat = sky.geometry?.firstMaterial
         {
             mat.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
-            mat.setValue(tintV, forKey: "sunTint")
-            mat.setValue(2.2  as CGFloat, forKey: "turbidity")
-            mat.setValue(0.48 as CGFloat, forKey: "mieG")
-            mat.setValue(2.40 as CGFloat, forKey: "exposure")
-            mat.setValue(0.12 as CGFloat, forKey: "horizonLift")
+            mat.setValue(SCNVector3(1.0, 0.97, 0.92),        forKey: "sunTint")
+            mat.setValue(1.9  as CGFloat,                    forKey: "turbidity")
+            mat.setValue(0.46 as CGFloat,                    forKey: "mieG")
+            mat.setValue(3.00 as CGFloat,                    forKey: "exposure")
+            mat.setValue(0.10 as CGFloat,                    forKey: "horizonLift")
         }
     }
 
