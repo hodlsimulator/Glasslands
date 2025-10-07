@@ -4,137 +4,113 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  SCNProgram + Metal uniforms for the volumetric cloud dome.
+//  SCNProgram for SkyVolumetricClouds.metal, with explicit binding of a
+//  tightly‑packed CloudUniforms constant buffer (symbol: uClouds).
 //
 
 import SceneKit
 import simd
 import UIKit
-import os.lock
 
-// Must match the Metal layout exactly (packed into float4s).
 private struct CloudUniforms {
-    var sunDirWorld : simd_float4
-    var sunTint     : simd_float4
-    var params0     : simd_float4 // x=time, y=wind.x, z=wind.y, w=baseY
-    var params1     : simd_float4 // x=topY, y=coverage, z=densityMul, w=stepMul
-    var params2     : simd_float4 // x=mieG, y=powderK, z=horizonLift, w=detailMul
-    var params3     : simd_float4 // x=domainOffX, y=domainOffY, z=domainRotate, w=0
-}
-
-// Simple lock-protected POD store.
-private final class CloudUniformStore {
-    static let shared = CloudUniformStore()
-    private var lock = os_unfair_lock_s()
-
-    private var U = CloudUniforms(
-        sunDirWorld: simd_float4(0, 1, 0, 0),
-        sunTint: simd_float4(1.00, 0.94, 0.82, 0),
-        params0: simd_float4(0, 6, 2, 1350),              // time, windX, windY, baseY
-        params1: simd_float4(2500, 0.42, 1.30, 0.95),     // topY, coverage, densityMul, stepMul
-        params2: simd_float4(0.65, 1.80, 0.18, 1.00),     // g, powderK, horizonLift, detailMul
-        params3: simd_float4(0.0, 0.0, 0.0, 0.0)          // domain offset / rotate
-    )
-
-    func snapshot() -> CloudUniforms {
-        os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }
-        return U
-    }
-
-    func set(_ newValue: CloudUniforms) {
-        os_unfair_lock_lock(&lock); U = newValue; os_unfair_lock_unlock(&lock)
-    }
-
-    // Per-frame update (main thread safe).
-    func setTimeSun(time: Float, sun: simd_float3) {
-        os_unfair_lock_lock(&lock)
-        U.params0.x = time
-        U.sunDirWorld = simd_float4(simd_normalize(sun), 0)
-        os_unfair_lock_unlock(&lock)
-    }
+    var sunDirWorld : SIMD4<Float> // xyz dir
+    var sunTint     : SIMD4<Float>
+    var params0     : SIMD4<Float> // x=time, y=wind.x, z=wind.y, w=baseY
+    var params1     : SIMD4<Float> // x=topY, y=coverage, z=densityMul, w=stepMul
+    var params2     : SIMD4<Float> // x=mieG, y=powderK, z=horizonLift, w=detailMul
+    var params3     : SIMD4<Float> // x=domainOffX, y=domainOffY, z=domainRotate, w=0
 }
 
 enum VolumetricCloudProgram {
 
+    // Stable copy updated each frame by updateUniforms(from:)
+    private static var currentU = CloudUniforms(
+        sunDirWorld: SIMD4<Float>(0,1,0,0),
+        sunTint    : SIMD4<Float>(1,1,1,0),
+        params0    : SIMD4<Float>(0, 0.5, 0.0, 400.0),
+        params1    : SIMD4<Float>(1400.0, 0.4, 1.2, 1.0),
+        params2    : SIMD4<Float>(0.6, 2.2, 0.12, 1.0),
+        params3    : SIMD4<Float>(0,0,0,0)
+    )
+
+    @MainActor
     static func makeMaterial() -> SCNMaterial {
-        let m = SCNMaterial()
-        m.isDoubleSided = true
-        m.lightingModel = .constant
-        m.blendMode = .alpha         // composite with the skydome behind
-        m.transparencyMode = .aOne
-        m.readsFromDepthBuffer = false
-        m.writesToDepthBuffer = false
-
         let prog = SCNProgram()
-        prog.vertexFunctionName = "clouds_vertex"
+        prog.vertexFunctionName   = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
-        m.program = prog
+        prog.isOpaque = false
+        prog.blendMode = .alpha // clouds composite over sky gradient in shader
 
-        // Bind the POD buffer named "U"
-        prog.handleBinding(ofBufferNamed: "U", frequency: .perFrame) { stream, _, _, _ in
-            var U = CloudUniformStore.shared.snapshot()
-            stream.writeBytes(&U, count: MemoryLayout<CloudUniforms>.stride)
+        // Bind CloudUniforms (symbol name must match the Metal function parameter)
+        prog.handleBinding(ofSymbol: "uClouds") { (program, renderer, node, material, bufferStream) in
+            // Ensure latest values are on the GPU every draw
+            var U = Self.currentU
+            bufferStream?.writeBytes(&U, length: MemoryLayout<CloudUniforms>.size)
         }
 
-        // Defaults exposed via KVC (so gameplay code can tweak live):
-        m.setValue(SCNVector3(0, 1, 0),               forKey: "sunDirWorld")
-        m.setValue(SCNVector3(1.00, 0.94, 0.82),      forKey: "sunTint")
-        m.setValue(0.0 as CGFloat,                    forKey: "time")
-        m.setValue(SCNVector3(6.0, 2.0, 0.0),         forKey: "wind")
-        m.setValue(1350.0 as CGFloat,                 forKey: "baseY")
-        m.setValue(2500.0 as CGFloat,                 forKey: "topY")
-        m.setValue(0.42 as CGFloat,                   forKey: "coverage")
-        m.setValue(1.30 as CGFloat,                   forKey: "densityMul")
-        m.setValue(0.95 as CGFloat,                   forKey: "stepMul")
-        m.setValue(0.18 as CGFloat,                   forKey: "horizonLift")
-        m.setValue(0.65 as CGFloat,                   forKey: "mieG")
-        m.setValue(1.80 as CGFloat,                   forKey: "powderK")
-        m.setValue(1.00 as CGFloat,                   forKey: "detailMul")
-        // New: domain offset/rotation for per-session formation variation.
-        m.setValue(SCNVector3(0.0, 0.0, 0.0),         forKey: "domainOffset")
-        m.setValue(0.0 as CGFloat,                    forKey: "domainRotate")
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.isDoubleSided = false
+        m.cullMode = .front        // render interior backfaces of a skydome
+        m.readsFromDepthBuffer = false
+        m.writesToDepthBuffer = false
+        m.program = prog
 
-        // Prime the store from these defaults.
-        updateUniforms(from: m)
+        // Set safe defaults for runtime‑tuned keys
+        m.setValue(NSNumber(value: 0.0), forKey: "time")
+        m.setValue(SCNVector3(0.60, 0.20, 0), forKey: "wind")
+        m.setValue(NSNumber(value: 400.0), forKey: "baseY")
+        m.setValue(NSNumber(value: 1400.0), forKey: "topY")
+        m.setValue(NSNumber(value: 0.42), forKey: "coverage")
+        m.setValue(NSNumber(value: 1.20), forKey: "densityMul")
+        m.setValue(NSNumber(value: 0.95), forKey: "stepMul")
+        m.setValue(NSNumber(value: 0.60), forKey: "mieG")
+        m.setValue(NSNumber(value: 2.20), forKey: "powderK")
+        m.setValue(NSNumber(value: 0.14), forKey: "horizonLift")
+        m.setValue(NSNumber(value: 1.10), forKey: "detailMul")
+        m.setValue(SCNVector3(0,0,0), forKey: "domainOffset")
+        m.setValue(NSNumber(value: 0.0), forKey: "domainRotate")
+        m.setValue(SCNVector3(0,1,0), forKey: "sunDirWorld")
+        m.setValue(SCNVector3(1,1,1), forKey: "sunTint")
+
         return m
     }
 
-    // Update the POD from an SCNMaterial’s KVCs (main thread).
-    static func updateUniforms(from mat: SCNMaterial) {
-        func f(_ key: String, _ def: CGFloat) -> Float {
-            if let cg = mat.value(forKey: key) as? CGFloat { return Float(cg) }
-            return Float(def)
+    /// Pulls values from the SCNMaterial custom keys (which the engine updates),
+    /// packs them into the CloudUniforms layout expected by Metal, and stores
+    /// them for the binding block above.
+    @MainActor
+    static func updateUniforms(from m: SCNMaterial) {
+        func f(_ v: Any?) -> Float {
+            if let n = v as? NSNumber { return n.floatValue }
+            return 0
         }
-        func v3(_ key: String, _ def: SCNVector3) -> simd_float3 {
-            let v = (mat.value(forKey: key) as? SCNVector3) ?? def
-            return simd_float3(Float(v.x), Float(v.y), Float(v.z))
+        func v3(_ v: Any?) -> SIMD3<Float> {
+            if let v = v as? SCNVector3 { return SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z)) }
+            return .zero
         }
 
-        let sunW  = simd_normalize(v3("sunDirWorld", SCNVector3(0, 1, 0)))
-        let tint  = v3("sunTint", SCNVector3(1, 1, 1))
-        let wind3 = v3("wind",    SCNVector3(6, 2, 0))
-        let dom   = v3("domainOffset", SCNVector3(0, 0, 0))
+        let time      = f(m.value(forKey: "time"))
+        let wind      = v3(m.value(forKey: "wind"))
+        let baseY     = f(m.value(forKey: "baseY"))
+        let topY      = f(m.value(forKey: "topY"))
+        let coverage  = f(m.value(forKey: "coverage"))
+        let density   = f(m.value(forKey: "densityMul"))
+        let stepMul   = f(m.value(forKey: "stepMul"))
+        let mieG      = f(m.value(forKey: "mieG"))
+        let powderK   = f(m.value(forKey: "powderK"))
+        let horizon   = f(m.value(forKey: "horizonLift"))
+        let detailMul = f(m.value(forKey: "detailMul"))
+        let domOff    = v3(m.value(forKey: "domainOffset"))
+        let domRot    = f(m.value(forKey: "domainRotate"))
+        let sunW3     = v3(m.value(forKey: "sunDirWorld"))
+        let sunTint3  = v3(m.value(forKey: "sunTint"))
 
-        var U = CloudUniformStore.shared.snapshot()
-        U.sunDirWorld = simd_float4(sunW, 0)
-        U.sunTint     = simd_float4(tint, 0)
-        U.params0     = simd_float4(
-            f("time", 0), wind3.x, wind3.y, f("baseY", 1350)
-        )
-        U.params1     = simd_float4(
-            f("topY", 2500), f("coverage", 0.42), f("densityMul", 1.30), f("stepMul", 0.95)
-        )
-        U.params2     = simd_float4(
-            f("mieG", 0.65), f("powderK", 1.80), f("horizonLift", 0.18), f("detailMul", 1.00)
-        )
-        U.params3     = simd_float4(
-            dom.x, dom.y, f("domainRotate", 0.0), 0.0
-        )
-        CloudUniformStore.shared.set(U)
-    }
-
-    // Per-frame call from the renderer.
-    static func setPerFrame(time: Float, sunDirWorld: simd_float3) {
-        CloudUniformStore.shared.setTimeSun(time: time, sun: sunDirWorld)
+        currentU.sunDirWorld = SIMD4<Float>(normalize(SIMD3<Float>(sunW3)), 0)
+        currentU.sunTint     = SIMD4<Float>(sunTint3, 0)
+        currentU.params0     = SIMD4<Float>(time, wind.x, wind.y, baseY)
+        currentU.params1     = SIMD4<Float>(topY, coverage, max(0, density), max(0.25, stepMul))
+        currentU.params2     = SIMD4<Float>(mieG, max(powderK, 0), horizon, max(0, detailMul))
+        currentU.params3     = SIMD4<Float>(domOff.x, domOff.y, domRot, 0)
     }
 }

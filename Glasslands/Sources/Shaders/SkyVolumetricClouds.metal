@@ -4,55 +4,42 @@
 //
 //  Created by . . on 10/5/25.
 //
+//  Volumetric cloud raymarch (single scattering) lit by the sun.
+//  – HG phase (forward scattering) + powder effect at edges
+//  – Compact shadow march along sun ray (self‑occlusion)
+//  – Domain rotation/offset, wind advection, horizon lift
+//
+//  Expected binding (SceneKit):
+//    buffer(0) : SCNSceneBuffer scn_frame
+//    buffer(1) : CloudUniforms        (symbol: uClouds)
+//
 
 #include <metal_stdlib>
-using namespace metal;
 #include <SceneKit/scn_metal>
-#include <simd/simd.h>
+using namespace metal;
 
 static constant float kPI = 3.14159265358979323846f;
-inline float deg2rad(float degrees) { return degrees * (kPI / 180.0f); }
 
-struct CloudUniforms {
-    float4 sunDirWorld;
-    float4 sunTint;
-    float4 params0; // x=time, y=wind.x, z=wind.y, w=baseY
-    float4 params1; // x=topY, y=coverage, z=densityMul, w=stepMul
-    float4 params2; // x=mieG, y=powderK, z=horizonLift, w=detailMul
-    float4 params3; // x=domainOffX, y=domainOffY, z=domainRotate, w=0
-};
-
-struct VSIn { float3 position [[attribute(SCNVertexSemanticPosition)]]; };
-struct VSOut {
-    float4 position [[position]];
-    float3 worldPos;
-};
-
-vertex VSOut clouds_vertex(
-    VSIn vin [[stage_in]],
-    constant SCNSceneBuffer& scn_frame [[buffer(0)]]
-){
-    VSOut o;
-    const float4 world = float4(vin.position, 1.0);
-    const float4 view  = scn_frame.viewTransform * world;
-    o.position = scn_frame.projectionTransform * view;
-    o.worldPos = world.xyz;
-    return o;
-}
-
-inline float  saturate1(float x) { return clamp(x, 0.0f, 1.0f); }
-inline float3 saturate3(float3 v) { return clamp(v, float3(0.0), float3(1.0)); }
-inline float  frac1(float x) { return x - floor(x); }
-inline float  lerp1(float a,float b,float t){ return a + (b - a) * t; }
+inline float saturate(float x)          { return clamp(x, 0.0f, 1.0f); }
+inline float2 saturate(float2 v)        { return clamp(v, float2(0), float2(1)); }
+inline float3 saturate(float3 v)        { return clamp(v, float3(0), float3(1)); }
+inline float lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float3 lerp3(float3 a,float3 b,float t){ return a + (b - a) * t; }
+inline float frac(float x)              { return x - floor(x); }
 
-inline float hash1(float n) { return frac1(sin(n) * 43758.5453123f); }
+// -----------------------------------------------------------------------------
+// Noise / FBM (compact, branchless-ish)
+// -----------------------------------------------------------------------------
+inline float hash1(float n) { return frac(sin(n) * 43758.5453123f); }
+
 inline float noise3(float3 x){
     float3 p = floor(x);
     float3 f = x - p;
     f = f * f * (3.0f - 2.0f * f);
+
     const float3 off = float3(1.0, 57.0, 113.0);
     float n = dot(p, off);
+
     float n000 = hash1(n + 0.0);
     float n100 = hash1(n + 1.0);
     float n010 = hash1(n + 57.0);
@@ -61,15 +48,18 @@ inline float noise3(float3 x){
     float n101 = hash1(n + 114.0);
     float n011 = hash1(n + 170.0);
     float n111 = hash1(n + 171.0);
-    float nx00 = lerp1(n000, n100, f.x);
-    float nx10 = lerp1(n010, n110, f.x);
-    float nx01 = lerp1(n001, n101, f.x);
-    float nx11 = lerp1(n011, n111, f.x);
-    float nxy0 = lerp1(nx00, nx10, f.y);
-    float nxy1 = lerp1(nx01, nx11, f.y);
-    return lerp1(nxy0, nxy1, f.z);
+
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+
+    float nxy0 = mix(nx00, nx10, f.y);
+    float nxy1 = mix(nx01, nx11, f.y);
+    return mix(nxy0, nxy1, f.z);
 }
-inline float fbm(float3 p){
+
+inline float fbm5(float3 p){
     float a = 0.0f, w = 0.5f;
     for (int i = 0; i < 5; ++i) {
         a += noise3(p) * w;
@@ -79,6 +69,7 @@ inline float fbm(float3 p){
     return a;
 }
 
+// Small curl helper (for subtle billow skew)
 inline float2 curl2(float2 xz){
     const float e = 0.02f;
     float n1 = noise3(float3(xz.x + e, 0.0, xz.y)) - noise3(float3(xz.x - e, 0.0, xz.y));
@@ -88,148 +79,203 @@ inline float2 curl2(float2 xz){
     return v / len;
 }
 
-inline float heightProfile(float y, float baseY, float topY){
-    float h = saturate1((y - baseY) / max(1.0f, (topY - baseY)));
-    float up = smoothstep(0.03f, 0.25f, h);
-    float dn = 1.0f - smoothstep(0.68f, 1.00f, h);
-    return pow(up * dn, 0.80f);
+// -----------------------------------------------------------------------------
+// Uniforms
+// -----------------------------------------------------------------------------
+struct CloudUniforms {
+    float4 sunDirWorld;   // xyz = dir (normalised), w = unused
+    float4 sunTint;       // rgb = sun colour (linear), a unused
+
+    // params0: x=time, y=wind.x, z=wind.y, w=baseY
+    // params1: x=topY, y=coverage (0..1), z=densityMul, w=stepMul (quality/perf)
+    // params2: x=mieG (0..0.95), y=powderK (~1..3), z=horizonLift, w=detailMul
+    // params3: x=domainOffX, y=domainOffY, z=domainRotate (radians), w=unused
+    float4 params0;
+    float4 params1;
+    float4 params2;
+    float4 params3;
+};
+
+struct VSIn {
+    float3 position [[attribute(SCNVertexSemanticPosition)]];
+};
+
+struct VSOut {
+    float4 position [[position]];
+    float3 worldPos;
+};
+
+vertex VSOut clouds_vertex(
+    VSIn vin [[stage_in]],
+    constant SCNSceneBuffer& scn_frame [[buffer(0)]])
+{
+    VSOut o;
+    const float4 world = float4(vin.position, 1.0);
+    const float4 view  = scn_frame.viewTransform * world;
+    o.position = scn_frame.projectionTransform * view;
+    // Skydome sits at world origin with identity model, so object==world.
+    o.worldPos = world.xyz;
+    return o;
 }
 
-// Core density field (0…1)
-inline float densityAt(float3 wp, constant CloudUniforms& U){
-    const float time   = U.params0.x;
-    const float2 wind  = float2(U.params0.y, U.params0.z);
-    const float baseY  = U.params0.w;
-    const float topY   = U.params1.x;
-    const float cov    = U.params1.y;
-    const float detailMul = max(0.0f, U.params2.w);
+// Height profile within the cloud slab
+inline float heightProfile(float y, float baseY, float topY){
+    float h = saturate((y - baseY) / max(1.0f, (topY - baseY)));
+    // Soft fade-in at base, soft fade-out near top; slightly concave mid.
+    float up = smoothstep(0.03f, 0.25f, h);
+    float dn = 1.0f - smoothstep(0.68f, 1.00f, h);
+    return pow(clamp(up * dn, 0.0f, 1.0f), 0.80f);
+}
 
-    // Domain transform: per-session offset + rotation, then scale.
+// Core density field in [0,1]
+inline float densityAt(float3 wp, constant CloudUniforms& U){
+    const float  time      = U.params0.x;
+    const float2 wind      = float2(U.params0.y, U.params0.z);
+    const float  baseY     = U.params0.w;
+    const float  topY      = U.params1.x;
+    const float  coverage  = U.params1.y;
+    const float  detailMul = max(0.0f, U.params2.w);
+
+    // Domain transform: rotate + offset (per session), then scale
     const float2 domOff = float2(U.params3.x, U.params3.y);
     const float  ang    = U.params3.z;
     const float  ca = cos(ang), sa = sin(ang);
-    float2 xz = (wp.xz) + domOff;
-    float2 xzr = float2(xz.x*ca - xz.y*sa, xz.x*sa + xz.y*ca);
 
-    float3 q = float3(xzr.x, wp.y, xzr.y) * 0.00115f;
+    float2 xz   = wp.xz + domOff;
+    float2 xzr  = float2(xz.x*ca - xz.y*sa, xz.x*sa + xz.y*ca);
 
-    // Slow advection with altitude-based speed multiplier:
-    // 0.5× at base/horizon → 1.5× at top/zenith.
-    float2 flow = wind * 0.0012f + 1.12f * curl2(q.xz + time * 0.07f);
-    float h01 = saturate1((wp.y - baseY) / max(1.0f, (topY - baseY)));
-    float speedMul = lerp1(0.5f, 1.5f, h01);
-    q.xz += flow * time * speedMul;
+    // Slow advection; altitude‑dependent drift (0.5× at base → 1.5× at top)
+    float h01 = heightProfile(wp.y, baseY, topY);
+    float adv = lerp1(0.5f, 1.5f, h01);
+    float2 advXY = xzr + wind * adv * (time * 0.0035f);
 
-    // Domain warp + FBM
-    float3 warp = float3(fbm(q * 1.6f + 31.0f), fbm(q * 1.7f + 57.0f), fbm(q * 1.8f + 83.0f));
-    q += (warp - 0.5f) * 0.42f;
+    // Base shape (broad cumulus mass)
+    float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00115f;
+    float base = fbm5(P0 * float3(1.0, 0.35, 1.0));
 
-    float shape  = fbm(q * 0.85f);
-    float detail = fbm(q * 2.75f) * 0.60f * detailMul;
+    // Detail cauliflowering
+    float3 P1 = float3(advXY.x, wp.y * 1.8f, advXY.y) * 0.0046f + float3(2.7f, 0.0f, -5.1f);
+    float detail = fbm5(P1);
 
-    float prof = heightProfile(wp.y, baseY, topY);
-    float thr  = lerp1(0.64f, 0.42f, saturate1(cov));
-    float d    = (shape * 0.95f + detail) * prof - thr + 0.10f;
+    // Combine with coverage threshold and slight curl skew near edges
+    float2 curl = curl2(advXY * 0.0022f);
+    float edge  = base + (detailMul * 0.55f) * (detail - 0.45f) + 0.10f * curl.x;
 
-    return smoothstep(0.0f, 0.70f, d);
+    float dens = saturate( (edge - (1.0f - coverage)) / max(1e-3f, coverage) );
+    // Height shaping + horizon lift (keeps clouds readable near skyline)
+    dens *= heightProfile(wp.y + U.params2.z * 120.0f, baseY, topY);
+
+    return saturate(dens);
 }
 
-inline float3 sunGlow(float3 rd, float3 sunW, float3 sunTint){
-    float ct = clamp(dot(rd, sunW), -1.0f, 1.0f);
-    float ang = acos(ct);
-    const float rad = deg2rad(0.95f);
-    float core  = 1.0f - smoothstep(rad * 0.75f, rad, ang);
-    float halo1 = 1.0f - smoothstep(rad * 1.25f, rad * 3.50f, ang);
-    float halo2 = 1.0f - smoothstep(rad * 3.50f, rad * 7.50f, ang);
-    float edr = core * 5.0f + halo1 * 0.90f + halo2 * 0.25f;
-    return sunTint * edr;
-}
-
+// Henyey–Greenstein phase (single lobe, forward-biased)
 inline float phaseHG(float cosTheta, float g){
-    float gg = g * g;
-    float denom = 1.0f + gg - 2.0f * g * cosTheta;
-    return (1.0f - gg) / (4.0f * kPI * pow(denom, 1.5f));
+    float g2 = g * g;
+    float denom = pow(1.0f + g2 - 2.0f * g * cosTheta, 1.5f);
+    return (1.0f - g2) / max(1e-4f, 4.0f * kPI * denom);
 }
 
-inline float lightTransmittance(float3 p, float3 sunW, constant CloudUniforms& U){
-    const int   LSTEPS = 6;
-    const float LSTEP  = 140.0f;
-    const float SIGMA  = 0.090f;
-    float tau = 0.0f;
-    float3 q = p;
-    for (int i = 0; i < LSTEPS; ++i){
-        q += sunW * LSTEP;
-        float d = densityAt(q, U);
-        tau += d * SIGMA;
-    }
-    return exp(-tau);
+// Sub‑voxel brightening at porous edges (powder effect)
+inline float powderTerm(float occult, float k) {
+    // occult is approximate local occlusion in [0,1]; higher → darker
+    // k≈1..3 gives gentle “pop” at thin silhouettes
+    return exp(-k * saturate(occult));
 }
 
-fragment float4 clouds_fragment(
-    VSOut in [[stage_in]],
+struct FragOut {
+    half4 color;
+};
+
+fragment FragOut clouds_fragment(
+    VSOut in                   [[stage_in]],
     constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-    constant CloudUniforms& U [[buffer(2)]]
-){
-    const float3 ro = (scn_frame.inverseViewTransform * float4(0, 0, 0, 1)).xyz;
-    const float3 rd = normalize(in.worldPos - ro);
+    constant CloudUniforms& U  [[buffer(1)]])
+{
+    FragOut out;
+    // Sky gradient baseline (acts as background if clouds thin/clear)
+    const float3 skyZenith  = float3(0.10, 0.28, 0.65);
+    const float3 skyHorizon = float3(0.55, 0.72, 0.94);
 
-    const float3 SKY_TOP = float3(0.30, 0.56, 0.96);
-    const float3 SKY_BOT = float3(0.88, 0.93, 0.99);
-    float tSky = saturate1(rd.y * 0.60f + 0.40f);
-    float3 base = lerp3(SKY_BOT, SKY_TOP, tSky);
+    float4 camW4 = scn_frame.inverseViewTransform * float4(0,0,0,1);
+    float3 camPos = camW4.xyz / camW4.w;
 
-    const float3 sunW = normalize(U.sunDirWorld.xyz);
-    base += sunGlow(rd, sunW, U.sunTint.xyz);
+    float3 pos   = in.worldPos;
+    float3 viewDir = normalize(pos - camPos);
 
-    const float baseY = U.params0.w;
-    const float topY  = U.params1.x;
-    float denom = rd.y;
-    float tb = 0.0f, tt = -1.0f;
-    bool hits = fabs(denom) >= 1e-4f;
-    if (hits){
-        tb = (baseY - ro.y) / denom;
-        tt = (topY  - ro.y) / denom;
+    // Cloud layer slab
+    const float baseY    = U.params0.w;
+    const float topY     = U.params1.x;
+    const float densMul  = max(0.0f, U.params1.z);
+    const float stepMul  = clamp(U.params1.w, 0.25f, 1.5f);
+
+    // Intersect ray with horizontal slab [baseY, topY]
+    float tEnter = 0.0f, tExit = 0.0f;
+    {
+        float vdY = viewDir.y;
+        float t0 = (baseY - camPos.y) / max(1e-5f, vdY);
+        float t1 = (topY  - camPos.y) / max(1e-5f, vdY);
+        tEnter = min(t0, t1);
+        tExit  = max(t0, t1);
+        tEnter = max(tEnter, 0.0f);
+        // Clamp march thickness for numerical stability
+        tExit = min(tExit, tEnter + 6000.0f);
     }
-    float t0 = hits ? max(min(tb, tt), 0.0f) : 1e9f;
-    float t1 = hits ? max(tb, tt)      : -1e9f;
 
-    float3 acc = float3(0.0);
-    float  trans = 1.0f;
+    float3 sunW = normalize(U.sunDirWorld.xyz);
+    float sunDotV = clamp(dot(viewDir, sunW), -1.0f, 1.0f);
+    float gHG     = clamp(U.params2.x, -0.99f, 0.99f);
+    float powderK = max(0.0f, U.params2.y);
 
-    if (hits && t1 > 0.0f){
-        const int   MAX_STEPS = 32;
-        const float BASE_STEP = 180.0f;
+    // Background sky (simple zenith→horizon gradient)
+    float up = saturate((viewDir.y * 0.5f) + 0.5f);
+    float3 skyCol = mix(skyHorizon, skyZenith, up);
 
-        float grazing = clamp(1.0f - fabs(rd.y), 0.0f, 1.0f);
-        float worldStep = BASE_STEP * lerp1(1.0f, 2.0f, grazing) * U.params1.w;
-        float horizonK  = U.params2.z * smoothstep(0.0f, 0.15f, grazing);
+    // Raymarch through the slab: accumulate transmittance + in‑scattering
+    float  T = 1.0f;      // transmittance along view ray
+    float3 C = float3(0); // in‑scattered radiance
 
-        float jitter = frac1(dot(in.worldPos, float3(1.0, 57.0, 113.0))) * worldStep;
+    // Choose step count adaptively by thickness and a user “stepMul”
+    const float marchLen = max(1e-3f, tExit - tEnter);
+    const int   Nbase    = 48;
+    const int   Nsteps   = clamp(int(round((float)Nbase * stepMul)), 16, 84);
+    const float dt       = marchLen / (float)Nsteps;
 
-        float t = t0 + jitter;
-        float g = clamp(U.params2.x, -0.85f, 0.85f);
-        float powK = max(0.0f, U.params2.y);
-        float densM = max(0.0f, U.params1.z);
+    float t = tEnter + 0.5f * dt;
+    for (int i = 0; i < Nsteps && T > 0.0035f; ++i, t += dt) {
+        float3 sp = camPos + viewDir * t;
 
-        for (int i = 0; i < MAX_STEPS; ++i){
-            if (t > t1) break;
-            float3 p = ro + rd * t;
-            float d = densityAt(p, U) * densM;
-            if (d > 1e-3f){
-                float lt = lightTransmittance(p, sunW, U);
-                float mu = clamp(dot(rd, sunW), -1.0f, 1.0f);
-                float phase = phaseHG(mu, g);
-                float powder = 1.0f - exp(-powK * d);
-                float3 localCol = (0.70f + 0.30f * lt + horizonK) * phase * U.sunTint.xyz;
-                float a = 1.0f - exp(-d * (worldStep * 0.0125f));
-                acc += trans * (localCol * powder * a);
-                trans *= (1.0f - a);
-                if (trans < 0.03f) break;
+        float rho = densityAt(sp, U);
+        if (rho <= 1e-4f) continue;
+
+        // Short light march towards sun to estimate self‑shadowing
+        // Keep it very cheap (4–6 taps) — stable enough for moving clouds.
+        float lightT = 1.0f;
+        {
+            const int NL = 6;
+            const float dL = ((topY - baseY) / max(1, NL)) * 0.9f;
+            float3 lp = sp; // march “upstream” towards the sun
+            for (int j = 0; j < NL && lightT > 0.01f; ++j) {
+                lp += sunW * dL;
+                float occ = densityAt(lp, U);
+                float aL  = 1.0f - exp(-occ * densMul * dL * 0.012f);
+                lightT *= (1.0f - aL);
             }
-            t += worldStep;
         }
+
+        float sigma = densMul * 0.022f;                // extinction coefficient
+        float a = 1.0f - exp(-rho * sigma * dt);       // Beer–Lambert over dt
+        float ph = phaseHG(sunDotV, gHG);              // HG phase term
+        float pd = powderTerm(1.0f - rho, powderK);    // edge brightening
+
+        float3 sunRGB = U.sunTint.rgb;                 // linear light colour
+
+        float3 S = sunRGB * lightT * ph * pd;          // per‑sample source
+        C += T * a * S;                                // volume compositing
+        T *= (1.0f - a);
     }
 
-    float3 outRGB = base * trans + acc;
-    return float4(outRGB, 1.0);
+    float3 col = C + skyCol * T;
+
+    out.color = half4(half3(saturate(col)), half(1.0));
+    return out;
 }
