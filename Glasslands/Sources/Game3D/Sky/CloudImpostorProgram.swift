@@ -11,7 +11,7 @@ import SceneKit
 import simd
 import UIKit
 
-// Must match CloudImpostorVolumetric.metal's GLImpostorUniforms (16-byte aligned).
+// Must match CloudImpostorVolumetric.metal's GLImpostorUniforms (16‑byte aligned).
 struct GLImpostorUniforms {
     var centerWorld: SIMD3<Float>
     var radius: Float
@@ -27,47 +27,66 @@ private struct NodeModel {
 
 @objc final class CloudImpostorBinder: NSObject {
 
-    // Per-node: impostor sphere placement (centre/radius/soft edge).
+    /// Pulls presentation transform + a radius **without** tripping Swift 6 actor checks.
+    /// Everything inside `assumeIsolated` is treated as MainActor for isolation purposes.
+    private static func unsafeReadNodeState(_ node: SCNNode?) -> (centre: SIMD3<Float>, radius: Float, model: simd_float4x4) {
+        return MainActor.assumeIsolated {
+            let n = node?.presentation ?? node ?? SCNNode()
+            let T = n.simdWorldTransform
+
+            // World-space centre from matrix.
+            let centre = SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z)
+
+            // Heuristic radius from geometry bounds.
+            var radius: Float = 2.0
+            if let plane = n.geometry as? SCNPlane {
+                radius = 0.5 * Float(max(plane.width, plane.height))
+            } else if let g = n.geometry {
+                let bs = g.boundingSphere
+                radius = max(1.0, Float(bs.radius))
+            }
+
+            return (centre, radius, T)
+        }
+    }
+
+    // Per-node: impostor sphere placement (centre / radius / soft edge).
     @objc static func bindImpostor(_ stream: SCNBufferStream,
                                    node: SCNNode?,
                                    shadable: SCNShadable?,
                                    renderer: SCNRenderer)
     {
-        let n = node?.presentation ?? node ?? SCNNode()
-        let T = n.simdWorldTransform
-        let center = SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z)
+        let (centre, radius, _) = unsafeReadNodeState(node)
 
-        var radius: Float = 2.0
-        if let plane = n.geometry as? SCNPlane {
-            radius = 0.5 * Float(max(plane.width, plane.height))
-        } else if let g = n.geometry {
-            let bs = g.boundingSphere
-            radius = max(1.0, Float(bs.radius))
-        }
-
-        let U = GLImpostorUniforms(centerWorld: center,
+        // Soft edge tuned for volumetric look; thickness caps ray span to reduce work.
+        let U = GLImpostorUniforms(centerWorld: centre,
                                    radius: radius,
-                                   thickness: radius * 1.4,
+                                   thickness: min(radius * 1.4, radius * 2.0),
                                    soften: 0.18,
                                    pad: 0)
 
-        withUnsafeBytes(of: U) { raw in
-            guard let base = raw.baseAddress else { return }
-            stream.writeBytes(base, count: MemoryLayout<GLImpostorUniforms>.stride)
-        }
+        // Copy via a temporary pointer (avoids overlapping access diagnostics in Swift 6).
+        let ptr = UnsafeMutablePointer<GLImpostorUniforms>.allocate(capacity: 1)
+        ptr.initialize(to: U)
+        stream.writeBytes(UnsafeRawPointer(ptr), count: MemoryLayout<GLImpostorUniforms>.stride)
+        ptr.deinitialize(count: 1)
+        ptr.deallocate()
     }
 
-    // Per-node: model matrix for vertex transform.
+    // Per-node: model matrix for vertex transform in the program’s vertex function.
     @objc static func bindModel(_ stream: SCNBufferStream,
                                 node: SCNNode?,
                                 shadable: SCNShadable?,
                                 renderer: SCNRenderer)
     {
-        let M = NodeModel(modelTransform: (node?.presentation ?? node ?? SCNNode()).simdWorldTransform)
-        withUnsafeBytes(of: M) { raw in
-            guard let base = raw.baseAddress else { return }
-            stream.writeBytes(base, count: MemoryLayout<NodeModel>.stride)
-        }
+        let (_, _, model) = unsafeReadNodeState(node)
+        let M = NodeModel(modelTransform: model)
+
+        let ptr = UnsafeMutablePointer<NodeModel>.allocate(capacity: 1)
+        ptr.initialize(to: M)
+        stream.writeBytes(UnsafeRawPointer(ptr), count: MemoryLayout<NodeModel>.stride)
+        ptr.deinitialize(count: 1)
+        ptr.deallocate()
     }
 }
 
@@ -78,11 +97,11 @@ enum CloudImpostorProgram {
         prog.fragmentFunctionName = "cloud_impostor_fragment"
         prog.isOpaque = false
 
-        // Reuse the existing, stable dome binder for uCloudsGL (avoids the executor crash).
-        // VolCloudBinder lives in VolumetricCloudProgram.swift and already streams GLCloudUniforms.
+        // Reuse the already-stable per-frame binder for the vapour uniforms.
+        // (Lives in VolumetricCloudProgram.swift)
         prog.handleBinding(ofBufferNamed: "uCloudsGL", frequency: .perFrame, handler: VolCloudBinder.bind)
 
-        // Our per-node binders:
+        // Our per-node binders. These no longer touch SCNNode APIs outside of an `assumeIsolated` block.
         prog.handleBinding(ofBufferNamed: "uImpostor", frequency: .perNode,  handler: CloudImpostorBinder.bindImpostor)
         prog.handleBinding(ofBufferNamed: "uModel",    frequency: .perNode,  handler: CloudImpostorBinder.bindModel)
 
@@ -98,3 +117,4 @@ enum CloudImpostorProgram {
         return m
     }
 }
+
