@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/6/25.
 //
-//  Direct sun response + cloud shadow projection (gobo via modulated shadows).
-//  NOTE: No @MainActor here — SceneKit drives these on its render queue.
+//  Sun control + GPU cloud-shadow texture generation.
+//  No modulated projector: ground darkens via a tiny shader-modifier.
 //
 
 import SceneKit
@@ -19,6 +19,7 @@ extension FirstPersonEngine {
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
+        // Cover → brightness envelope
         let cover = measureSunCover()
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
@@ -26,29 +27,20 @@ extension FirstPersonEngine {
         let E = E_prev + (E_now - E_prev) * k
         sunNode.setValue(E, forKey: "GL_prevIrradiance")
 
+        // Sun = only illuminant
+        sun.intensity = 1500 * max(0.06, E)
         let D = max(0.0, 1.0 - E)
-        let thickF = CGFloat(smoothstep(0.82, 0.97, cover.union))
-
-        let baseIntensity: CGFloat = 1500
-        sun.intensity = baseIntensity * max(0.06, E)
-
-        let penClear: CGFloat = 0.35
-        let penCloudBase: CGFloat = 13.0
-        let penCloud = penCloudBase + 3.0 * thickF
-        sun.shadowRadius = penClear + (penCloud - penClear) * D
+        let pen: CGFloat = 0.35 + (13.0 - 0.35) * D
+        sun.shadowRadius = pen
         sun.shadowSampleCount = max(1, Int(round(2 + D * 16)))
+        sun.shadowColor = UIColor(white: 0.0, alpha: 0.65 + 0.2 * D)
 
-        let alphaClear: CGFloat = 0.82
-        let alphaSoftFloor: CGFloat = 0.28
-        let alphaThickFloor: CGFloat = 0.06
-        let floorA = mix(alphaSoftFloor, alphaThickFloor, thickF)
-        let a = alphaClear + (floorA - alphaClear) * D
-        sun.shadowColor = UIColor(white: 0.0, alpha: a)
-
+        // No sky fill
         if let skyFill = scene.rootNode.childNode(withName: "GL_SkyFill", recursively: false)?.light {
             skyFill.intensity = 0
         }
 
+        // Halo
         if let sunGroup = sunDiscNode,
            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
            let haloMat = halo.geometry?.firstMaterial {
@@ -60,22 +52,18 @@ extension FirstPersonEngine {
             halo.isHidden = D <= 1e-3
         }
 
-        ensureCloudShadowProjector()
-        updateCloudShadowTextureAndProject()
+        ensureCloudShadowComputer()
+        updateCloudShadowTextureAndApplyToGround()
     }
 
     private func measureSunCover() -> (peak: Float, union: Float) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
-            return (0.0, 0.0)
-        }
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return (0,0) }
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let cam = pov.simdWorldPosition
         let sunW = simd_normalize(sunDirWorld)
         let sunR: Float = degreesToRadians(6.0) * 0.5
         let feather: Float = 0.15 * (.pi / 180.0)
-
-        var peak: Float = 0.0
-        var oneMinus: Float = 1.0
+        var peak: Float = 0.0, oneMinus: Float = 1.0
 
         layer.enumerateChildNodes { node, _ in
             guard let plane = node.geometry as? SCNPlane else { return }
@@ -83,12 +71,10 @@ extension FirstPersonEngine {
             let toP = simd_normalize(pw - cam)
             let cosAng = simd_clamp(simd_dot(sunW, toP), -1.0, 1.0)
             let dAngle = acosf(cosAng)
-            let dist: Float = simd_length(pw - cam)
-            if dist <= 1e-3 { return }
+            let dist: Float = simd_length(pw - cam); if dist <= 1e-3 { return }
             let size: Float = Float(plane.width)
             let puffR: Float = atanf((size * 0.30) / max(1e-3, dist))
-            let overlap = (puffR + sunR + feather) - dAngle
-            if overlap <= 0 { return }
+            let overlap = (puffR + sunR + feather) - dAngle; if overlap <= 0 { return }
             let denom = max(1e-3, puffR + sunR + feather)
             var t = max(0.0, min(1.0, overlap / denom))
             let angArea = min(1.0, (puffR * puffR) / (sunR * sunR))
@@ -96,28 +82,18 @@ extension FirstPersonEngine {
             peak = max(peak, t)
             oneMinus *= max(0.0, 1.0 - min(0.98, t))
         }
-
-        let union = 1.0 - oneMinus
-        return ((peak < 0.01) ? 0.0 : peak, min(1.0, union))
+        return (peak < 0.01 ? 0 : peak, min(1.0, 1.0 - oneMinus))
     }
 
-    @inline(__always) private func degreesToRadians(_ deg: Float) -> Float { deg * .pi / 180.0 }
-    @inline(__always) private func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
-        if e0 == e1 { return x >= e1 ? 1 : 0 }
-        let t = max(0, min(1, (x - e0) / (e1 - e0)))
-        return t * t * (3 - 2 * t)
-    }
-    @inline(__always) private func mix(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
+    @inline(__always) private func degreesToRadians(_ d: Float) -> Float { d * .pi / 180.0 }
 }
 
-// MARK: - Cloud shadow generation + projection (modulated)
+// MARK: - Cloud shadow texture (compute) → applied in ground shader
 
-private final class CloudShadowRenderer {
-    private weak var engine: FirstPersonEngine?
-    private let device: MTLDevice
+private final class CloudShadowComputer {
     private let queue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
-    private var tex: MTLTexture
+    private(set) var texture: MTLTexture
 
     private struct CloudUniforms {
         var sunDirWorld : SIMD4<Float>
@@ -133,40 +109,30 @@ private final class CloudShadowRenderer {
         var pad0     : Float
     }
 
-    init?(engine: FirstPersonEngine, device: MTLDevice) {
-        self.engine = engine
-        self.device = device
+    init?(device: MTLDevice) {
         guard let q = device.makeCommandQueue(),
               let lib = device.makeDefaultLibrary(),
               let fn  = lib.makeFunction(name: "cloudShadowKernel"),
               let ps  = try? device.makeComputePipelineState(function: fn) else { return nil }
-        self.queue = q
-        self.pipeline = ps
-
-        let desc = MTLTextureDescriptor()
-        desc.pixelFormat = .rgba8Unorm
-        desc.width  = 1024
-        desc.height = 1024
-        desc.usage  = [.shaderWrite, .shaderRead]
-        guard let t = device.makeTexture(descriptor: desc) else { return nil }
-        self.tex = t
+        queue = q; pipeline = ps
+        let d = MTLTextureDescriptor()
+        d.pixelFormat = .rgba8Unorm; d.width = 768; d.height = 768   // smaller = cheaper
+        d.usage = [.shaderWrite, .shaderRead]
+        guard let t = device.makeTexture(descriptor: d) else { return nil }
+        texture = t
     }
 
-    var texture: MTLTexture { tex }
-
-    func update(from mat: SCNMaterial, centerXZ: SIMD2<Float>, halfSize: Float, time: Float) {
+    func update(using mat: SCNMaterial, sunDir: SIMD3<Float>, centerXZ: SIMD2<Float>, halfSize: Float, time: Float) {
         guard let cmd = queue.makeCommandBuffer(),
               let enc = cmd.makeComputeCommandEncoder() else { return }
-
         enc.setComputePipelineState(pipeline)
-        enc.setTexture(tex, index: 0)
+        enc.setTexture(texture, index: 0)
 
         func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
         func v3(_ v: Any?) -> SIMD3<Float> {
-            if let v = v as? SCNVector3 { return SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z)) }
+            if let s = v as? SCNVector3 { return SIMD3(Float(s.x), Float(s.y), Float(s.z)) }
             return .zero
         }
-
         let wind      = v3(mat.value(forKey: "wind"))
         let baseY     = f(mat.value(forKey: "baseY"))
         let topY      = f(mat.value(forKey: "topY"))
@@ -178,12 +144,10 @@ private final class CloudShadowRenderer {
         let detailMul = f(mat.value(forKey: "detailMul"))
         let domOff3   = v3(mat.value(forKey: "domainOffset"))
         let domRot    = f(mat.value(forKey: "domainRotate"))
-        let sunW3     = v3(mat.value(forKey: "sunDirWorld"))
-        let sunTint3  = v3(mat.value(forKey: "sunTint"))
 
         var U = CloudUniforms(
-            sunDirWorld: SIMD4<Float>(normalize(SIMD3<Float>(sunW3)), 0),
-            sunTint    : SIMD4<Float>(sunTint3, 0),
+            sunDirWorld: SIMD4<Float>(normalize(sunDir), 0),
+            sunTint    : SIMD4<Float>(1,1,1,0),
             params0    : SIMD4<Float>( time, wind.x, wind.y, baseY ),
             params1    : SIMD4<Float>( topY, coverage, max(0, density), 1.0 ),
             params2    : SIMD4<Float>( mieG, max(0, powderK), horizon, max(0, detailMul) ),
@@ -196,84 +160,85 @@ private final class CloudShadowRenderer {
 
         let w = pipeline.threadExecutionWidth
         let h = pipeline.maxTotalThreadsPerThreadgroup / w
-        let tg = MTLSize(width: w, height: h, depth: 1)
-        let grid = MTLSize(width: tex.width, height: tex.height, depth: 1)
-        enc.dispatchThreads(grid, threadsPerThreadgroup: tg)
-        enc.endEncoding()
-        cmd.commit()
+        enc.dispatchThreads(MTLSize(width: texture.width, height: texture.height, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        enc.endEncoding(); cmd.commit()
     }
 }
 
-private var _cloudShadowRenderer: CloudShadowRenderer?
-private var _cloudShadowNode: SCNNode?
+private var _shadowComputer: CloudShadowComputer?
 
 private extension FirstPersonEngine {
 
-    func ensureCloudShadowProjector() {
-        if _cloudShadowRenderer == nil {
-            // iOS devices expose a single Metal device; safe to use default here.
-            guard let dev = MTLCreateSystemDefaultDevice() else { return }
-            _cloudShadowRenderer = CloudShadowRenderer(engine: self, device: dev)
-        }
-        if _cloudShadowNode == nil {
-            let L = SCNLight()
-            L.type = .directional
-            L.castsShadow = true
-            L.shadowMode = .modulated
-            L.shadowMapSize = CGSize(width: 1024, height: 1024)
-            L.shadowSampleCount = 1
-            L.shadowRadius = 0
-            L.shadowColor = UIColor(white: 0, alpha: 1.0)
-            L.intensity = 0
-            L.orthographicScale = 2400.0
-            L.zNear = 0.1
-            L.zFar  = 20000
-            L.automaticallyAdjustsShadowProjection = false
-            L.categoryBitMask = 0x0000_0400
-            if let g = L.gobo {
-                g.wrapS = .clamp
-                g.wrapT = .clamp
-                g.mipFilter = .linear
-                g.minificationFilter = .linear
-                g.magnificationFilter = .linear
-                g.intensity = 1.0
-            }
-            let node = SCNNode()
-            node.name = "GL_CloudShadows"
-            node.light = L
-            node.categoryBitMask = 0x0000_0400
-            scene.rootNode.addChildNode(node)
-            _cloudShadowNode = node
-        }
-
-        if let node = _cloudShadowNode {
-            let dir = -sunDirWorld
-            let origin = yawNode.presentation.position
-            node.position = origin
-            let target = SCNVector3(origin.x + dir.x, origin.y + dir.y, origin.z + dir.z)
-            node.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0,0,-1))
+    func ensureCloudShadowComputer() {
+        if _shadowComputer == nil, let dev = MTLCreateSystemDefaultDevice() {
+            _shadowComputer = CloudShadowComputer(device: dev)
         }
     }
 
-    func updateCloudShadowTextureAndProject() {
-        guard let proj = _cloudShadowNode?.light,
-              let renderer = _cloudShadowRenderer else { return }
+    // Small fragment modifier that multiplies ground albedo by cloud shadow
+    static let groundShadowFrag: String = """
+    #pragma arguments
+    texture2d<float> gl_cloudShadowTex;
+    float gl_shadowCenterX;
+    float gl_shadowCenterZ;
+    float gl_shadowHalfSize;
+    float gl_shadowStrength;  // 0..1
+    #pragma body
+    float2 xz = _surface.position.xz;
+    float2 uv = float2(
+        ( (xz.x - gl_shadowCenterX) / gl_shadowHalfSize ) * 0.5 + 0.5,
+        ( (xz.y - gl_shadowCenterZ) / gl_shadowHalfSize ) * 0.5 + 0.5
+    );
+    if (uv.x>=0.0 && uv.x<=1.0 && uv.y>=0.0 && uv.y<=1.0) {
+        constexpr sampler s(address::clamp_to_edge, filter::linear);
+        float sh = gl_cloudShadowTex.sample(s, uv).r;      // 1=sun, 0=shadow
+        float m = mix(1.0, sh, clamp(gl_shadowStrength,0.0,1.0));
+        _output.color.rgb *= m;
+    }
+    """
 
-        guard let cloudMat = scene.rootNode
-            .childNode(withName: "VolumetricCloudLayer", recursively: true)?
-            .geometry?.firstMaterial else { return }
+    func updateCloudShadowTextureAndApplyToGround() {
+        guard let comp = _shadowComputer else { return }
+
+        // Source of cloud params (same as volumetric layer)
+        guard let cloudMat = (skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
+                               ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false))?
+                .geometry?.firstMaterial else { return }
 
         let pos = (scnView?.pointOfView ?? camNode).presentation.simdWorldPosition
         let centerXZ = SIMD2<Float>(pos.x, pos.z)
-        let halfSize: Float = 1200
-        proj.orthographicScale = CGFloat(halfSize * 2)
+        let halfSize: Float = 1000
 
-        let t = Float(CACurrentMediaTime())
-        renderer.update(from: cloudMat, centerXZ: centerXZ, halfSize: halfSize, time: t)
+        comp.update(using: cloudMat,
+                    sunDir: sunDirWorld,
+                    centerXZ: centerXZ,
+                    halfSize: halfSize,
+                    time: Float(CACurrentMediaTime()))
 
-        if let gobo = proj.gobo {
-            gobo.contents = renderer.texture
-            gobo.intensity = 1.0
+        // Apply to every ground material (category 0x0400)
+        scene.rootNode.enumerateChildNodes { node, _ in
+            guard (node.categoryBitMask & 0x0000_0400) != 0,
+                  let g = node.geometry else { return }
+
+            for m in g.materials {
+                // Install once
+                if m.value(forKey: "GL_shadowInstalled") == nil {
+                    var mods = m.shaderModifiers ?? [:]
+                    let old = mods[.fragment] ?? ""
+                    mods[.fragment] = old + FirstPersonEngine.groundShadowFrag
+                    m.shaderModifiers = mods
+                    m.setValue(true, forKey: "GL_shadowInstalled")
+                    m.setValue(0.85 as CGFloat, forKey: "gl_shadowStrength")
+                }
+                // Bind texture + mapping
+                let mp = (m.value(forKey: "gl_cloudShadowTex") as? SCNMaterialProperty) ?? SCNMaterialProperty(contents: comp.texture)
+                mp.contents = comp.texture
+                m.setValue(mp, forKey: "gl_cloudShadowTex")
+                m.setValue(CGFloat(centerXZ.x), forKey: "gl_shadowCenterX")
+                m.setValue(CGFloat(centerXZ.y), forKey: "gl_shadowCenterZ")
+                m.setValue(CGFloat(halfSize),   forKey: "gl_shadowHalfSize")
+            }
         }
     }
 }
