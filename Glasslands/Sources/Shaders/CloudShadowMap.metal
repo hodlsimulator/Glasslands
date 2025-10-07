@@ -10,7 +10,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-static constant float kPI = 3.14159265358979323846f;
 inline float clamp01(float x){ return clamp(x, 0.0f, 1.0f); }
 inline float lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float frac(float x){ return x - floor(x); }
