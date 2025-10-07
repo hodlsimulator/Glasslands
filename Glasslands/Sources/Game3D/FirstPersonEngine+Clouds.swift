@@ -23,34 +23,21 @@ extension FirstPersonEngine {
         coverage: CGFloat = 0.42,
         horizonLift: CGFloat = 0.14
     ) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
-
-        let fragment: String? = on ? {
-            let mat = CloudBillboardMaterial.makeVolumetricImpostor()
-            let frag = mat.shaderModifiers?[.fragment] ?? ""
-            return CloudBillboardMaterial.volumetricMarker + frag
-        }() : nil
-
-        let pov = (scnView?.pointOfView ?? camNode).presentation
-        let invView = simd_inverse(pov.simdWorldTransform)
-        let s4 = invView * simd_float4(simd_normalize(sunDirWorld), 0)
-        let s = simd_normalize(simd_float3(s4.x, s4.y, s4.z))
-        let sunViewV = SCNVector3(s.x, s.y, s.z)
-        let tintV   = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return
+        }
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
             for m in g.materials {
-                var mods = m.shaderModifiers ?? [:]
-                mods[.fragment] = fragment
-                m.shaderModifiers = mods
                 if on {
-                    m.setValue(sunViewV, forKey: "sunDirView")
-                    m.setValue(tintV,   forKey: "sunTint")
-                    m.setValue(coverage, forKey: "coverage")
-                    m.setValue(vapour,   forKey: "densityMul")
-                    m.setValue(0.95 as CGFloat, forKey: "stepMul")
-                    m.setValue(horizonLift, forKey: "horizonLift")
+                    let newMat = CloudBillboardMaterial.makeVolumetricImpostor()
+                    // Preserve whatever diffuse was there; program ignores it but keeps sharing sane.
+                    newMat.diffuse.contents = m.diffuse.contents
+                    node.geometry?.firstMaterial = newMat
+                } else {
+                    m.program = nil
+                    m.shaderModifiers = nil
                 }
             }
         }

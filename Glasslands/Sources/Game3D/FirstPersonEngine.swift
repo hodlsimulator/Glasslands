@@ -134,7 +134,20 @@ final class FirstPersonEngine: NSObject {
         buildSky()
         apply(recipe: recipe, force: true)
 
-        self.useScatteredVolumetricCumulus()
+        // Keep the volumetric dome, but make it scattered cumulus.
+        self.useScatteredVolumetricCumulus(
+            coverage: 0.44, densityMul: 1.20, stepMul: 0.88,
+            macroScale: 0.00044, macroThreshold: 0.62
+        )
+
+        // Build the five-band billboards, then swap them to the volumetric impostor.
+        CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), clusterCount: 140, seed: cloudSeed) { [weak self] root in
+            guard let self else { return }
+            root.eulerAngles.y = cloudInitialYaw
+            self.skyAnchor.addChildNode(root)
+            self.enableVolumetricCloudImpostors(true)   // ← program-based impostors
+            self.prewarmCloudImpostorPipelines()
+        }
     }
 
     func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }
