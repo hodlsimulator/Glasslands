@@ -17,24 +17,27 @@ extension FirstPersonEngine {
 
     // MARK: - Volumetric cloud impostors
     @MainActor
-    func enableVolumetricCloudImpostors(
-        _ on: Bool,
-        vapour: CGFloat = 0,       // ignored now (was for old path)
-        coverage: CGFloat = 0,     // ignored (use store)
-        horizonLift: CGFloat = 0   // ignored (use store)
-    ) {
+    func enableVolumetricCloudImpostors(_ on: Bool) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
 
             if on {
-                let newMat = CloudBillboardMaterial.makeVolumetricImpostor()
-                // Force a valid diffuse (shader ignores it).
-                newMat.diffuse.contents = UIColor.white
-                g.firstMaterial = newMat
+                // World slab thickness proportional to the quad size (safe for SCNPlane).
+                var slabHalf: Float = 1.0
+                if let p = g as? SCNPlane {
+                    slabHalf = Float(max(p.width, p.height)) * 0.6
+                } else {
+                    let bb = g.boundingBox
+                    slabHalf = Float(max(bb.max.x - bb.min.x, bb.max.y - bb.min.y)) * 0.6
+                }
+
+                let m = CloudBillboardMaterial.makeVolumetricImpostor(defaultSlabHalf: slabHalf)
+                m.diffuse.contents = UIColor.white
+                g.firstMaterial = m
             } else {
-                g.materials.forEach { m in
+                for m in g.materials {
                     m.shaderModifiers = nil
                     m.setValue(nil, forKey: "vapourTag")
                 }

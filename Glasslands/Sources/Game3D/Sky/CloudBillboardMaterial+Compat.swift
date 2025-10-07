@@ -4,17 +4,18 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Compatibility layer so older call sites using
-//  CloudBillboardMaterial.makeCurrent() keep working.
+//  Keeps older call sites working by forwarding to the slab-half API.
 //
 
 import SceneKit
-import UIKit
+import simd
 
 extension CloudBillboardMaterial {
+    /// Historical entry point used by factories. Returns a volumetric impostor
+    /// with a safe default world slab half-thickness. The real per-node value
+    /// is set later by `enableVolumetricCloudImpostors(true)`.
     @MainActor
     static func makeCurrent() -> SCNMaterial {
-        // Route to the current implementation used in our project.
-        return makeVolumetricImpostor()
+        makeVolumetricImpostor(defaultSlabHalf: 0.6)
     }
 }
