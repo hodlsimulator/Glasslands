@@ -27,21 +27,7 @@ private struct NodeModel {
 
 @objc final class CloudImpostorBinder: NSObject {
 
-    // Per-frame: GLCloudUniforms (comes from VolCloudUniformsStore.shared).
-    @objc static func bindClouds(_ stream: SCNBufferStream,
-                                 node: SCNNode?,
-                                 shadable: SCNShadable?,
-                                 renderer: SCNRenderer)
-    {
-        let U = VolCloudUniformsStore.shared.snapshot()
-        let byteCount = MemoryLayout<GLCloudUniforms>.stride
-        withUnsafeBytes(of: U) { raw in
-            guard let base = raw.baseAddress else { return }
-            stream.writeBytes(base, count: byteCount)
-        }
-    }
-
-    // Per-node: impostor sphere placement.
+    // Per-node: impostor sphere placement (centre/radius/soft edge).
     @objc static func bindImpostor(_ stream: SCNBufferStream,
                                    node: SCNNode?,
                                    shadable: SCNShadable?,
@@ -65,24 +51,22 @@ private struct NodeModel {
                                    soften: 0.18,
                                    pad: 0)
 
-        let byteCount = MemoryLayout<GLImpostorUniforms>.stride
         withUnsafeBytes(of: U) { raw in
             guard let base = raw.baseAddress else { return }
-            stream.writeBytes(base, count: byteCount)
+            stream.writeBytes(base, count: MemoryLayout<GLImpostorUniforms>.stride)
         }
     }
 
-    // Per-node: model matrix for vertex transform (since SCNNodeBuffer isn’t a thing in SCNProgram).
+    // Per-node: model matrix for vertex transform.
     @objc static func bindModel(_ stream: SCNBufferStream,
                                 node: SCNNode?,
                                 shadable: SCNShadable?,
                                 renderer: SCNRenderer)
     {
         let M = NodeModel(modelTransform: (node?.presentation ?? node ?? SCNNode()).simdWorldTransform)
-        let byteCount = MemoryLayout<NodeModel>.stride
         withUnsafeBytes(of: M) { raw in
             guard let base = raw.baseAddress else { return }
-            stream.writeBytes(base, count: byteCount)
+            stream.writeBytes(base, count: MemoryLayout<NodeModel>.stride)
         }
     }
 }
@@ -94,8 +78,11 @@ enum CloudImpostorProgram {
         prog.fragmentFunctionName = "cloud_impostor_fragment"
         prog.isOpaque = false
 
-        // Match the Metal argument names.
-        prog.handleBinding(ofBufferNamed: "uCloudsGL", frequency: .perFrame, handler: CloudImpostorBinder.bindClouds)
+        // Reuse the existing, stable dome binder for uCloudsGL (avoids the executor crash).
+        // VolCloudBinder lives in VolumetricCloudProgram.swift and already streams GLCloudUniforms.
+        prog.handleBinding(ofBufferNamed: "uCloudsGL", frequency: .perFrame, handler: VolCloudBinder.bind)
+
+        // Our per-node binders:
         prog.handleBinding(ofBufferNamed: "uImpostor", frequency: .perNode,  handler: CloudImpostorBinder.bindImpostor)
         prog.handleBinding(ofBufferNamed: "uModel",    frequency: .perNode,  handler: CloudImpostorBinder.bindModel)
 

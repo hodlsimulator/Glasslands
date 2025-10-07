@@ -136,8 +136,11 @@ final class FirstPersonEngine: NSObject {
 
         // Keep the volumetric dome, but make it scattered cumulus.
         self.useScatteredVolumetricCumulus(
-            coverage: 0.44, densityMul: 1.20, stepMul: 0.88,
-            macroScale: 0.00044, macroThreshold: 0.62
+            coverage: 0.42,
+            densityMul: 1.15,
+            stepMul: 0.86,
+            macroScale: 0.00044,
+            macroThreshold: 0.62
         )
 
         // Build the five-band billboards, then swap them to the volumetric impostor.
