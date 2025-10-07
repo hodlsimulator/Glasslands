@@ -58,41 +58,37 @@ extension FirstPersonEngine {
     // Called by RendererProxy each frame
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
-        // --- Stable frame delta (render thread timestamp) ---
         struct AdvectClock { static var last: TimeInterval = 0 }
         let rawDt = (AdvectClock.last == 0) ? 1.0/60.0 : max(0, t - AdvectClock.last)
         AdvectClock.last = t
         let dt: Float = Float(min(1.0/20.0, max(1.0/180.0, rawDt)))
 
-        // --- Volumetric uniforms (unchanged behaviour) ---
-        guard let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
-            ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
-              let m = sphere.geometry?.firstMaterial
+        guard
+            let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
+                ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
+            let m = sphere.geometry?.firstMaterial
         else {
-            // Even if the sphere isn't present yet, still advect billboards.
             advectAllCloudBillboards(dt: dt)
             return
         }
 
+        // Drive uniforms the shader-modifier reads
         m.setValue(CGFloat(t), forKey: "time")
 
-        // Keep sun in view-space for lighting punch.
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let invView = simd_inverse(pov.simdWorldTransform)
         let sunView4 = invView * simd_float4(sunDirWorld, 0)
-        let sunView  = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-        m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
-        m.setValue(SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z), forKey: "sunDirWorld")
+        let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
 
-        // Slow one-direction drift + per-session formation offset.
+        m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView") // kept for billboards if reused
+        m.setValue(SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z), forKey: "sunDirWorld")
         m.setValue(SCNVector3(cloudWind.x, cloudWind.y, 0), forKey: "wind")
         m.setValue(SCNVector3(cloudDomainOffset.x, cloudDomainOffset.y, 0), forKey: "domainOffset")
         m.setValue(0.0 as CGFloat, forKey: "domainRotate")
-        VolumetricCloudProgram.updateUniforms(from: m)
 
-        // --- Billboard conveyor: move *every* cloud, every frame ---
+        // Billboard conveyor
         advectAllCloudBillboards(dt: dt)
-    }
+    } 
 
     // MARK: - Billboard advection (covers every possible parentage)
     @MainActor

@@ -4,14 +4,13 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  Inside‑out sphere that runs the volumetric cloud SCNProgram.
+//  Inside-out sphere that runs the binder-free volumetric cloud material.
 //
 
 import SceneKit
 import UIKit
 
 enum VolumetricCloudLayer {
-
     @MainActor
     static func make(
         radius: CGFloat,
@@ -22,21 +21,20 @@ enum VolumetricCloudLayer {
         let sphere = SCNSphere(radius: max(10, radius * 0.98))
         sphere.segmentCount = 96
 
-        // Program-backed material for volumetric clouds.
-        let mat = VolumetricCloudProgram.makeMaterial()
+        // Binder-free material (no SCNProgram, no closures)
+        let mat = VolumetricCloudMaterial.makeMaterial()
 
-        // Baseline bounds/coverage.
-        mat.setValue(baseY,    forKey: "baseY")
-        mat.setValue(topY,     forKey: "topY")
-        mat.setValue(coverage, forKey: "coverage")
+        // Baseline params
+        mat.setValue(baseY,          forKey: "baseY")
+        mat.setValue(topY,           forKey: "topY")
+        mat.setValue(coverage,       forKey: "coverage")
 
-        // <<< The tuning you asked about goes here >>>
-        mat.setValue(0.60 as CGFloat, forKey: "mieG")        // forward scattering
-        mat.setValue(2.20 as CGFloat, forKey: "powderK")     // edge “pop”
-        mat.setValue(1.15 as CGFloat, forKey: "densityMul")  // overall vapour
-        mat.setValue(0.90 as CGFloat, forKey: "stepMul")     // quality/perf
-        mat.setValue(1.10 as CGFloat, forKey: "detailMul")   // cauliflower detail
-        // <<< end >>>
+        // Tunables (can be tweaked live)
+        mat.setValue(0.60 as CGFloat, forKey: "mieG")
+        mat.setValue(2.20 as CGFloat, forKey: "powderK")
+        mat.setValue(1.15 as CGFloat, forKey: "densityMul")
+        mat.setValue(0.90 as CGFloat, forKey: "stepMul")
+        mat.setValue(1.10 as CGFloat, forKey: "detailMul")
 
         sphere.firstMaterial = mat
 
