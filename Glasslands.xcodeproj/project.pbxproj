@@ -48,6 +48,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Sources/App/Info.plist,
+				Sources/Game3D/Sky/CloudImpostorProgram.swift,
+				Sources/Shaders/CloudImpostorVolumetric.metal,
 			);
 			target = E172D7F22E8A566700B2B817 /* Glasslands */;
 		};

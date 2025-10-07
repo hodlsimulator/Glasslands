@@ -134,6 +134,11 @@ final class FirstPersonEngine: NSObject {
         buildSky()
         apply(recipe: recipe, force: true)
 
+        // Remove billboards completely (no 2D shapes).
+        removeCloudBillboards()
+        enableVolumetricCloudImpostors(false)
+
+        // Keep only the true volumetric vapour, tuned for scattered cumulus.
         self.useScatteredVolumetricCumulus(
             coverage: 0.36,
             densityMul: 1.05,
@@ -145,15 +150,6 @@ final class FirstPersonEngine: NSObject {
             macroScale: 0.00040,
             macroThreshold: 0.62
         )
-
-        // Build the five-band billboards, then swap them to the volumetric impostor.
-        CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), clusterCount: 140, seed: cloudSeed) { [weak self] root in
-            guard let self else { return }
-            root.eulerAngles.y = cloudInitialYaw
-            self.skyAnchor.addChildNode(root)
-            self.enableVolumetricCloudImpostors(true)   // ← program-based impostors
-            self.prewarmCloudImpostorPipelines()
-        }
     }
 
     func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }

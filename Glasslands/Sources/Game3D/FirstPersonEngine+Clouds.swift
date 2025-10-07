@@ -385,4 +385,15 @@ extension FirstPersonEngine {
         // Prefer the true volumetric layer; disable impostor billboards.
         enableVolumetricCloudImpostors(false)
     }
+    
+    @MainActor
+    func removeCloudBillboards() {
+        if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
+            layer.removeFromParentNode()
+        }
+        cloudLayerNode = nil
+        cloudBillboardNodes.removeAll()
+        cloudClusterGroups.removeAll()
+        cloudClusterCentroidLocal.removeAll()
+    }
 }
