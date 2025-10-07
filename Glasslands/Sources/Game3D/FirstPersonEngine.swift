@@ -134,13 +134,11 @@ final class FirstPersonEngine: NSObject {
         buildSky()
         apply(recipe: recipe, force: true)
 
-        // Keep the volumetric dome, but make it scattered cumulus.
-        // After buildSky()
         self.useScatteredVolumetricCumulus(
-            coverage: 0.36,     // less overcast (was ~0.42)
-            densityMul: 1.05,   // a touch lighter
+            coverage: 0.36,
+            densityMul: 1.05,
             stepMul: 0.82,
-            horizonLift: 0.10,// fewer steps → faster
+            horizonLift: 0.10,
             detailMul: 0.90,
             puffScale: 0.0048,
             puffStrength: 0.62,

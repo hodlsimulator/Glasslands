@@ -29,17 +29,8 @@ extension FirstPersonEngine {
             guard let g = node.geometry else { return }
 
             if on {
-                var half: simd_float2 = .init(1, 1)
-
-                if let p = g as? SCNPlane {
-                    half = simd_float2(Float(p.width * 0.5), Float(p.height * 0.5))
-                } else {
-                    let bb = g.boundingBox
-                    half = simd_float2(Float((bb.max.x - bb.min.x) * 0.5),
-                                       Float((bb.max.y - bb.min.y) * 0.5))
-                }
-
-                let newMat = CloudImpostorProgram.makeMaterial(halfSize: half)
+                // Stable analytic material (no SCNProgram) – safe while dome supplies true vapour.
+                let newMat = CloudBillboardMaterial.makeVolumetricImpostor()
                 if let old = g.firstMaterial?.diffuse.contents {
                     newMat.diffuse.contents = old
                 }
@@ -53,7 +44,8 @@ extension FirstPersonEngine {
             }
         }
 
-        if on { prewarmCloudImpostorPipelines() }
+        // Important: DO NOT prewarm here (it tickles SCNProgram lifetime paths).
+        // if on { prewarmCloudImpostorPipelines() }
     }
 
     @MainActor
