@@ -81,35 +81,17 @@ extension FirstPersonEngine {
             _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1)
         }
 
-        // Simple dynamic quality
-        let rawDt: TimeInterval = (AdvectClock.last == 0) ? (1.0/60.0) : max(0, t - AdvectClock.last)
-        AdvectClock.last = t
-        let fps = 1.0 / max(1e-6, rawDt)
-        let prevQ = VolCloudUniformsStore.shared.snapshot().params4.y
-        var q = prevQ
-        if fps < 55 { q -= 0.05 } else if fps > 60.5 { q += 0.02 }
-        q = max(0.40, min(0.85, q))     // clamp to a safe band that still looks good
-
-        let sunW = simd_normalize(sunDirWorld)
+        // Fixed fast path: no dynamic quality adjustments (keeps cost predictable)
         VolCloudUniformsStore.shared.update(
             time: Float(t),
-            sunDirWorld: sunW,
+            sunDirWorld: simd_normalize(sunDirWorld),
             wind: cloudWind,
-            domainOffset: cloudDomainOffset,
-            domainRotate: 0,
-            baseY: 400, topY: 1400,
-            coverage: 0.62,        // a touch higher so base density survives gates
-            densityMul: 1.25,      // pairs with shader sigma 0.028
-            stepMul: 0.75,         // shader controls most of the budget
-            mieG: 0.60,
-            powderK: 1.80,
-            horizonLift: 0.12,
-            detailMul: 1.00,
-            puffScale: 0.0048,
-            puffStrength: 0.62,
-            quality: q
+            domainOffset: cloudDomainOffset
         )
 
+        // Keep billboard conveyor ticking if any distant fallbacks are used elsewhere.
+        let rawDt: TimeInterval = (AdvectClock.last == 0) ? (1.0/60.0) : max(0, t - AdvectClock.last)
+        AdvectClock.last = t
         let dt: Float = Float(min(1.0/30.0, max(1.0/180.0, rawDt)))
         advectAllCloudBillboards(dt: dt)
     }

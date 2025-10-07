@@ -31,10 +31,10 @@ final class VolCloudUniformsStore {
             sunDirWorld: SIMD4(0, 1, 0, 0),
             sunTint:     SIMD4(1, 1, 1, 0),
             params0:     SIMD4(0, 0.60, 0.20, 400),
-            params1:     SIMD4(1400, 0.58, 1.25, 0.75), // coverage↑, density↑, steps slightly ↓
-            params2:     SIMD4(0.60, 1.80, 0.12, 1.00),
+            params1:     SIMD4(1400, 0.60, 1.20, 0.70), // coverage↑, density↑, steps↓
+            params2:     SIMD4(0.60, 1.60, 0.10, 0.90), // powder↓, horizon↓, detail↓
             params3:     SIMD4(0, 0, 0, 0.0048),
-            params4:     SIMD4(0.62, 0.55, 0, 0)        // puffStrength, quality
+            params4:     SIMD4(0.62, 0.45, 0, 0)        // puffStrength, quality fixed fast
         )
     }
 
@@ -45,29 +45,15 @@ final class VolCloudUniformsStore {
     func update(time: Float,
                 sunDirWorld: SIMD3<Float>,
                 wind: SIMD2<Float>,
-                domainOffset: SIMD2<Float>,
-                domainRotate: Float,
-                baseY: Float,
-                topY: Float,
-                coverage: Float,
-                densityMul: Float,
-                stepMul: Float,
-                mieG: Float,
-                powderK: Float,
-                horizonLift: Float,
-                detailMul: Float,
-                puffScale: Float,
-                puffStrength: Float,
-                quality: Float)
+                domainOffset: SIMD2<Float>)
     {
         os_unfair_lock_lock(&lock)
         u.sunDirWorld = SIMD4(simd_normalize(sunDirWorld), 0)
-        u.sunTint     = SIMD4(1, 1, 1, 0)
-        u.params0     = SIMD4(time, wind.x, wind.y, baseY)
-        u.params1     = SIMD4(topY, max(0.0, coverage), max(0, densityMul), max(0.25, stepMul))
-        u.params2     = SIMD4(mieG, max(0, powderK), horizonLift, max(0, detailMul))
-        u.params3     = SIMD4(domainOffset.x, domainOffset.y, domainRotate, max(0.0001, puffScale))
-        u.params4     = SIMD4(max(0, puffStrength), max(0.3, min(1.0, quality)), 0, 0)
+        u.params0.x = time
+        u.params0.y = wind.x
+        u.params0.z = wind.y
+        u.params3.x = domainOffset.x
+        u.params3.y = domainOffset.y
         os_unfair_lock_unlock(&lock)
     }
 }
