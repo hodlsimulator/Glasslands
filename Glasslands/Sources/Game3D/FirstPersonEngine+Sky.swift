@@ -55,9 +55,11 @@ extension FirstPersonEngine {
     @MainActor
     func applyCloudSunUniforms() {
         let sunW = simd_normalize(sunDirWorld)
-        let tintV = SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z)
 
-        // Billboards
+        // Hard, safe midday tint so nothing can go dark from a zero tint
+        let tintV = SCNVector3(1.0, 0.97, 0.92)
+
+        // Billboards (view-space sun dir + tint)
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             let pov = (scnView?.pointOfView ?? camNode).presentation
             let invView = simd_inverse(pov.simdWorldTransform)
@@ -70,33 +72,19 @@ extension FirstPersonEngine {
                 for m in g.materials {
                     m.setValue(sunViewV, forKey: "sunDirView")
                     m.setValue(tintV,    forKey: "sunTint")
-                    m.setValue(cloudHorizonFade, forKey: "horizonLift")
+                    m.setValue(0.06 as CGFloat, forKey: "edgeSoft")
+                    m.setValue(0.22 as CGFloat, forKey: "skyBackK")
+                    m.setValue(1.60 as CGFloat, forKey: "densityMul")
                 }
             }
         }
 
-        // Volumetric cloud sphere
-        if let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
-            ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
-           let m = sphere.geometry?.firstMaterial
-        {
-            let pov = (scnView?.pointOfView ?? camNode).presentation
-            let invView = simd_inverse(pov.simdWorldTransform)
-            let sunView4 = invView * simd_float4(sunW, 0)
-            let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-
-            m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
-            m.setValue(SCNVector3(sunW.x, sunW.y, sunW.z),          forKey: "sunDirWorld")
-            m.setValue(tintV, forKey: "sunTint")
-        }
-
-        // Sky (shader-modifier material, no SCNProgram binder)
+        // Physics sky (world sun dir + tint)
         if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: false),
-           let mat = sky.geometry?.firstMaterial
-        {
+           let mat = sky.geometry?.firstMaterial {
             mat.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
             mat.setValue(tintV, forKey: "sunTint")
-            // turbidity / mieG / exposure / horizonLift remain as set in SkyAtmosphereMaterial.make()
+            // exposure/turbidity can be adjusted elsewhere (day-night cycle)
         }
     } 
 
