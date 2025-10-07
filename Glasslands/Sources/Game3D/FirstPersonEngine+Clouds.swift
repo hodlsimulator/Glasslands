@@ -396,4 +396,19 @@ extension FirstPersonEngine {
             }
         }
     }
+    
+    @MainActor
+    func installVolumetricCloudsIfMissing(
+        baseY: CGFloat = 400,
+        topY: CGFloat = 1400,
+        coverage: CGFloat = 0.46
+    ) {
+        if skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false) == nil {
+            let r = CGFloat(cfg.skyDistance)
+            let n = VolumetricCloudLayer.make(radius: r, baseY: baseY, topY: topY, coverage: coverage)
+            skyAnchor.addChildNode(n)
+        }
+        // Prefer the true volumetric layer; disable impostor billboards.
+        enableVolumetricCloudImpostors(false)
+    }
 }

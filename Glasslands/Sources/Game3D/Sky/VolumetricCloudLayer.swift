@@ -4,7 +4,7 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  Inside-out sphere that runs the binder-free volumetric cloud material.
+//  Inside-out sphere that runs the volumetric vapour material.
 //
 
 import SceneKit
@@ -21,19 +21,16 @@ enum VolumetricCloudLayer {
         let sphere = SCNSphere(radius: max(10, radius * 0.98))
         sphere.segmentCount = 96
 
-        // Binder-free material (no SCNProgram, no closures)
         let mat = VolumetricCloudMaterial.makeMaterial()
+        mat.setValue(baseY,   forKey: "baseY")
+        mat.setValue(topY,    forKey: "topY")
+        mat.setValue(coverage,forKey: "coverage")
 
-        // Baseline params
-        mat.setValue(baseY,          forKey: "baseY")
-        mat.setValue(topY,           forKey: "topY")
-        mat.setValue(coverage,       forKey: "coverage")
-
-        // Tunables (can be tweaked live)
+        // Tunables suited to “solid white vapour”.
         mat.setValue(0.60 as CGFloat, forKey: "mieG")
-        mat.setValue(2.20 as CGFloat, forKey: "powderK")
+        mat.setValue(2.10 as CGFloat, forKey: "powderK")
         mat.setValue(1.15 as CGFloat, forKey: "densityMul")
-        mat.setValue(0.90 as CGFloat, forKey: "stepMul")
+        mat.setValue(0.85 as CGFloat, forKey: "stepMul")
         mat.setValue(1.10 as CGFloat, forKey: "detailMul")
 
         sphere.firstMaterial = mat
@@ -41,7 +38,7 @@ enum VolumetricCloudLayer {
         let node = SCNNode(geometry: sphere)
         node.name = "VolumetricCloudLayer"
         node.castsShadow = false
-        node.renderingOrder = -9_990
+        node.renderingOrder = -9_990     // after sky dome, before everything else
         return node
     }
 }
