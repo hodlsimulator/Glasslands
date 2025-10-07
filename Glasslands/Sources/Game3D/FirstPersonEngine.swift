@@ -133,6 +133,8 @@ final class FirstPersonEngine: NSObject {
         buildLighting()
         buildSky()
         apply(recipe: recipe, force: true)
+        
+        self.useScatteredVolumetricCumulus()
     }
 
     func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }
