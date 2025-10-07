@@ -4,10 +4,12 @@
 //
 //  Created by . . on 10/5/25.
 //
-// ULTRA FAST
-// True volumetric vapour with tiny puff cells, tuned for mobile FPS.
-// Inner loop uses half precision, 1-tap light probe, small step budget.
-// Premultiplied pure white; shading lives in alpha.
+//  ULTRA FAST
+//  True volumetric vapour with tiny puff cells, tuned for mobile FPS.
+//  Inner loop uses half precision, 1-tap light probe, small step budget.
+//  Premultiplied pure white; shading lives in alpha.
+//
+//  SCATTERED CUMULUS (fast)
 //
 
 #include <metal_stdlib>
@@ -23,7 +25,7 @@ struct GLCloudUniforms {
     float4 params1;       // x=topY, y=coverage, z=densityMul, w=stepMul
     float4 params2;       // x=mieG, y=powderK, z=horizonLift, w=detailMul
     float4 params3;       // x=domainOffX, y=domainOffY, z=domainRotate, w=puffScale
-    float4 params4;       // x=puffStrength, y=quality (0.3..1)
+    float4 params4;       // x=puffStrength, y=quality(fixed fast), z=macroScale, w=macroThreshold
 };
 
 struct GLVSIn  { float3 position [[ attribute(SCNVertexSemanticPosition) ]]; };
@@ -40,7 +42,7 @@ vertex GLVSOut gl_vapour_vertex(GLVSIn vin [[stage_in]],
     return o;
 }
 
-// ---- small inline helpers (keep cheap) ----
+// ---- small inline helpers ----
 inline float h1(float n){ return fract(sin(n) * 43758.5453123f); }
 inline float h12(float2 p){ return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123f); }
 
@@ -59,15 +61,14 @@ inline float noise3(float3 x) {
     return mix(nxy0, nxy1, f.z);
 }
 
-inline float fbm2(float3 p){ // 2 octaves
+inline float fbm2(float3 p){ // 2 octaves (cheap)
     float a = 0.0, w = 0.5;
     a += noise3(p) * w; p = p * 2.02 + 19.19; w *= 0.5;
     a += noise3(p) * w;
     return a;
 }
 
-// Cheap 2D Worley (F1) on XZ
-inline float worley2(float2 x){
+inline float worley2(float2 x){ // F1
     float2 i = floor(x), f = x - i;
     float d = 1e9;
     for (int y=-1; y<=1; ++y)
@@ -101,7 +102,7 @@ inline float phaseHG(float mu, float g){
     return (1.0 - g2) / max(1e-4, 4.0*kPI*pow(1.0 + g2 - 2.0*g*mu, 1.5));
 }
 
-// Density: 2-oct base, 2-oct micro-puffs, light erosion; friendly coverage map.
+// Density with macro "island" mask → scattered cumulus
 inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float time         = U.params0.x;
     float2 wind        = float2(U.params0.y, U.params0.z);
@@ -114,6 +115,8 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float domRot       = U.params3.z;
     float puffScale    = max(1e-4, U.params3.w);
     float puffStrength = clamp(U.params4.x, 0.0, 1.5);
+    float macroScale   = max(1e-6, U.params4.z);   // NEW
+    float macroThresh  = clamp(U.params4.w, 0.0, 1.0); // NEW
 
     float h01 = hProfile(wp.y, baseY, topY);
 
@@ -123,6 +126,11 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float adv = mix(0.55, 1.55, h01);
     float2 advXY = xzr + wind * adv * (time * 0.0035);
 
+    // Macro islands (very low frequency)
+    float macro = 1.0 - clamp(worley2(advXY * macroScale), 0.0, 1.0);
+    float macroMask = smoothstep(macroThresh - 0.08, macroThresh + 0.08, macro);
+
+    // Base + micro puffs + light erosion
     float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00110;
     float base = fbm2(P0 * float3(1.0, 0.35, 1.0));
 
@@ -134,10 +142,14 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
 
     float shape = base + puffStrength*(puffs - 0.5) - (1.0 - erode) * (0.30 * detailMul);
 
+    // Friendlier coverage map
     float thLo = (1.0 - coverage) - 0.14;
     float thHi = (1.0 - coverage) + 0.50;
     float t    = smoothstep(thLo, thHi, shape);
     float dens = pow(clamp(t, 0.0, 1.0), 0.92);
+
+    // Apply macro mask last → clear blue between fluffy islands
+    dens *= macroMask;
 
     dens *= hProfile(wp.y + horizonLift*120.0, baseY, topY);
     return dens;
@@ -147,7 +159,6 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                                   constant SCNSceneBuffer& scn_frame [[buffer(0)]],
                                   constant GLCloudUniforms& uCloudsGL [[buffer(1)]])
 {
-    // View ray
     float4 camW4 = scn_frame.inverseViewTransform * float4(0,0,0,1);
     float3 camPos = camW4.xyz / camW4.w;
     float3 V = normalize(in.worldPos - camPos);
@@ -155,7 +166,6 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float baseY = uCloudsGL.params0.w;
     float topY  = uCloudsGL.params1.x;
 
-    // Intersect slab
     float vdY   = V.y;
     float t0    = (baseY - camPos.y) / max(1e-5, vdY);
     float t1    = (topY  - camPos.y) / max(1e-5, vdY);
@@ -163,13 +173,11 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float tExt  = min(tEnt + 5000.0, max(t0, t1));
     if (tExt <= tEnt + 1e-5) discard_fragment();
 
-    // Budget (tiny): 12..20 steps with distance LOD
     float Lm = tExt - tEnt;
     float distLOD = clamp(Lm / 4000.0, 0.0, 1.4);
     int   N  = clamp(int(round(mix(12.0, 20.0, 1.0 - distLOD*0.6))), 10, 20);
     float dt = Lm / float(N);
 
-    // Dither start
     float2 st = float2(in.position.x, in.position.y);
     float  j  = fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453);
     float  t  = tEnt + (0.25 + 0.5*j) * dt;
@@ -180,9 +188,9 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
 
     half T = half(1.0);
 
-    const half rhoGate   = half(0.005);    // very low → little gets skipped by mistake
-    const half skipMul   = half(1.35);     // empty skipping factor
-    const half refineMul = half(0.40);     // local refinement dt
+    const half rhoGate   = half(0.005);
+    const half skipMul   = half(1.35);
+    const half refineMul = half(0.40);
     const int  refineMax = 3;
 
     for (int i=0; i<N && T>half(0.004); ++i) {
@@ -191,24 +199,21 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
 
         if (rho < rhoGate) { t += dt * float(skipMul); continue; }
 
-        // Single-tap sun probe (very cheap)
+        // Single sun tap (cheap) folded into extinction bias
         {
             float dL  = (topY - baseY) * 0.22;
             float3 lp = sp + float3(S) * dL;
             half  occ = half(densityAt(lp, uCloudsGL));
-            // bake extinction factor; mild strength keeps highlight stable at low cost
             half  aL  = half(1.0) - half(exp(-float(occ) * max(0.0f, uCloudsGL.params1.z) * dL * 0.010));
-            // integrate into rho directly (powder effect)
             rho = half(min(1.0f, float(rho) * (1.0f - 0.8f * float(aL))));
         }
 
-        // Local refinement (tiny)
         half td = half(dt) * refineMul;
         for (int k=0; k<refineMax && T>half(0.004); ++k){
             float3 sp2 = sp + V * (float(td) * float(k));
             half  rho2 = half(densityAt(sp2, uCloudsGL));
 
-            half sigma = half(max(0.0f, uCloudsGL.params1.z) * 0.030);   // slightly stronger
+            half sigma = half(max(0.0f, uCloudsGL.params1.z) * 0.030);
             half aStep = half(1.0) - half(exp(-float(rho2) * float(sigma) * float(td)));
 
             half ph    = half(phaseHG(float(mu), float(g)));

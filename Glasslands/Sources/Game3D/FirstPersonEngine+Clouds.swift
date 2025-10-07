@@ -60,28 +60,30 @@ extension FirstPersonEngine {
 
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
+        // Centre the sky dome on the camera to avoid parallax seams.
         if skyAnchor.parent == scene.rootNode {
             skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
         }
 
+        // Initialise advection radii once.
         if cloudRMax <= 1.0 || cloudRMax < cloudRMin + 10.0 {
             let R = Float(cfg.skyDistance)
-            let rNearMax : Float = max(560, R * 0.22)
+            let rNearMax: Float = max(560, R * 0.22)
             let rNearHole: Float = rNearMax * 0.34
-            let rBridge0 : Float = rNearMax * 1.06
-            let rBridge1 : Float = rBridge0 + max(900, R * 0.42)
-            let rMid0 : Float = rBridge1 - 100
-            let rMid1 : Float = rMid0 + max(2100, R * 1.05)
-            let rFar0 : Float = rMid1 + max(650, R * 0.34)
-            let rFar1 : Float = rFar0 + max(3000, R * 1.40)
-            let rUltra0 : Float = rFar1 + max(700, R * 0.40)
-            let rUltra1 : Float = rUltra0 + max(1600, R * 0.60)
+            let rBridge0: Float  = rNearMax * 1.06
+            let rBridge1: Float  = rBridge0 + max(900, R * 0.42)
+            let rMid0: Float     = rBridge1 - 100
+            let rMid1: Float     = rMid0 + max(2100, R * 1.05)
+            let rFar0: Float     = rMid1 + max(650, R * 0.34)
+            let rFar1: Float     = rFar0 + max(3000, R * 1.40)
+            let rUltra0: Float   = rFar1 + max(700, R * 0.40)
+            let rUltra1: Float   = rUltra0 + max(1600, R * 0.60)
             cloudRMin = rNearHole
             cloudRMax = rUltra1
-            _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1)
+            _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1, rUltra0) // silence unused in some configs
         }
 
-        // Fixed fast path: no dynamic quality adjustments (keeps cost predictable)
+        // Per-frame uniforms for volumetric clouds (fast scattered-cumulus path).
         VolCloudUniformsStore.shared.update(
             time: Float(t),
             sunDirWorld: simd_normalize(sunDirWorld),
@@ -89,10 +91,8 @@ extension FirstPersonEngine {
             domainOffset: cloudDomainOffset
         )
 
-        // Keep billboard conveyor ticking if any distant fallbacks are used elsewhere.
-        let rawDt: TimeInterval = (AdvectClock.last == 0) ? (1.0/60.0) : max(0, t - AdvectClock.last)
-        AdvectClock.last = t
-        let dt: Float = Float(min(1.0/30.0, max(1.0/180.0, rawDt)))
+        // Advance any billboard fallbacks at a fixed rate to keep cost predictable.
+        let dt: Float = 1.0 / 60.0
         advectAllCloudBillboards(dt: dt)
     }
     
