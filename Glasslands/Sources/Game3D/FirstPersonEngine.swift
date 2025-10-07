@@ -134,22 +134,20 @@ final class FirstPersonEngine: NSObject {
         buildSky()
         apply(recipe: recipe, force: true)
 
-        // Remove billboards completely (no 2D shapes).
-        removeCloudBillboards()
-        enableVolumetricCloudImpostors(false)
+        // No dome.
+        removeVolumetricDomeIfPresent()
 
-        // Keep only the true volumetric vapour, tuned for scattered cumulus.
-        self.useScatteredVolumetricCumulus(
-            coverage: 0.36,
-            densityMul: 1.05,
-            stepMul: 0.82,
-            horizonLift: 0.10,
-            detailMul: 0.90,
-            puffScale: 0.0048,
-            puffStrength: 0.62,
-            macroScale: 0.00040,
-            macroThreshold: 0.62
-        )
+        // Build the banded billboard layer, then enable the vapour impostors on it.
+        CloudBillboardLayer.makeAsync(
+            radius: CGFloat(cfg.skyDistance),
+            clusterCount: 140,
+            seed: cloudSeed
+        ) { [weak self] root in
+            guard let self else { return }
+            root.eulerAngles.y = cloudInitialYaw
+            self.skyAnchor.addChildNode(root)
+            self.enableVolumetricCloudImpostors(true)
+        }
     }
 
     func setPaused(_ paused: Bool) { scnView?.isPlaying = !paused }

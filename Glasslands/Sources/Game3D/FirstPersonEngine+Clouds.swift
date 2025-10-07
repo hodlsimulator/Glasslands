@@ -19,9 +19,9 @@ extension FirstPersonEngine {
     @MainActor
     func enableVolumetricCloudImpostors(
         _ on: Bool,
-        vapour: CGFloat = 3.2,
-        coverage: CGFloat = 0.42,
-        horizonLift: CGFloat = 0.14
+        vapour: CGFloat = 0,       // ignored now (was for old path)
+        coverage: CGFloat = 0,     // ignored (use store)
+        horizonLift: CGFloat = 0   // ignored (use store)
     ) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
 
@@ -29,23 +29,17 @@ extension FirstPersonEngine {
             guard let g = node.geometry else { return }
 
             if on {
-                // Stable analytic material (no SCNProgram) – safe while dome supplies true vapour.
                 let newMat = CloudBillboardMaterial.makeVolumetricImpostor()
-                if let old = g.firstMaterial?.diffuse.contents {
-                    newMat.diffuse.contents = old
-                }
+                // Force a valid diffuse (shader ignores it).
+                newMat.diffuse.contents = UIColor.white
                 g.firstMaterial = newMat
             } else {
                 g.materials.forEach { m in
-                    m.program = nil
                     m.shaderModifiers = nil
-                    m.setValue(nil, forKey: "uHalfSize")
+                    m.setValue(nil, forKey: "vapourTag")
                 }
             }
         }
-
-        // Important: DO NOT prewarm here (it tickles SCNProgram lifetime paths).
-        // if on { prewarmCloudImpostorPipelines() }
     }
 
     @MainActor
@@ -80,6 +74,8 @@ extension FirstPersonEngine {
             wind: cloudWind,
             domainOffset: cloudDomainOffset
         )
+        
+        CloudBillboardMaterial.syncFromVolStore()
 
         // Advance any billboard fallbacks at a fixed rate to keep cost predictable.
         let dt: Float = 1.0 / 60.0
@@ -395,5 +391,12 @@ extension FirstPersonEngine {
         cloudBillboardNodes.removeAll()
         cloudClusterGroups.removeAll()
         cloudClusterCentroidLocal.removeAll()
+    }
+    
+    @MainActor
+    func removeVolumetricDomeIfPresent() {
+        skyAnchor.childNodes
+            .filter { $0.name == "VolumetricCloudLayer" }
+            .forEach { $0.removeFromParentNode() }
     }
 }
