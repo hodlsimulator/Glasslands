@@ -156,7 +156,7 @@ extension FirstPersonEngine {
         let skyNode = SCNNode(geometry: skySphere)
         skyNode.name = "SkyAtmosphere"
         skyNode.castsShadow = false
-        skyNode.renderingOrder = -20_000
+        skyNode.renderingOrder = -200_000
         skyAnchor.addChildNode(skyNode)
 
         skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
@@ -208,7 +208,7 @@ extension FirstPersonEngine {
                                  haloIntensity: 2.0 * evBoost,
                                  haloExponent: 2.2,
                                  haloPixels: 2048)
-        sun.renderingOrder = 100_000
+        sun.renderingOrder = 200_000
         skyAnchor.addChildNode(sun)
         sunDiscNode = sun
 
