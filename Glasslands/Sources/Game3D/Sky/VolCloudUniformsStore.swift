@@ -31,10 +31,10 @@ final class VolCloudUniformsStore {
             sunDirWorld: SIMD4(0, 1, 0, 0),
             sunTint:     SIMD4(1, 1, 1, 0),
             params0:     SIMD4(0, 0.60, 0.20, 400),
-            params1:     SIMD4(1400, 0.50, 1.15, 0.85),
-            params2:     SIMD4(0.60, 2.10, 0.14, 1.10),
-            params3:     SIMD4(0, 0, 0, 0.0045),
-            params4:     SIMD4(0.65, 0.55, 0, 0)   // puffStrength, quality=0.55 default
+            params1:     SIMD4(1400, 0.58, 1.25, 0.75), // coverage↑, density↑, steps slightly ↓
+            params2:     SIMD4(0.60, 1.80, 0.12, 1.00),
+            params3:     SIMD4(0, 0, 0, 0.0048),
+            params4:     SIMD4(0.62, 0.55, 0, 0)        // puffStrength, quality
         )
     }
 
@@ -42,10 +42,6 @@ final class VolCloudUniformsStore {
         os_unfair_lock_lock(&lock); let out = u; os_unfair_lock_unlock(&lock); return out
     }
 
-    @inline(__always)
-    private func clamp01(_ x: Float) -> Float { max(0, min(1, x)) }
-
-    // Main-thread updates
     func update(time: Float,
                 sunDirWorld: SIMD3<Float>,
                 wind: SIMD2<Float>,
@@ -62,13 +58,13 @@ final class VolCloudUniformsStore {
                 detailMul: Float,
                 puffScale: Float,
                 puffStrength: Float,
-                quality: Float)  // 0.3 fast .. 1.0 best
+                quality: Float)
     {
         os_unfair_lock_lock(&lock)
         u.sunDirWorld = SIMD4(simd_normalize(sunDirWorld), 0)
         u.sunTint     = SIMD4(1, 1, 1, 0)
         u.params0     = SIMD4(time, wind.x, wind.y, baseY)
-        u.params1     = SIMD4(topY, coverage, max(0, densityMul), max(0.25, stepMul))
+        u.params1     = SIMD4(topY, max(0.0, coverage), max(0, densityMul), max(0.25, stepMul))
         u.params2     = SIMD4(mieG, max(0, powderK), horizonLift, max(0, detailMul))
         u.params3     = SIMD4(domainOffset.x, domainOffset.y, domainRotate, max(0.0001, puffScale))
         u.params4     = SIMD4(max(0, puffStrength), max(0.3, min(1.0, quality)), 0, 0)
