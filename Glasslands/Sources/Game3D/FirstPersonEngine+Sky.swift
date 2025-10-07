@@ -56,10 +56,10 @@ extension FirstPersonEngine {
     func applyCloudSunUniforms() {
         let sunW = simd_normalize(sunDirWorld)
 
-        // Hard, safe midday tint so nothing can go dark from a zero tint
+        // Bright, daylight white; keeps both sky and puffs lit
         let tintV = SCNVector3(1.0, 0.97, 0.92)
 
-        // Billboards (view-space sun dir + tint)
+        // Billboards
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             let pov = (scnView?.pointOfView ?? camNode).presentation
             let invView = simd_inverse(pov.simdWorldTransform)
@@ -72,19 +72,28 @@ extension FirstPersonEngine {
                 for m in g.materials {
                     m.setValue(sunViewV, forKey: "sunDirView")
                     m.setValue(tintV,    forKey: "sunTint")
+                    // Make puffs brighter and less grey
                     m.setValue(0.06 as CGFloat, forKey: "edgeSoft")
-                    m.setValue(0.22 as CGFloat, forKey: "skyBackK")
-                    m.setValue(1.60 as CGFloat, forKey: "densityMul")
+                    m.setValue(1.45 as CGFloat, forKey: "densityMul")
+                    m.setValue(0.26 as CGFloat, forKey: "skyBackK")
+                    m.setValue(0.42 as CGFloat, forKey: "msLiftK")
+                    m.setValue(0.56 as CGFloat, forKey: "mieG")
+                    m.setValue(2.4  as CGFloat, forKey: "turbidity")
                 }
             }
         }
 
-        // Physics sky (world sun dir + tint)
+        // Physics sky
         if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: false),
-           let mat = sky.geometry?.firstMaterial {
+           let mat = sky.geometry?.firstMaterial
+        {
             mat.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
             mat.setValue(tintV, forKey: "sunTint")
-            // exposure/turbidity can be adjusted elsewhere (day-night cycle)
+            // Bright midday settings; tweak for TOD later
+            mat.setValue(2.4  as CGFloat, forKey: "turbidity")
+            mat.setValue(0.50 as CGFloat, forKey: "mieG")
+            mat.setValue(2.05 as CGFloat, forKey: "exposure")
+            mat.setValue(0.12 as CGFloat, forKey: "horizonLift")
         }
     } 
 
