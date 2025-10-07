@@ -4,8 +4,9 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  SCNProgram for SkyVolumetricClouds.metal, with explicit binding of a
-//  tightly‑packed CloudUniforms constant buffer (symbol: uClouds).
+//  SCNProgram for SkyVolumetricClouds.metal. Binds a tightly-packed uClouds
+//  constant buffer each frame from SCNMaterial custom keys.
+
 //
 
 import SceneKit
@@ -23,13 +24,12 @@ private struct CloudUniforms {
 
 enum VolumetricCloudProgram {
 
-    // Stable copy updated each frame by updateUniforms(from:)
     private static var currentU = CloudUniforms(
         sunDirWorld: SIMD4<Float>(0,1,0,0),
         sunTint    : SIMD4<Float>(1,1,1,0),
-        params0    : SIMD4<Float>(0, 0.5, 0.0, 400.0),
-        params1    : SIMD4<Float>(1400.0, 0.4, 1.2, 1.0),
-        params2    : SIMD4<Float>(0.6, 2.2, 0.12, 1.0),
+        params0    : SIMD4<Float>(0, 0.6, 0.2, 400.0),
+        params1    : SIMD4<Float>(1400.0, 0.42, 1.20, 0.95),
+        params2    : SIMD4<Float>(0.60, 2.20, 0.14, 1.10),
         params3    : SIMD4<Float>(0,0,0,0)
     )
 
@@ -38,25 +38,23 @@ enum VolumetricCloudProgram {
         let prog = SCNProgram()
         prog.vertexFunctionName   = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
-        prog.isOpaque = false
-        prog.blendMode = .alpha // clouds composite over sky gradient in shader
 
-        // Bind CloudUniforms (symbol name must match the Metal function parameter)
-        prog.handleBinding(ofSymbol: "uClouds") { (program, renderer, node, material, bufferStream) in
-            // Ensure latest values are on the GPU every draw
+        // Bind CloudUniforms for the Metal parameter named "uClouds"
+        prog.handleBinding(ofBufferNamed: "uClouds", frequency: .perFrame) { bufferStream, _, _ in
             var U = Self.currentU
-            bufferStream?.writeBytes(&U, length: MemoryLayout<CloudUniforms>.size)
+            bufferStream.writeBytes(&U, length: MemoryLayout<CloudUniforms>.size)
         }
 
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = false
-        m.cullMode = .front        // render interior backfaces of a skydome
+        m.cullMode = .front                 // render interior of skydome
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
+        m.blendMode = .alpha
         m.program = prog
 
-        // Set safe defaults for runtime‑tuned keys
+        // Default keys; engine will update these every frame
         m.setValue(NSNumber(value: 0.0), forKey: "time")
         m.setValue(SCNVector3(0.60, 0.20, 0), forKey: "wind")
         m.setValue(NSNumber(value: 400.0), forKey: "baseY")
@@ -72,13 +70,10 @@ enum VolumetricCloudProgram {
         m.setValue(NSNumber(value: 0.0), forKey: "domainRotate")
         m.setValue(SCNVector3(0,1,0), forKey: "sunDirWorld")
         m.setValue(SCNVector3(1,1,1), forKey: "sunTint")
-
         return m
     }
 
-    /// Pulls values from the SCNMaterial custom keys (which the engine updates),
-    /// packs them into the CloudUniforms layout expected by Metal, and stores
-    /// them for the binding block above.
+    /// Pack SCNMaterial custom keys into the GPU uniform buffer layout.
     @MainActor
     static func updateUniforms(from m: SCNMaterial) {
         func f(_ v: Any?) -> Float {
@@ -110,7 +105,7 @@ enum VolumetricCloudProgram {
         currentU.sunTint     = SIMD4<Float>(sunTint3, 0)
         currentU.params0     = SIMD4<Float>(time, wind.x, wind.y, baseY)
         currentU.params1     = SIMD4<Float>(topY, coverage, max(0, density), max(0.25, stepMul))
-        currentU.params2     = SIMD4<Float>(mieG, max(powderK, 0), horizon, max(0, detailMul))
+        currentU.params2     = SIMD4<Float>(mieG, max(0, powderK), horizon, max(0, detailMul))
         currentU.params3     = SIMD4<Float>(domOff.x, domOff.y, domRot, 0)
     }
 }

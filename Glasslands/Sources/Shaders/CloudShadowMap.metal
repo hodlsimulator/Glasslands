@@ -4,20 +4,18 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Computes a top‑down (orthographic) cloud shadow map for directional gobo
-//  projection. The cloud field matches SkyVolumetricClouds.metal so lighting
-//  and shadows stay coherent.
+//  Computes a top-down cloud shadow map for directional gobo projection.
 //
 
 #include <metal_stdlib>
 using namespace metal;
 
 static constant float kPI = 3.14159265358979323846f;
-inline float saturate(float x){ return clamp(x, 0.0f, 1.0f); }
+inline float clamp01(float x){ return clamp(x, 0.0f, 1.0f); }
 inline float lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float frac(float x){ return x - floor(x); }
 
-// ---- Keep noise identical to the volumetric shader ----
+// ---- Noise identical to volumetric shader ----
 inline float hash1(float n){ return frac(sin(n) * 43758.5453123f); }
 inline float noise3(float3 x){
     float3 p = floor(x);
@@ -50,37 +48,37 @@ inline float fbm5(float3 p){
     return a;
 }
 inline float heightProfile(float y, float baseY, float topY){
-    float h = saturate((y - baseY) / max(1.0f, (topY - baseY)));
+    float h = clamp01((y - baseY) / max(1.0f, (topY - baseY)));
     float up = smoothstep(0.03f, 0.25f, h);
     float dn = 1.0f - smoothstep(0.68f, 1.00f, h);
     return pow(clamp(up * dn, 0.0f, 1.0f), 0.80f);
 }
 
 struct CloudUniforms {
-    float4 sunDirWorld;   // xyz
-    float4 sunTint;       // unused here
-    float4 params0;       // x=time, y=wind.x, z=wind.y, w=baseY
-    float4 params1;       // x=topY, y=coverage, z=densityMul, w=stepMul
-    float4 params2;       // x=mieG, y=powderK, z=horizonLift, w=detailMul
-    float4 params3;       // x=domainOffX, y=domainOffY, z=domainRotate, w=0
+    float4 sunDirWorld;
+    float4 sunTint;
+    float4 params0;
+    float4 params1;
+    float4 params2;
+    float4 params3;
 };
 
 struct ShadowUniforms {
-    float2 centerXZ;      // world center for this tile (x,z)
-    float  halfSize;      // covers [-halfSize, +halfSize] in both X and Z
+    float2 centerXZ;
+    float  halfSize;
     float  pad0;
 };
 
-inline float densityAt(float3 wp, constant CloudUniforms& U){
-    const float  time      = U.params0.x;
-    const float2 wind      = float2(U.params0.y, U.params0.z);
-    const float  baseY     = U.params0.w;
-    const float  topY      = U.params1.x;
-    const float  coverage  = U.params1.y;
-    const float  detailMul = max(0.0f, U.params2.w);
+inline float densityAt(float3 wp, constant CloudUniforms& uClouds){
+    const float  time      = uClouds.params0.x;
+    const float2 wind      = float2(uClouds.params0.y, uClouds.params0.z);
+    const float  baseY     = uClouds.params0.w;
+    const float  topY      = uClouds.params1.x;
+    const float  coverage  = uClouds.params1.y;
+    const float  detailMul = max(0.0f, uClouds.params2.w);
 
-    const float2 domOff = float2(U.params3.x, U.params3.y);
-    const float  ang    = U.params3.z;
+    const float2 domOff = float2(uClouds.params3.x, uClouds.params3.y);
+    const float  ang    = uClouds.params3.z;
     const float  ca = cos(ang), sa = sin(ang);
 
     float2 xz   = wp.xz + domOff;
@@ -97,14 +95,14 @@ inline float densityAt(float3 wp, constant CloudUniforms& U){
     float detail = fbm5(P1);
 
     float edge  = base + (detailMul * 0.55f) * (detail - 0.45f);
-    float dens = saturate( (edge - (1.0f - coverage)) / max(1e-3f, coverage) );
-    dens *= heightProfile(wp.y + U.params2.z * 120.0f, baseY, topY);
-    return saturate(dens);
+    float dens = clamp( (edge - (1.0f - coverage)) / max(1e-3f, coverage), 0.0f, 1.0f );
+    dens *= heightProfile(wp.y + uClouds.params2.z * 120.0f, baseY, topY);
+    return clamp(dens, 0.0f, 1.0f);
 }
 
 kernel void cloudShadowKernel(
     texture2d<float, access::write> outShadow [[texture(0)]],
-    constant CloudUniforms& U                 [[buffer(0)]],
+    constant CloudUniforms& uClouds          [[buffer(0)]],
     constant ShadowUniforms& SU               [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]])
 {
@@ -113,19 +111,17 @@ kernel void cloudShadowKernel(
     const float W = float(outShadow.get_width());
     const float H = float(outShadow.get_height());
 
-    // Map pixel → world (orthographic square around centerXZ)
-    float u = (float(gid.x) + 0.5f) / W; // 0..1
+    float u = (float(gid.x) + 0.5f) / W;
     float v = (float(gid.y) + 0.5f) / H;
     float x = SU.centerXZ.x + (u * 2.0f - 1.0f) * SU.halfSize;
     float z = SU.centerXZ.y + (v * 2.0f - 1.0f) * SU.halfSize;
 
-    float3 sunW = normalize(U.sunDirWorld.xyz);
+    float3 sunW = normalize(uClouds.sunDirWorld.xyz);
 
-    const float baseY = U.params0.w;
-    const float topY  = U.params1.x;
-    const float densMul = max(0.0f, U.params1.z);
+    const float baseY = uClouds.params0.w;
+    const float topY  = uClouds.params1.x;
+    const float densMul = max(0.0f, uClouds.params1.z);
 
-    // March from top→base along -sun (light towards ground)
     const int   NL = 32;
     const float totalH = max(1.0f, (topY - baseY)) / max(1, NL);
     const float stepL  = totalH * (abs(sunW.y) > 1e-4f ? (1.0f / abs(sunW.y)) : 1.0f);
@@ -133,15 +129,14 @@ kernel void cloudShadowKernel(
     float3 p = float3(x, topY, z);
     float3 d = -sunW * stepL;
 
-    float tau = 0.0f; // optical depth
+    float tau = 0.0f;
     for (int i = 0; i < NL && tau < 8.0f; ++i) {
-        float rho = densityAt(p, U);
+        float rho = densityAt(p, uClouds);
         tau += rho * densMul * (stepL * 0.020f);
         p += d;
     }
 
-    float T = exp(-tau); // transmittance 0..1
-    // Slight gamma to make shadows read but not crush
+    float T = exp(-tau);
     float shadow = pow(T, 0.88f);
 
     outShadow.write(float4(shadow, shadow, shadow, 1.0), gid);

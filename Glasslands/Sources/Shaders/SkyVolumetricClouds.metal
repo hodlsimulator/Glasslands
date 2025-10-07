@@ -5,13 +5,7 @@
 //  Created by . . on 10/5/25.
 //
 //  Volumetric cloud raymarch (single scattering) lit by the sun.
-//  – HG phase (forward scattering) + powder effect at edges
-//  – Compact shadow march along sun ray (self‑occlusion)
-//  – Domain rotation/offset, wind advection, horizon lift
-//
-//  Expected binding (SceneKit):
-//    buffer(0) : SCNSceneBuffer scn_frame
-//    buffer(1) : CloudUniforms        (symbol: uClouds)
+//  – HG phase + powder effect + compact light march for self-occlusion.
 //
 
 #include <metal_stdlib>
@@ -19,19 +13,15 @@
 using namespace metal;
 
 static constant float kPI = 3.14159265358979323846f;
-
-inline float saturate(float x)          { return clamp(x, 0.0f, 1.0f); }
-inline float2 saturate(float2 v)        { return clamp(v, float2(0), float2(1)); }
-inline float3 saturate(float3 v)        { return clamp(v, float3(0), float3(1)); }
+inline float clamp01(float x) { return clamp(x, 0.0f, 1.0f); }
+inline float2 clamp01(float2 v){ return clamp(v, float2(0), float2(1)); }
+inline float3 clamp01(float3 v){ return clamp(v, float3(0), float3(1)); }
 inline float lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float3 lerp3(float3 a,float3 b,float t){ return a + (b - a) * t; }
-inline float frac(float x)              { return x - floor(x); }
+inline float frac(float x){ return x - floor(x); }
 
-// -----------------------------------------------------------------------------
-// Noise / FBM (compact, branchless-ish)
-// -----------------------------------------------------------------------------
+// --- Noise ---
 inline float hash1(float n) { return frac(sin(n) * 43758.5453123f); }
-
 inline float noise3(float3 x){
     float3 p = floor(x);
     float3 f = x - p;
@@ -58,7 +48,6 @@ inline float noise3(float3 x){
     float nxy1 = mix(nx01, nx11, f.y);
     return mix(nxy0, nxy1, f.z);
 }
-
 inline float fbm5(float3 p){
     float a = 0.0f, w = 0.5f;
     for (int i = 0; i < 5; ++i) {
@@ -68,8 +57,6 @@ inline float fbm5(float3 p){
     }
     return a;
 }
-
-// Small curl helper (for subtle billow skew)
 inline float2 curl2(float2 xz){
     const float e = 0.02f;
     float n1 = noise3(float3(xz.x + e, 0.0, xz.y)) - noise3(float3(xz.x - e, 0.0, xz.y));
@@ -79,21 +66,14 @@ inline float2 curl2(float2 xz){
     return v / len;
 }
 
-// -----------------------------------------------------------------------------
-// Uniforms
-// -----------------------------------------------------------------------------
+// --- Uniforms ---
 struct CloudUniforms {
-    float4 sunDirWorld;   // xyz = dir (normalised), w = unused
-    float4 sunTint;       // rgb = sun colour (linear), a unused
-
-    // params0: x=time, y=wind.x, z=wind.y, w=baseY
-    // params1: x=topY, y=coverage (0..1), z=densityMul, w=stepMul (quality/perf)
-    // params2: x=mieG (0..0.95), y=powderK (~1..3), z=horizonLift, w=detailMul
-    // params3: x=domainOffX, y=domainOffY, z=domainRotate (radians), w=unused
-    float4 params0;
-    float4 params1;
-    float4 params2;
-    float4 params3;
+    float4 sunDirWorld;   // xyz dir
+    float4 sunTint;       // rgb
+    float4 params0;       // x=time, y=wind.x, z=wind.y, w=baseY
+    float4 params1;       // x=topY, y=coverage, z=densityMul, w=stepMul
+    float4 params2;       // x=mieG, y=powderK, z=horizonLift, w=detailMul
+    float4 params3;       // x=domainOffX, y=domainOffY, z=domainRotate, w=0
 };
 
 struct VSIn {
@@ -113,86 +93,69 @@ vertex VSOut clouds_vertex(
     const float4 world = float4(vin.position, 1.0);
     const float4 view  = scn_frame.viewTransform * world;
     o.position = scn_frame.projectionTransform * view;
-    // Skydome sits at world origin with identity model, so object==world.
     o.worldPos = world.xyz;
     return o;
 }
 
-// Height profile within the cloud slab
 inline float heightProfile(float y, float baseY, float topY){
-    float h = saturate((y - baseY) / max(1.0f, (topY - baseY)));
-    // Soft fade-in at base, soft fade-out near top; slightly concave mid.
+    float h = clamp01((y - baseY) / max(1.0f, (topY - baseY)));
     float up = smoothstep(0.03f, 0.25f, h);
     float dn = 1.0f - smoothstep(0.68f, 1.00f, h);
     return pow(clamp(up * dn, 0.0f, 1.0f), 0.80f);
 }
 
-// Core density field in [0,1]
-inline float densityAt(float3 wp, constant CloudUniforms& U){
-    const float  time      = U.params0.x;
-    const float2 wind      = float2(U.params0.y, U.params0.z);
-    const float  baseY     = U.params0.w;
-    const float  topY      = U.params1.x;
-    const float  coverage  = U.params1.y;
-    const float  detailMul = max(0.0f, U.params2.w);
+inline float densityAt(float3 wp, constant CloudUniforms& uClouds){
+    const float  time      = uClouds.params0.x;
+    const float2 wind      = float2(uClouds.params0.y, uClouds.params0.z);
+    const float  baseY     = uClouds.params0.w;
+    const float  topY      = uClouds.params1.x;
+    const float  coverage  = uClouds.params1.y;
+    const float  detailMul = max(0.0f, uClouds.params2.w);
 
-    // Domain transform: rotate + offset (per session), then scale
-    const float2 domOff = float2(U.params3.x, U.params3.y);
-    const float  ang    = U.params3.z;
+    const float2 domOff = float2(uClouds.params3.x, uClouds.params3.y);
+    const float  ang    = uClouds.params3.z;
     const float  ca = cos(ang), sa = sin(ang);
 
     float2 xz   = wp.xz + domOff;
     float2 xzr  = float2(xz.x*ca - xz.y*sa, xz.x*sa + xz.y*ca);
 
-    // Slow advection; altitude‑dependent drift (0.5× at base → 1.5× at top)
     float h01 = heightProfile(wp.y, baseY, topY);
     float adv = lerp1(0.5f, 1.5f, h01);
     float2 advXY = xzr + wind * adv * (time * 0.0035f);
 
-    // Base shape (broad cumulus mass)
     float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00115f;
     float base = fbm5(P0 * float3(1.0, 0.35, 1.0));
 
-    // Detail cauliflowering
     float3 P1 = float3(advXY.x, wp.y * 1.8f, advXY.y) * 0.0046f + float3(2.7f, 0.0f, -5.1f);
     float detail = fbm5(P1);
 
-    // Combine with coverage threshold and slight curl skew near edges
     float2 curl = curl2(advXY * 0.0022f);
     float edge  = base + (detailMul * 0.55f) * (detail - 0.45f) + 0.10f * curl.x;
 
-    float dens = saturate( (edge - (1.0f - coverage)) / max(1e-3f, coverage) );
-    // Height shaping + horizon lift (keeps clouds readable near skyline)
-    dens *= heightProfile(wp.y + U.params2.z * 120.0f, baseY, topY);
+    float dens = clamp( (edge - (1.0f - coverage)) / max(1e-3f, coverage), 0.0f, 1.0f );
+    dens *= heightProfile(wp.y + uClouds.params2.z * 120.0f, baseY, topY);
 
-    return saturate(dens);
+    return clamp(dens, 0.0f, 1.0f);
 }
 
-// Henyey–Greenstein phase (single lobe, forward-biased)
 inline float phaseHG(float cosTheta, float g){
     float g2 = g * g;
     float denom = pow(1.0f + g2 - 2.0f * g * cosTheta, 1.5f);
     return (1.0f - g2) / max(1e-4f, 4.0f * kPI * denom);
 }
 
-// Sub‑voxel brightening at porous edges (powder effect)
 inline float powderTerm(float occult, float k) {
-    // occult is approximate local occlusion in [0,1]; higher → darker
-    // k≈1..3 gives gentle “pop” at thin silhouettes
-    return exp(-k * saturate(occult));
+    return exp(-k * clamp01(occult));
 }
 
-struct FragOut {
-    half4 color;
-};
+struct FragOut { half4 color; };
 
 fragment FragOut clouds_fragment(
-    VSOut in                   [[stage_in]],
-    constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-    constant CloudUniforms& U  [[buffer(1)]])
+    VSOut in                              [[stage_in]],
+    constant SCNSceneBuffer& scn_frame    [[buffer(0)]],
+    constant CloudUniforms& uClouds       [[buffer(1)]])
 {
     FragOut out;
-    // Sky gradient baseline (acts as background if clouds thin/clear)
     const float3 skyZenith  = float3(0.10, 0.28, 0.65);
     const float3 skyHorizon = float3(0.55, 0.72, 0.94);
 
@@ -202,13 +165,11 @@ fragment FragOut clouds_fragment(
     float3 pos   = in.worldPos;
     float3 viewDir = normalize(pos - camPos);
 
-    // Cloud layer slab
-    const float baseY    = U.params0.w;
-    const float topY     = U.params1.x;
-    const float densMul  = max(0.0f, U.params1.z);
-    const float stepMul  = clamp(U.params1.w, 0.25f, 1.5f);
+    const float baseY    = uClouds.params0.w;
+    const float topY     = uClouds.params1.x;
+    const float densMul  = max(0.0f, uClouds.params1.z);
+    const float stepMul  = clamp(uClouds.params1.w, 0.25f, 1.5f);
 
-    // Intersect ray with horizontal slab [baseY, topY]
     float tEnter = 0.0f, tExit = 0.0f;
     {
         float vdY = viewDir.y;
@@ -217,24 +178,20 @@ fragment FragOut clouds_fragment(
         tEnter = min(t0, t1);
         tExit  = max(t0, t1);
         tEnter = max(tEnter, 0.0f);
-        // Clamp march thickness for numerical stability
         tExit = min(tExit, tEnter + 6000.0f);
     }
 
-    float3 sunW = normalize(U.sunDirWorld.xyz);
+    float3 sunW = normalize(uClouds.sunDirWorld.xyz);
     float sunDotV = clamp(dot(viewDir, sunW), -1.0f, 1.0f);
-    float gHG     = clamp(U.params2.x, -0.99f, 0.99f);
-    float powderK = max(0.0f, U.params2.y);
+    float gHG     = clamp(uClouds.params2.x, -0.99f, 0.99f);
+    float powderK = max(0.0f, uClouds.params2.y);
 
-    // Background sky (simple zenith→horizon gradient)
-    float up = saturate((viewDir.y * 0.5f) + 0.5f);
+    float up = clamp01((viewDir.y * 0.5f) + 0.5f);
     float3 skyCol = mix(skyHorizon, skyZenith, up);
 
-    // Raymarch through the slab: accumulate transmittance + in‑scattering
-    float  T = 1.0f;      // transmittance along view ray
-    float3 C = float3(0); // in‑scattered radiance
+    float  T = 1.0f;
+    float3 C = float3(0);
 
-    // Choose step count adaptively by thickness and a user “stepMul”
     const float marchLen = max(1e-3f, tExit - tEnter);
     const int   Nbase    = 48;
     const int   Nsteps   = clamp(int(round((float)Nbase * stepMul)), 16, 84);
@@ -244,38 +201,35 @@ fragment FragOut clouds_fragment(
     for (int i = 0; i < Nsteps && T > 0.0035f; ++i, t += dt) {
         float3 sp = camPos + viewDir * t;
 
-        float rho = densityAt(sp, U);
+        float rho = densityAt(sp, uClouds);
         if (rho <= 1e-4f) continue;
 
-        // Short light march towards sun to estimate self‑shadowing
-        // Keep it very cheap (4–6 taps) — stable enough for moving clouds.
         float lightT = 1.0f;
         {
             const int NL = 6;
             const float dL = ((topY - baseY) / max(1, NL)) * 0.9f;
-            float3 lp = sp; // march “upstream” towards the sun
+            float3 lp = sp;
             for (int j = 0; j < NL && lightT > 0.01f; ++j) {
                 lp += sunW * dL;
-                float occ = densityAt(lp, U);
+                float occ = densityAt(lp, uClouds);
                 float aL  = 1.0f - exp(-occ * densMul * dL * 0.012f);
                 lightT *= (1.0f - aL);
             }
         }
 
-        float sigma = densMul * 0.022f;                // extinction coefficient
-        float a = 1.0f - exp(-rho * sigma * dt);       // Beer–Lambert over dt
-        float ph = phaseHG(sunDotV, gHG);              // HG phase term
-        float pd = powderTerm(1.0f - rho, powderK);    // edge brightening
+        float sigma = densMul * 0.022f;
+        float a = 1.0f - exp(-rho * sigma * dt);
+        float ph = phaseHG(sunDotV, gHG);
+        float pd = powderTerm(1.0f - rho, powderK);
+        float3 sunRGB = uClouds.sunTint.rgb;
 
-        float3 sunRGB = U.sunTint.rgb;                 // linear light colour
-
-        float3 S = sunRGB * lightT * ph * pd;          // per‑sample source
-        C += T * a * S;                                // volume compositing
+        float3 S = sunRGB * lightT * ph * pd;
+        C += T * a * S;
         T *= (1.0f - a);
     }
 
     float3 col = C + skyCol * T;
 
-    out.color = half4(half3(saturate(col)), half(1.0));
+    out.color = half4(half3(clamp01(col)), half(1.0));
     return out;
 }
