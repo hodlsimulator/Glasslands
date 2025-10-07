@@ -88,14 +88,13 @@ extension FirstPersonEngine {
     }
 
     // MARK: - Lighting
-
     @MainActor
     func buildLighting() {
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Sun (casts shadows)
+        // Sun (only illuminant)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1500
@@ -113,125 +112,79 @@ extension FirstPersonEngine {
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
 
-        // Directional sky fill (no shadows) to lift shadowed sides without flattening
+        // Keep sky fill present but OFF (we may animate later)
         let skyFill = SCNLight()
         skyFill.type = .directional
         skyFill.color = UIColor.white
-        skyFill.intensity = 0
+        skyFill.intensity = 0     // ← off
         skyFill.castsShadow = false
         skyFill.categoryBitMask = 0x0000_0403
-
         let skyFillNode = SCNNode()
         skyFillNode.name = "GL_SkyFill"
         skyFillNode.light = skyFill
         scene.rootNode.addChildNode(skyFillNode)
 
-        // Aim sky fill straight down (world −Y)
+        // Aim sky fill straight down for completeness
         let origin = yawNode.presentation.position
         skyFillNode.position = origin
         skyFillNode.look(at: SCNVector3(origin.x, origin.y - 1.0, origin.z),
-                         up: scene.rootNode.worldUp,
-                         localFront: SCNVector3(0, 0, -1))
+                         up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
 
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
-
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
     // MARK: - Sky
-
     @MainActor
     func buildSky() {
         skyAnchor.removeFromParentNode()
         skyAnchor.childNodes.forEach { $0.removeFromParentNode() }
-
         scene.rootNode.childNodes
-            .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer"].contains($0.name ?? "") }
+            .filter { ["SunDiscHDR", "SunHaloHDR", "VolumetricCloudLayer", "CumulusBillboardLayer", "SkyAtmosphere"].contains($0.name ?? "") }
             .forEach { $0.removeFromParentNode() }
 
         scene.rootNode.addChildNode(skyAnchor)
 
-        scene.background.contents = SceneKitHelpers.skyEquirectGradient(width: 2048, height: 1024)
-        scene.lightingEnvironment.contents = SceneKitHelpers.skyEquirectGradient(width: 1024, height: 512)
-        scene.lightingEnvironment.intensity = 0.18
+        // Disable environment lighting so shaded areas are truly in shade
+        scene.background.contents = UIColor.black
+        scene.lightingEnvironment.contents = nil
+        scene.lightingEnvironment.intensity = 0.0
 
+        // Sky atmosphere (inside-out sphere)
+        let skyR = CGFloat(cfg.skyDistance) * 0.995
+        let skySphere = SCNSphere(radius: max(10, skyR))
+        skySphere.segmentCount = 96
+        let skyMat = SkyAtmosphereProgram.makeMaterial()
+        skySphere.firstMaterial = skyMat
+        let skyNode = SCNNode(geometry: skySphere)
+        skyNode.name = "SkyAtmosphere"
+        skyNode.castsShadow = false
+        skyNode.renderingOrder = -20_000
+        skyAnchor.addChildNode(skyNode)
+
+        // Volumetric cloud layer
+        let clouds = VolumetricCloudLayer.make(
+            radius: CGFloat(cfg.skyDistance),
+            baseY: 400.0,
+            topY: 1400.0,
+            coverage: 0.42
+        )
+        clouds.renderingOrder = -9_990
+        skyAnchor.addChildNode(clouds)
+
+        // Billboard cumulus (async build remains)
         CloudBillboardLayer.makeAsync(radius: CGFloat(cfg.skyDistance), seed: cloudSeed) { [weak self] node in
             guard let self else { return }
-
-            @inline(__always) func norm2(_ v: simd_float2) -> simd_float2 {
-                let L = simd_length(v); return (L < 1e-5) ? simd_float2(1, 0) : (v / L)
-            }
-            @inline(__always) func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
-                let c = cosf(yaw), s = sinf(yaw)
-                // rotate world→layer: rot(-yaw) * w
-                return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
-            }
-
             node.name = "CumulusBillboardLayer"
             node.eulerAngles.y = self.cloudInitialYaw
             self.skyAnchor.addChildNode(node)
             self.cloudLayerNode = node
-
-            // Cache clusters (direct children) and puff parents.
-            self.cloudBillboardNodes.removeAll()
-            self.cloudClusterGroups = node.childNodes
-            self.cloudClusterCentroidLocal.removeAll()
-
-            var rMin: Float = .greatestFiniteMagnitude
-            var rMax: Float = 0
-
-            for group in self.cloudClusterGroups {
-                var sum = simd_float3.zero
-                var count = 0
-
-                for bb in group.childNodes {
-                    if let cs = bb.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
-                        let p = bb.simdPosition
-                        self.cloudBillboardNodes.append(bb)
-                        sum += p
-                        count += 1
-
-                        let r = simd_length(SIMD2(p.x, p.z))
-                        if r < rMin { rMin = r }
-                        if r > rMax { rMax = r }
-                    }
-                }
-
-                let c = (count > 0) ? (sum / Float(count)) : .zero
-                self.cloudClusterCentroidLocal[ObjectIdentifier(group)] = c
-            }
-
-            self.cloudRMin = max(0, rMin.isFinite ? rMin : 0)
-            self.cloudRMax = max(self.cloudRMin + 1, rMax.isFinite ? rMax : self.cloudRMin + 1)
-
-            // Stable one-time alpha order: back→front along *layer-local* wind axis.
-            let wL = norm2(windLocal(self.cloudWind, node.eulerAngles.y))
-            let R = self.cloudRMax
-
-            for group in self.cloudClusterGroups {
-                let gid = ObjectIdentifier(group)
-                let c0 = self.cloudClusterCentroidLocal[gid] ?? .zero
-                let ax0 = simd_dot(SIMD2(c0.x, c0.z), wL)         // local along-wind coordinate
-                let axNorm = (ax0 + R) / max(1, 2 * R)             // 0..1
-                let baseOrder = -9_000 + Int(axNorm * 3000.0)
-
-                for bb in group.childNodes {
-                    let tie = Int(bitPattern: Unmanaged.passUnretained(bb).toOpaque()) & 0x3FF
-                    let order = baseOrder + tie
-                    bb.renderingOrder = order
-                    for s in bb.childNodes { s.renderingOrder = order }
-                    bb.setValue(NSNumber(value: order), forKey: "GL_roKey")
-                }
-            }
-
             self.applyCloudSunUniforms()
             self.enableVolumetricCloudImpostors(true)
-            self.debugCloudShaderOnce(tag: "after-attach")
-            DispatchQueue.main.async { self.debugCloudShaderOnce(tag: "after-runloop") }
         }
 
-        // HDR sun (unchanged)
+        // HDR sun sprites
         let coreDeg: CGFloat = 6.0
         let haloScale: CGFloat = 2.6
         let evBoost: CGFloat = pow(2.0, 1.5)
@@ -239,15 +192,9 @@ extension FirstPersonEngine {
         let haloEDR: CGFloat = 2.0 * evBoost
         let haloExponent: CGFloat = 2.2
         let haloPixels: Int = 2048
-
-        let sun = makeHDRSunNode(
-            coreAngularSizeDeg: coreDeg,
-            haloScale: haloScale,
-            coreIntensity: coreEDR,
-            haloIntensity: haloEDR,
-            haloExponent: haloExponent,
-            haloPixels: haloPixels
-        )
+        let sun = makeHDRSunNode(coreAngularSizeDeg: coreDeg, haloScale: haloScale,
+                                 coreIntensity: coreEDR, haloIntensity: haloEDR,
+                                 haloExponent: haloExponent, haloPixels: haloPixels)
         sun.renderingOrder = 100_000
         skyAnchor.addChildNode(sun)
         sunDiscNode = sun
