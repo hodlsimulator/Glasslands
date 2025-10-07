@@ -10,6 +10,11 @@ import simd
 import UIKit
 import CoreGraphics
 
+@MainActor
+private enum AdvectClock {
+    static var last: TimeInterval = 0
+}
+
 extension FirstPersonEngine {
 
     // MARK: - Volumetric cloud impostors
@@ -58,59 +63,52 @@ extension FirstPersonEngine {
     // Called by RendererProxy each frame
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
-        // Always center the sky layer on the camera to avoid parallax cones
         if skyAnchor.parent == scene.rootNode {
             skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
         }
 
-        // Ensure the advection radii are sane (set once after build)
         if cloudRMax <= 1.0 || cloudRMax < cloudRMin + 10.0 {
             let R = Float(cfg.skyDistance)
-            // Must match the band recipe used in CloudBillboardLayer.makeAsync(...)
             let rNearMax : Float = max(560, R * 0.22)
             let rNearHole: Float = rNearMax * 0.34
             let rBridge0 : Float = rNearMax * 1.06
-            let rBridge1 : Float = rBridge0 + max(900,  R * 0.42)
-            let rMid0    : Float = rBridge1 - 100
-            let rMid1    : Float = rMid0    + max(2100, R * 1.05)
-            let rFar0    : Float = rMid1    + max(650,  R * 0.34)
-            let rFar1    : Float = rFar0    + max(3000, R * 1.40)
-            let rUltra0  : Float = rFar1    + max(700,  R * 0.40)
-            let rUltra1  : Float = rUltra0  + max(1600, R * 0.60)
-
+            let rBridge1 : Float = rBridge0 + max(900, R * 0.42)
+            let rMid0 : Float = rBridge1 - 100
+            let rMid1 : Float = rMid0 + max(2100, R * 1.05)
+            let rFar0 : Float = rMid1 + max(650, R * 0.34)
+            let rFar1 : Float = rFar0 + max(3000, R * 1.40)
+            let rUltra0 : Float = rFar1 + max(700, R * 0.40)
+            let rUltra1 : Float = rUltra0 + max(1600, R * 0.60)
             cloudRMin = rNearHole
             cloudRMax = rUltra1
+            _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1)
         }
 
-        // Time step (t is SceneKit’s renderTime; clamp for safety)
-        struct AdvectClock { static var last: TimeInterval = 0 }
-        let rawDt = (AdvectClock.last == 0) ? 1.0/60.0 : max(0, t - AdvectClock.last)
+        let sunW = simd_normalize(sunDirWorld)
+        VolCloudUniformsStore.shared.update(
+            time: Float(t),
+            sunDirWorld: sunW,
+            wind: cloudWind,
+            domainOffset: cloudDomainOffset,
+            domainRotate: 0,
+            baseY: 400, topY: 1400,
+            coverage: 0.50,
+            densityMul: 1.15,
+            stepMul: 0.85,
+            mieG: 0.60,
+            powderK: 2.10,
+            horizonLift: 0.14,
+            detailMul: 1.10,
+            puffScale: 0.0045,
+            puffStrength: 0.65
+        )
+
+        let rawDt: TimeInterval = (AdvectClock.last == 0) ? (1.0/60.0) : max(0, t - AdvectClock.last)
         AdvectClock.last = t
-        let dt: Float = Float(min(1.0/30.0, max(1.0/180.0, rawDt))) // slightly tighter max
-
-        // If the (heavy) volumetric sphere exists, feed its uniforms; otherwise just advect billboards
-        if
-            let sphere = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false)
-            ?? scene.rootNode.childNode(withName: "VolumetricCloudLayer", recursively: false),
-            let m = sphere.geometry?.firstMaterial
-        {
-            m.setValue(CGFloat(t), forKey: "time")
-
-            let pov = (scnView?.pointOfView ?? camNode).presentation
-            let invView = simd_inverse(pov.simdWorldTransform)
-            let sunView4 = invView * simd_float4(sunDirWorld, 0)
-            let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-
-            m.setValue(SCNVector3(sunView.x, sunView.y, sunView.z), forKey: "sunDirView")
-            m.setValue(SCNVector3(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z), forKey: "sunDirWorld")
-            m.setValue(SCNVector3(cloudWind.x, cloudWind.y, 0), forKey: "wind")
-            m.setValue(SCNVector3(cloudDomainOffset.x, cloudDomainOffset.y, 0), forKey: "domainOffset")
-            m.setValue(0.0 as CGFloat, forKey: "domainRotate")
-        }
-
-        // Billboard conveyor
+        let dt: Float = Float(min(1.0/30.0, max(1.0/180.0, rawDt)))
         advectAllCloudBillboards(dt: dt)
     }
+
 
     // MARK: - Billboard advection (covers every possible parentage)
     @MainActor
