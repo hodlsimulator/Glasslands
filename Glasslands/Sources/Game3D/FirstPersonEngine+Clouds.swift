@@ -11,9 +11,7 @@ import UIKit
 import CoreGraphics
 
 @MainActor
-private enum AdvectClock {
-    static var last: TimeInterval = 0
-}
+private enum AdvectClock { static var last: TimeInterval = 0 }
 
 extension FirstPersonEngine {
 
@@ -60,7 +58,6 @@ extension FirstPersonEngine {
         if on { prewarmCloudImpostorPipelines() }
     }
 
-    // Called by RendererProxy each frame
     @MainActor
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
         if skyAnchor.parent == scene.rootNode {
@@ -84,6 +81,17 @@ extension FirstPersonEngine {
             _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1)
         }
 
+        // Dynamic quality: ramps up on idle, backs off if frame time slips.
+        // Very simple heuristic using display link dt.
+        let rawDt: TimeInterval = (AdvectClock.last == 0) ? (1.0/60.0) : max(0, t - AdvectClock.last)
+        AdvectClock.last = t
+        let fps = 1.0 / max(1e-6, rawDt)
+        // Target 60; if under 55, drop quality; if over 60, gently rise.
+        let prevQ = VolCloudUniformsStore.shared.snapshot().params4.y
+        var q = prevQ
+        if fps < 55 { q -= 0.06 } else if fps > 60.5 { q += 0.02 }
+        q = max(0.35, min(1.0, q))
+
         let sunW = simd_normalize(sunDirWorld)
         VolCloudUniformsStore.shared.update(
             time: Float(t),
@@ -93,23 +101,20 @@ extension FirstPersonEngine {
             domainRotate: 0,
             baseY: 400, topY: 1400,
             coverage: 0.50,
-            densityMul: 1.15,
-            stepMul: 0.85,
+            densityMul: 1.10,       // slightly reduced; helps transparency integrate faster
+            stepMul: 0.80,          // let shader control most of the budget
             mieG: 0.60,
-            powderK: 2.10,
-            horizonLift: 0.14,
-            detailMul: 1.10,
-            puffScale: 0.0045,
-            puffStrength: 0.65
+            powderK: 1.80,          // a notch cheaper bias
+            horizonLift: 0.12,
+            detailMul: 1.00,
+            puffScale: 0.0050,      // slightly smaller, more numerous cells (looks fluffier at lower quality)
+            puffStrength: 0.62,
+            quality: q
         )
 
-        let rawDt: TimeInterval = (AdvectClock.last == 0) ? (1.0/60.0) : max(0, t - AdvectClock.last)
-        AdvectClock.last = t
         let dt: Float = Float(min(1.0/30.0, max(1.0/180.0, rawDt)))
         advectAllCloudBillboards(dt: dt)
     }
-
-
     // MARK: - Billboard advection (covers every possible parentage)
     @MainActor
     private func advectAllCloudBillboards(dt: Float) {

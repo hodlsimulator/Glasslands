@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  Volumetric vapour via micro “puffs” coalescing into cumulus.
-//  Premultiplied pure white; sun/self-shadowing only changes alpha.
+//  Volumetric vapour with adaptive two-phase raymarch and quality control.
+//  Premultiplied pure white; sun/self-shadowing lives in alpha.
 //
 
 #include <metal_stdlib>
@@ -21,17 +21,11 @@ struct GLCloudUniforms {
     float4 params1;   // x=topY, y=coverage, z=densityMul, w=stepMul
     float4 params2;   // x=mieG, y=powderK, z=horizonLift, w=detailMul
     float4 params3;   // x=domainOffX, y=domainOffY, z=domainRotate, w=puffScale
-    float4 params4;   // x=puffStrength
+    float4 params4;   // x=puffStrength, y=quality(0.3..1), z/w unused
 };
 
-struct GLVSIn {
-    float3 position [[ attribute(SCNVertexSemanticPosition) ]];
-};
-
-struct GLVSOut {
-    float4 position [[position]];
-    float3 worldPos;
-};
+struct GLVSIn  { float3 position [[ attribute(SCNVertexSemanticPosition) ]]; };
+struct GLVSOut { float4 position [[position]]; float3 worldPos; };
 
 vertex GLVSOut gl_vapour_vertex(GLVSIn vin [[stage_in]],
                                 constant SCNSceneBuffer& scn_frame [[buffer(0)]])
@@ -44,7 +38,7 @@ vertex GLVSOut gl_vapour_vertex(GLVSIn vin [[stage_in]],
     return o;
 }
 
-// ---- inline helpers (no out-of-line definitions) ----
+// ---- inline helpers (kept tiny) ----
 inline float hash1(float n) { return fract(sin(n) * 43758.5453123f); }
 inline float hash12(float2 p){ return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123f); }
 
@@ -63,42 +57,33 @@ inline float noise3(float3 x) {
     return mix(nxy0, nxy1, f.z);
 }
 
-inline float fbm4(float3 p){
+inline float fbmN(float3 p, int oct){
     float a = 0.0, w = 0.5;
-    for (int i=0; i<4; ++i){ a += noise3(p) * w; p = p * 2.02 + 19.19; w *= 0.5; }
+    for (int i=0; i<4; ++i){ if (i>=oct) break; a += noise3(p) * w; p = p * 2.02 + 19.19; w *= 0.5; }
     return a;
 }
 
+// Cheap 2D Worley (F1) on XZ for micro “puffs”
 inline float worley2(float2 x){
     float2 i = floor(x), f = x - i;
     float d = 1e9;
-    for (int y=-1; y<=1; ++y){
-        for (int xk=-1; xk<=1; ++xk){
-            float2 g = float2(xk,y);
-            float2 o = float2(hash12(i+g), hash12(i+g+19.7));
-            float2 r = g + o - f;
-            d = min(d, dot(r,r));
-        }
+    for (int y=-1; y<=1; ++y)
+    for (int xk=-1; xk<=1; ++xk){
+        float2 g = float2(xk,y);
+        float2 o = float2(hash12(i+g), hash12(i+g+19.7));
+        float2 r = g + o - f;
+        d = min(d, dot(r,r));
     }
     return sqrt(max(d,0.0));
 }
 
-inline float puffFBM(float2 x) {
+inline float puffFBM(float2 x, int oct) {
     float a = 0.0, w = 0.55, s = 1.0;
-    for (int i=0; i<3; ++i){
+    for (int i=0; i<3; ++i){ if (i>=oct) break;
         float v = 1.0 - clamp(worley2(x*s), 0.0, 1.0);
         a += v*w; s *= 2.03; w *= 0.55;
     }
     return clamp(a, 0.0, 1.0);
-}
-
-inline float2 curl2(float2 xz){
-    const float e = 0.02;
-    float n1 = noise3(float3(xz.x+e,0.0,xz.y)) - noise3(float3(xz.x-e,0.0,xz.y));
-    float n2 = noise3(float3(xz.x,0.0,xz.y+e)) - noise3(float3(xz.x,0.0,xz.y-e));
-    float2 v = float2(n2,-n1);
-    float len = max(length(v), 1e-5);
-    return v/len;
 }
 
 inline float hProfile(float y, float b, float t){
@@ -113,7 +98,8 @@ inline float phaseHG(float mu, float g){
     return (1.0 - g2) / max(1e-4, 4.0*kPI*pow(1.0 + g2 - 2.0*g*mu, 1.5));
 }
 
-inline float densityAt(float3 wp, constant GLCloudUniforms& U){
+// Density field: base mass + micro-cells coalescing (octaves adapt to quality)
+inline float densityAt(float3 wp, constant GLCloudUniforms& U, float Q){
     float time         = U.params0.x;
     float2 wind        = float2(U.params0.y, U.params0.z);
     float baseY        = U.params0.w;
@@ -126,6 +112,11 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float puffScale    = max(1e-4, U.params3.w);
     float puffStrength = clamp(U.params4.x, 0.0, 1.5);
 
+    // pick octaves from Q (low Q = fewer octaves)
+    int octBase  = (Q > 0.7 ? 4 : (Q > 0.5 ? 3 : 2));
+    int octErode = (Q > 0.7 ? 4 : 2);
+    int octPuff  = (Q > 0.7 ? 3 : 2);
+
     float h01 = hProfile(wp.y, baseY, topY);
 
     float ca = cos(domRot), sa = sin(domRot);
@@ -134,17 +125,19 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
     float adv = mix(0.55, 1.55, h01);
     float2 advXY = xzr + wind * adv * (time * 0.0035);
 
+    // Low-frequency mass
     float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00110;
-    float base = fbm4(P0 * float3(1.0, 0.35, 1.0));
+    float base = fbmN(P0 * float3(1.0, 0.35, 1.0), octBase);
 
+    // Micro puffs: Worley/Fbm on XZ with a tiny Y warp
     float yy = wp.y * 0.002 + 5.37;
-    float puffs = puffFBM(advXY * puffScale + float2(yy, -yy*0.7));
+    float puffs = puffFBM(advXY * puffScale + float2(yy, -yy*0.7), octPuff);
 
+    // Erosion
     float3 P1 = float3(advXY.x, wp.y*1.8, advXY.y) * 0.0046 + float3(2.7,0.0,-5.1);
-    float erode = fbm4(P1);
-    float2 cr = curl2(advXY * 0.0022);
+    float erode = fbmN(P1, octErode);
 
-    float shape = base + puffStrength*(puffs - 0.5) - (1.0 - erode) * (0.38 * detailMul) + 0.10 * cr.x;
+    float shape = base + puffStrength*(puffs - 0.5) - (1.0 - erode) * (0.38 * detailMul);
 
     float dens  = clamp( (shape - (1.0 - coverage)) / max(1e-3, coverage), 0.0, 1.0 );
     dens *= hProfile(wp.y + horizonLift*120.0, baseY, topY);
@@ -153,15 +146,20 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U){
 
 fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                                   constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-                                  constant GLCloudUniforms& uCloudsGL [[buffer(1)]])
+                                  constant GLCloudUniforms& u [[buffer(1)]])
 {
+    // quality knob from uniforms (0.3..1)
+    float Q = clamp(u.params4.y, 0.3, 1.0);
+
+    // Camera + view ray
     float4 camW4 = scn_frame.inverseViewTransform * float4(0,0,0,1);
     float3 camPos = camW4.xyz / camW4.w;
     float3 V = normalize(in.worldPos - camPos);
 
-    float baseY = uCloudsGL.params0.w;
-    float topY  = uCloudsGL.params1.x;
+    float baseY = u.params0.w;
+    float topY  = u.params1.x;
 
+    // Intersect cloud slab
     float vdY   = V.y;
     float t0    = (baseY - camPos.y) / max(1e-5, vdY);
     float t1    = (topY  - camPos.y) / max(1e-5, vdY);
@@ -169,47 +167,73 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float tExt  = min(tEnt + 5000.0, max(t0, t1));
     if (tExt <= tEnt + 1e-5) discard_fragment();
 
-    int   Nbase = 32;
-    int   N  = clamp(int(round(float(Nbase) * clamp(uCloudsGL.params1.w, 0.35, 1.25))), 16, 60);
+    // Ray length & adaptive step budget (low Q => fewer steps)
     float Lm = tExt - tEnt;
-    float dt = Lm / float(N);
 
+    // Distance-based LOD: coarser steps when far from camera
+    float distLOD = clamp(Lm / 4000.0, 0.0, 1.5);  // 0 near, ~1+ far
+    int   Nbase = (Q > 0.8 ? 36 : (Q > 0.6 ? 28 : 20));
+    int   N     = clamp(int(round(float(Nbase) * (0.90 + 0.6*distLOD))), 12, 48);
+    float dt    = Lm / float(N);
+
+    // Dither to reduce banding
     float2 st = float2(in.position.x, in.position.y);
     float  j  = fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453);
     float  t  = tEnt + (0.25 + 0.5*j) * dt;
 
-    float3 S  = normalize(uCloudsGL.sunDirWorld.xyz);
+    float3 S  = normalize(u.sunDirWorld.xyz);
     float  mu = clamp(dot(V, S), -1.0, 1.0);
-    float  g  = clamp(uCloudsGL.params2.x, 0.0, 0.95);
+    float  g  = clamp(u.params2.x, 0.0, 0.95);
 
     float T = 1.0;
 
-    for (int i=0; i<N && T>0.004; ++i) {
-        float3 sp  = camPos + V * t;
-        float  rho = densityAt(sp, uCloudsGL);
-        if (rho < 1e-4) { t += dt * 1.6; continue; }
+    // Two-phase march: coarse skip until we hit meaningful density,
+    // then refine locally with a short burst of finer steps.
+    const float rhoGate = 0.025;          // “empty” threshold
+    const float refineMul = 0.45;         // local refinement dt
+    const int   refineMax = 4;            // at most 4 local refinements
+    const float skipMul = (0.9 + (1.6 - 0.9) * (1.0 - Q)); // low Q => larger skips
 
-        float Lsun = 1.0;
-        {
-            const int NL = 4;
-            float dL = ((topY - baseY)/max(1,NL)) * 0.90;
-            float3 lp = sp;
-            for (int j=0; j<NL && Lsun > 0.02; ++j){
-                lp += S * dL;
-                float occ = densityAt(lp, uCloudsGL);
-                float aL  = 1.0 - exp(-occ * max(0.0, uCloudsGL.params1.z) * dL * 0.010);
-                Lsun *= (1.0 - aL);
-            }
+    for (int i=0; i<N && T>0.005; ++i) {
+        float3 sp  = camPos + V * t;
+        float  rho = densityAt(sp, u, Q);
+
+        if (rho < rhoGate) {
+            t += dt * skipMul;
+            continue;
         }
 
-        float sigma = max(0.0, uCloudsGL.params1.z) * 0.022;
-        float aStep = 1.0 - exp(-rho * sigma * dt);
+        // Local refinement burst
+        float td = dt * refineMul;
+        for (int k=0; k<refineMax && T>0.005; ++k){
+            float3 sp2 = sp + V * (td * float(k));
+            float  rho2 = densityAt(sp2, u, Q);
 
-        float ph    = phaseHG(mu, g);
-        float shade = Lsun * exp(-uCloudsGL.params2.y * (1.0 - rho));
-        float gain  = clamp(0.85 + 0.35 * ph * shade, 0.0, 1.5);
+            // 2-tap sun probe (cheaper than 4)
+            float Lsun = 1.0;
+            {
+                int   NL = (Q > 0.7 ? 3 : 2);
+                float dL = ((topY - baseY)/max(1,NL)) * 0.90;
+                float3 lp = sp2;
+                for (int j2=0; j2<NL && Lsun > 0.02; ++j2){
+                    lp += S * dL;
+                    float occ = densityAt(lp, u, Q);
+                    float aL  = 1.0 - exp(-occ * max(0.0, u.params1.z) * dL * 0.010);
+                    Lsun *= (1.0 - aL);
+                }
+            }
 
-        T *= (1.0 - aStep * gain);
+            float sigma = max(0.0, u.params1.z) * 0.022;
+            float aStep = 1.0 - exp(-rho2 * sigma * td);
+
+            float ph    = phaseHG(mu, g);
+            float shade = Lsun * exp(-u.params2.y * (1.0 - rho2));
+            float gain  = clamp(0.85 + 0.30 * ph * shade, 0.0, 1.4); // slightly cheaper bias
+
+            T *= (1.0 - aStep * gain);
+            if (T <= 0.005) break;
+        }
+
         t += dt;
     }
 
