@@ -25,20 +25,21 @@ enum SkyAtmosphereProgram {
         params0    : SIMD4<Float>(2.5, 0.6, 1.25, 0.12)
     )
 
-    @MainActor
+    // Non-isolated binder used by SceneKit render queue
+    private static func bindSky(stream: SCNBufferStream, _: SCNNode, _: any SCNShadable, _: SCNRenderer) {
+        var u = U
+        withUnsafeBytes(of: &u) { raw in
+            if let base = raw.baseAddress {
+                stream.writeBytes(base, count: raw.count)
+            }
+        }
+    }
+
     static func makeMaterial() -> SCNMaterial {
         let p = SCNProgram()
         p.vertexFunctionName   = "sky_vertex"
         p.fragmentFunctionName = "sky_fragment"
-
-        p.handleBinding(ofBufferNamed: "U", frequency: .perFrame) { stream, _, _, _ in
-            var u = U
-            withUnsafeBytes(of: &u) { raw in
-                if let base = raw.baseAddress {
-                    stream.writeBytes(base, count: raw.count)
-                }
-            }
-        }
+        p.handleBinding(ofBufferNamed: "U", frequency: .perFrame, handler: bindSky)
 
         let m = SCNMaterial()
         m.lightingModel = .constant
@@ -58,7 +59,7 @@ enum SkyAtmosphereProgram {
         return m
     }
 
-    // Not @MainActor: safe to call from render queue
+    // Called from render queue by your tick
     static func updateUniforms(from m: SCNMaterial) {
         func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
         func v3(_ v: Any?) -> SIMD3<Float> {

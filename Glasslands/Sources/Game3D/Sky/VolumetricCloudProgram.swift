@@ -32,26 +32,26 @@ enum VolumetricCloudProgram {
         params3    : SIMD4<Float>(0,0,0,0)
     )
 
-    @MainActor
+    // Non-isolated binder called by SceneKit on its render queue
+    private static func bindClouds(stream: SCNBufferStream, _: SCNNode, _: any SCNShadable, _: SCNRenderer) {
+        var U = Self.currentU
+        withUnsafeBytes(of: &U) { rawBuf in
+            if let base = rawBuf.baseAddress {
+                stream.writeBytes(base, count: rawBuf.count)
+            }
+        }
+    }
+
     static func makeMaterial() -> SCNMaterial {
         let prog = SCNProgram()
         prog.vertexFunctionName   = "clouds_vertex"
         prog.fragmentFunctionName = "clouds_fragment"
-
-        // 4-parameter closure: (stream, node, shadable, renderer)
-        prog.handleBinding(ofBufferNamed: "uClouds", frequency: .perFrame) { stream, _, _, _ in
-            var U = Self.currentU
-            withUnsafeBytes(of: &U) { rawBuf in
-                if let base = rawBuf.baseAddress {
-                    stream.writeBytes(base, count: rawBuf.count)
-                }
-            }
-        }
+        prog.handleBinding(ofBufferNamed: "uClouds", frequency: .perFrame, handler: bindClouds)
 
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = false
-        m.cullMode = .front                 // render interior of skydome
+        m.cullMode = .front
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
         m.blendMode = .alpha
@@ -76,7 +76,7 @@ enum VolumetricCloudProgram {
         return m
     }
 
-    // Not @MainActor: SceneKit calls the tick on its render queue
+    // Called from render queue by your tick
     static func updateUniforms(from m: SCNMaterial) {
         func f(_ v: Any?) -> Float { (v as? NSNumber)?.floatValue ?? 0 }
         func v3(_ v: Any?) -> SIMD3<Float> {

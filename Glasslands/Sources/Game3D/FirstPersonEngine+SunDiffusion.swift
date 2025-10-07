@@ -29,7 +29,6 @@ extension FirstPersonEngine {
         let D = max(0.0, 1.0 - E)
         let thickF = CGFloat(smoothstep(0.82, 0.97, cover.union))
 
-        // Sun is the only illuminant
         let baseIntensity: CGFloat = 1500
         sun.intensity = baseIntensity * max(0.06, E)
 
@@ -46,7 +45,6 @@ extension FirstPersonEngine {
         let a = alphaClear + (floorA - alphaClear) * D
         sun.shadowColor = UIColor(white: 0.0, alpha: a)
 
-        // No sky fill; keep off so shaded areas stay shaded
         if let skyFill = scene.rootNode.childNode(withName: "GL_SkyFill", recursively: false)?.light {
             skyFill.intensity = 0
         }
@@ -212,30 +210,26 @@ private var _cloudShadowNode: SCNNode?
 private extension FirstPersonEngine {
 
     func ensureCloudShadowProjector() {
-        if _cloudShadowRenderer == nil, let dev = scnView?.device {
+        if _cloudShadowRenderer == nil {
+            // iOS devices expose a single Metal device; safe to use default here.
+            guard let dev = MTLCreateSystemDefaultDevice() else { return }
             _cloudShadowRenderer = CloudShadowRenderer(engine: self, device: dev)
         }
         if _cloudShadowNode == nil {
             let L = SCNLight()
             L.type = .directional
-
-            // Modulated shadows need castsShadow = true; gobo drives the “shadow”.
             L.castsShadow = true
             L.shadowMode = .modulated
             L.shadowMapSize = CGSize(width: 1024, height: 1024)
             L.shadowSampleCount = 1
             L.shadowRadius = 0
             L.shadowColor = UIColor(white: 0, alpha: 1.0)
-
-            L.intensity = 0                 // no additive light
+            L.intensity = 0
             L.orthographicScale = 2400.0
             L.zNear = 0.1
             L.zFar  = 20000
             L.automaticallyAdjustsShadowProjection = false
-
-            // Match ground receivers
             L.categoryBitMask = 0x0000_0400
-
             if let g = L.gobo {
                 g.wrapS = .clamp
                 g.wrapT = .clamp
@@ -244,7 +238,6 @@ private extension FirstPersonEngine {
                 g.magnificationFilter = .linear
                 g.intensity = 1.0
             }
-
             let node = SCNNode()
             node.name = "GL_CloudShadows"
             node.light = L
