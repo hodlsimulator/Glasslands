@@ -63,7 +63,7 @@ extension FirstPersonEngine {
                 for m in g.materials {
                     // sun-only white
                     m.setValue(sunViewV,        forKey: "sunDirView")
-                    m.setValue(0.00 as CGFloat, forKey: "hgG")
+                    m.setValue(0.55 as CGFloat, forKey: "hgG")
                     m.setValue(1.00 as CGFloat, forKey: "baseWhite")
                     m.setValue(1.00 as CGFloat, forKey: "hiGain")
 
@@ -86,7 +86,7 @@ extension FirstPersonEngine {
                     m.setValue(1.80 as CGFloat,  forKey: "shapePow")
 
                     m.setValue(0.28 as CGFloat,  forKey: "microAmp")
-                    m.setValue(0.40 as CGFloat,  forKey: "occK")
+                    m.setValue(0.55 as CGFloat,  forKey: "occK")
                 }
             }
         }
