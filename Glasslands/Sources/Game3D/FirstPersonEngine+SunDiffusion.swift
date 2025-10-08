@@ -4,10 +4,10 @@
 //
 //  Created by . . on 10/6/25.
 //
-//  Sun control + soft cloud-shadow projection using a compute occlusion map.
+//  Sun control + soft cloud-shadow projection (gobo).
 //  – Sun is the only light.
-//  – Clouds cast soft shadows via the light’s gobo (RGBA, achromatic).
-//  – Directional light uses FORWARD shadows with a fixed ortho frustum to stop flicker/clipping.
+//  – FORWARD shadows with fixed ortho frustum so object shadows are stable.
+//  – Cloud gobo remains RGBA & edge-faded to avoid banding.
 //
 
 import SceneKit
@@ -35,25 +35,25 @@ extension FirstPersonEngine {
         sun.intensity = 1500 * max(0.06, E)
         sun.color = UIColor(white: 1.0, alpha: 1.0)
 
-        // --- stable object shadows ---
+        // ---------- stable object shadows ----------
         sun.castsShadow = true
-        sun.shadowMode = .forward                     // more stable with gobo
+        sun.shadowMode = .forward               // sturdy on iOS with gobos
         sun.shadowMapSize = CGSize(width: 2048, height: 2048)
-        sun.shadowSampleCount = 8
-        sun.shadowRadius = 2.0
-        sun.shadowBias = 2.0
-        sun.shadowColor = UIColor(white: 0.0, alpha: 0.45)
+        sun.shadowSampleCount = 12
+        sun.shadowRadius = 1.5
+        sun.shadowBias = 0.15                   // low bias → clear contact, no peter-panning
+        sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
 
-        // lock the frustum so it doesn't resize/clip while walking
+        // lock projection so it doesn’t resize when walking
         sun.automaticallyAdjustsShadowProjection = false
-        let halfSize: Float = 2200.0                  // keep in sync with gobo square below
+        let halfSize: Float = 2200.0            // keep in sync with gobo square below
         sun.orthographicScale = CGFloat(halfSize * 2.0)
-        sun.zNear = 10.0
+        sun.zNear = 2.0
         sun.zFar  = 9000.0
         if #available(iOS 15.0, *) {
             sun.shadowCascadeCount = 3
-            sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
             sun.shadowCascadeSplittingFactor = 0.7
+            sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
         }
 
         ensureCloudShadowProjector()
@@ -74,12 +74,12 @@ extension FirstPersonEngine {
     // MARK: Cloud shadow projector (compute → gobo)
 
     private struct CloudUniforms {
-        var sunDirWorld: SIMD4<Float>   // xyz dir, w unused
-        var sunTint: SIMD4<Float>       // unused
-        var params0: SIMD4<Float>       // time, wind.x, wind.y, baseY
-        var params1: SIMD4<Float>       // topY, coverage, densityMul, pad
-        var params2: SIMD4<Float>       // pad0, pad1, horizonLift, detailMul
-        var params3: SIMD4<Float>       // domainOffset.x, domainOffset.y, domainRotate, pad
+        var sunDirWorld: SIMD4<Float>
+        var sunTint: SIMD4<Float>
+        var params0: SIMD4<Float>   // time, wind.x, wind.y, baseY
+        var params1: SIMD4<Float>   // topY, coverage, densityMul, pad
+        var params2: SIMD4<Float>   // pad0, pad1, horizonLift, detailMul
+        var params3: SIMD4<Float>   // domainOffset.x, domainOffset.y, domainRotate, pad
     }
     private struct ShadowUniforms {
         var centerXZ: SIMD2<Float>
@@ -118,7 +118,7 @@ extension FirstPersonEngine {
         }
 
         if shadowTexture == nil {
-            // RGBA so the gobo is achromatic; avoids color tint.
+            // RGBA so the gobo is achromatic; avoids tint.
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
                                                                 width: 1024, height: 1024,
                                                                 mipmapped: false)
@@ -153,7 +153,7 @@ extension FirstPersonEngine {
         if tNow - lastShadowTime < 0.12 { return }
         lastShadowTime = tNow
 
-        // Square around the camera → should match the light's ortho frustum.
+        // Square around camera → should match the light's ortho frustum.
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
         let halfSize: Float = 2200.0
@@ -189,7 +189,7 @@ extension FirstPersonEngine {
         enc.endEncoding()
         cmd.commit()
 
-        // Keep the light's projection locked to the same footprint → no seams/flicker.
+        // Keep the light’s projection locked to the same footprint.
         sun.automaticallyAdjustsShadowProjection = false
         sun.orthographicScale = CGFloat(halfSize * 2.0)
         if #available(iOS 15.0, *) {
@@ -199,7 +199,7 @@ extension FirstPersonEngine {
         sun.gobo?.intensity = 1.0
     }
 
-    // MARK: Screen-space cover estimator
+    // MARK: Screen-space cover estimator (unchanged)
 
     private func measureSunCover() -> (peak: Float, union: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return (0.0, 0.0) }
