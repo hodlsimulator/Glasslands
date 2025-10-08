@@ -19,23 +19,21 @@ enum CloudImpostorProgram {
         let frag = """
         #pragma transparent
 
-        // ===== uniforms (one per line) =====
+        // ===== uniforms (one per line; SceneKit requirement) =====
         #pragma arguments
         float impostorHalfW;
         float impostorHalfH;
 
-        float stepMul;        // compat only
+        float stepMul;        // compat only (ignored in this path)
         float densityMul;     // extinction strength
         float thickness;      // slab depth
         float densBias;
 
-        float coverage;
-        float puffScale;
+        float coverage;       // 0..1 fullness control
+        float puffScale;      // micro scale
         float edgeFeather;
         float edgeCut;
         float edgeNoiseAmp;
-        float edgeErode;
-        float centreFill;
         float shapeScale;
         float shapeLo;
         float shapeHi;
@@ -50,7 +48,7 @@ enum CloudImpostorProgram {
         float baseWhite;
         float hiGain;
         float edgeSoft;       // unused for light
-        float microAmp;
+        float microAmp;       // unused in this path (kept for compat)
         float occK;
 
         // ===== helpers =====
@@ -132,12 +130,12 @@ enum CloudImpostorProgram {
             return (1.0-g2)/(4.0*3.14159265*denom);
         }
 
+        // no uniform access inside helpers → pass all params explicitly
         inline float sampleD(float2 uvE, float z,
-                             float edgeMask, float baseScale, float detailBoost){
+                             float edgeMask, float baseScale, float detailBoost,
+                             float coreFloorK){
             float m=cauliflower(uvE, z, baseScale, detailBoost);
-            // derive a safe core floor from centreFill (no extra uniform needed)
-            float coreFloorK = clamp(0.18 + 0.22 * centreFill, 0.0, 0.6);
-            m=max(m, coreFloorK*edgeMask);
+            m=max(m, coreFloorK*edgeMask);               // core floor kills holes
             float macro2=macroMask2D(uvE*0.62 + float2(z*0.07,-z*0.05));
             return clamp(m*macro2,0.0,1.0)*edgeMask;
         }
@@ -175,17 +173,19 @@ enum CloudImpostorProgram {
         float edgeMask=interior*sMask;
         if(edgeMask<0.01){ discard_fragment(); }
 
-        float covLocal=mix(max(0.0,coverage-edgeErode),min(1.0,coverage+centreFill),edgeMask);
-        float fillGain=mix(1.0,1.0+centreFill,edgeMask);
+        // derive core-floor and fill gain OUTSIDE helpers so uniforms are not used inside them
+        float coreFloorK = clamp(0.22 + 0.20 * coverage, 0.0, 0.6);   // 0.22..0.42 as coverage grows
+        float fillGain   = mix(1.0, 1.70, edgeMask);                  // fuller centres
+
         float Lm=clamp(thickness,0.50,8.0);
+        float baseScale=max(1e-4,puffScale);
 
         // five fixed z samples (unrolled), Simpson weights 1-4-2-4-1 → /12
-        float baseScale=max(1e-4,puffScale);
-        float d0=sampleD(uvE,-0.4,edgeMask,baseScale,detailBoost);
-        float d1=sampleD(uvE,-0.2,edgeMask,baseScale,detailBoost);
-        float d2=sampleD(uvE, 0.0,edgeMask,baseScale,detailBoost);
-        float d3=sampleD(uvE, 0.2,edgeMask,baseScale,detailBoost);
-        float d4=sampleD(uvE, 0.4,edgeMask,baseScale,detailBoost);
+        float d0=sampleD(uvE,-0.4,edgeMask,baseScale,detailBoost,coreFloorK);
+        float d1=sampleD(uvE,-0.2,edgeMask,baseScale,detailBoost,coreFloorK);
+        float d2=sampleD(uvE, 0.0,edgeMask,baseScale,detailBoost,coreFloorK);
+        float d3=sampleD(uvE, 0.2,edgeMask,baseScale,detailBoost,coreFloorK);
+        float d4=sampleD(uvE, 0.4,edgeMask,baseScale,detailBoost,coreFloorK);
         float avgD=(d0 + 4.0*d1 + 2.0*d2 + 4.0*d3 + d4) * (1.0/12.0);
 
         // sun-only white
@@ -196,7 +196,7 @@ enum CloudImpostorProgram {
 
         // single-tap self-occlusion toward sun
         float2 sunUV=normalize(abs(sView.x)+abs(sView.y)>1e-4 ? float2(sView.x,sView.y) : float2(0.0001,0.0001));
-        float occ=sampleD(uvE + sunUV*0.22, 0.18, edgeMask, baseScale, detailBoost);
+        float occ=sampleD(uvE + sunUV*0.22, 0.18, edgeMask, baseScale, detailBoost, coreFloorK);
         float shadow=1.0 - clamp(occK*occ, 0.0, 0.85);
 
         // Beer–Lambert through the slab
@@ -224,7 +224,7 @@ enum CloudImpostorProgram {
         m.setValue(halfWidth,  forKey: "impostorHalfW")
         m.setValue(halfHeight, forKey: "impostorHalfH")
 
-        // dense but safe defaults (guarantee visible output)
+        // dense but safe defaults
         m.setValue(0.50 as CGFloat,  forKey: "stepMul")
         m.setValue(9.00 as CGFloat,  forKey: "densityMul")
         m.setValue(3.20 as CGFloat,  forKey: "thickness")
@@ -235,8 +235,6 @@ enum CloudImpostorProgram {
         m.setValue(0.12 as CGFloat,  forKey: "edgeFeather")
         m.setValue(0.06 as CGFloat,  forKey: "edgeCut")
         m.setValue(0.16 as CGFloat,  forKey: "edgeNoiseAmp")
-        m.setValue(0.60 as CGFloat,  forKey: "edgeErode")
-        m.setValue(0.78 as CGFloat,  forKey: "centreFill")
         m.setValue(1.03 as CGFloat,  forKey: "shapeScale")
         m.setValue(0.40 as CGFloat,  forKey: "shapeLo")
         m.setValue(0.68 as CGFloat,  forKey: "shapeHi")
@@ -252,7 +250,6 @@ enum CloudImpostorProgram {
         m.setValue(1.00 as CGFloat,  forKey: "baseWhite")
         m.setValue(1.00 as CGFloat,  forKey: "hiGain")
         m.setValue(0.00 as CGFloat,  forKey: "edgeSoft")
-        m.setValue(0.28 as CGFloat,  forKey: "microAmp")
         m.setValue(0.40 as CGFloat,  forKey: "occK")
 
         m.diffuse.contents = UIColor.white
