@@ -65,6 +65,9 @@ struct VegetationPlacer3D {
 
                 // Important: ensure the **root** casts
                 tree.castsShadow = true
+                
+                // Also force all current/future geometry children to cast
+                tree.enumerateChildNodes { child, _ in child.castsShadow = true }
 
                 applyLOD(to: tree)
                 nodes.append(tree)

@@ -100,18 +100,30 @@ extension FirstPersonEngine {
         sun.intensity = 1500
         sun.color = UIColor.white
 
-        // Fixed shadow frustum so the sky can be lit without blowing up the map
+        // Shadow tuning: crisper contact + stable coverage around the player
         sun.castsShadow = true
+        sun.shadowMode = .deferred
         sun.shadowMapSize = CGSize(width: 2048, height: 2048)
         sun.shadowSampleCount = 8
-        sun.shadowRadius = 2.0
+        sun.shadowRadius = 2.5
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.70)
-        sun.shadowBias = 1.0
-        sun.automaticallyAdjustsShadowProjection = false
-        sun.orthographicScale = 320
-        sun.maximumShadowDistance = 1400
 
-        // Light the terrain|default|vegetation categories (sky is default)
+        // Key change: lower bias so tree/rock bases actually “touch” the ground
+        sun.shadowBias = 0.15
+
+        // Fixed frustum (no auto) centred on the player
+        sun.automaticallyAdjustsShadowProjection = false
+
+        // Wider orthographic footprint right around the camera;
+        // slightly shorter max distance preserves map resolution
+        sun.orthographicScale = 480
+        sun.maximumShadowDistance = 800
+
+        // Cascades dramatically improve near-camera shadow detail on large terrains
+        sun.shadowCascadeCount = 3
+        sun.shadowCascadeSplittingFactor = 0.85
+
+        // Light the terrain (0x400) + vegetation (0x2) + default (0x1)
         sun.categoryBitMask = 0x0000_0403
 
         let sunNode = SCNNode()
@@ -135,14 +147,16 @@ extension FirstPersonEngine {
         // Aim sky fill straight down (world −Y)
         let origin = yawNode.presentation.position
         skyFillNode.position = origin
-        skyFillNode.look(at: SCNVector3(origin.x, origin.y - 1.0, origin.z),
-                         up: scene.rootNode.worldUp,
-                         localFront: SCNVector3(0, 0, -1))
+        skyFillNode.look(
+            at: SCNVector3(origin.x, origin.y - 1.0, origin.z),
+            up: scene.rootNode.worldUp,
+            localFront: SCNVector3(0, 0, -1)
+        )
 
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
 
-        // Aim the sun
+        // Aim the sun to match the HDR disc and cloud uniforms
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
