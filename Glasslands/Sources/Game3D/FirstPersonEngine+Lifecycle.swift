@@ -94,21 +94,24 @@ extension FirstPersonEngine {
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Sun (casts shadows) — same shape as 786737
+        // Sun (casts shadows)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1500
         sun.color = UIColor.white
 
-        // IMPORTANT: let SceneKit manage the shadow frustum; this was the stable setup.
+        // Fixed shadow frustum so the sky can be lit without blowing up the map
         sun.castsShadow = true
-        sun.shadowMapSize = CGSize(width: 1024, height: 1024)
-        sun.shadowSampleCount = 4
-        sun.shadowRadius = 1.2
-        sun.shadowColor = UIColor(white: 0.0, alpha: 0.65)
-        sun.automaticallyAdjustsShadowProjection = true
+        sun.shadowMapSize = CGSize(width: 2048, height: 2048)
+        sun.shadowSampleCount = 8
+        sun.shadowRadius = 2.0
+        sun.shadowColor = UIColor(white: 0.0, alpha: 0.70)
+        sun.shadowBias = 1.0
+        sun.automaticallyAdjustsShadowProjection = false
+        sun.orthographicScale = 320
+        sun.maximumShadowDistance = 1400
 
-        // Light the same categories we used when shadows worked (terrain|default|vegetation)
+        // Light the terrain|default|vegetation categories (sky is default)
         sun.categoryBitMask = 0x0000_0403
 
         let sunNode = SCNNode()
