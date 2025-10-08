@@ -61,34 +61,37 @@ extension FirstPersonEngine {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
+                    // sun-only white
                     m.setValue(sunViewV,        forKey: "sunDirView")
                     m.setValue(0.00 as CGFloat, forKey: "hgG")
                     m.setValue(1.00 as CGFloat, forKey: "baseWhite")
                     m.setValue(1.00 as CGFloat, forKey: "hiGain")
 
-                    m.setValue(0.48 as CGFloat, forKey: "stepMul")
-                    m.setValue(4.00 as CGFloat, forKey: "densityMul")
-                    m.setValue(3.20 as CGFloat, forKey: "thickness")
-                    m.setValue(0.00 as CGFloat, forKey: "densBias")
+                    // ultra-dense + crisp, still fast (matches shader defaults)
+                    m.setValue(9.00 as CGFloat,  forKey: "densityMul")
+                    m.setValue(3.50 as CGFloat,  forKey: "thickness")
+                    m.setValue(0.00 as CGFloat,  forKey: "densBias")
+                    m.setValue(0.50 as CGFloat,  forKey: "stepMul")   // compat
 
-                    m.setValue(0.92 as CGFloat, forKey: "coverage")
-                    m.setValue(0.0048 as CGFloat, forKey: "puffScale")
+                    m.setValue(0.94 as CGFloat,  forKey: "coverage")
+                    m.setValue(0.0042 as CGFloat, forKey: "puffScale")
                     m.setValue(0.12 as CGFloat,  forKey: "edgeFeather")
                     m.setValue(0.06 as CGFloat,  forKey: "edgeCut")
                     m.setValue(0.16 as CGFloat,  forKey: "edgeNoiseAmp")
-                    m.setValue(0.58 as CGFloat,  forKey: "edgeErode")
-                    m.setValue(0.72 as CGFloat,  forKey: "centreFill")
+                    m.setValue(0.62 as CGFloat,  forKey: "edgeErode")
+                    m.setValue(0.78 as CGFloat,  forKey: "centreFill")
 
-                    m.setValue(1.80 as CGFloat,  forKey: "rimFeatherBoost")
+                    m.setValue(1.90 as CGFloat,  forKey: "rimFeatherBoost")
                     m.setValue(3.00 as CGFloat,  forKey: "rimFadePow")
                     m.setValue(1.80 as CGFloat,  forKey: "shapePow")
+                    m.setValue(0.30 as CGFloat,  forKey: "coreFloor")
 
-                    m.setValue(0.30 as CGFloat,  forKey: "microAmp")
+                    m.setValue(0.28 as CGFloat,  forKey: "microAmp")
                     m.setValue(0.40 as CGFloat,  forKey: "occK")
                 }
             }
-        } 
-    }
+        }
+    } 
 
     // HDR sun sprites (unchanged)
     @MainActor
