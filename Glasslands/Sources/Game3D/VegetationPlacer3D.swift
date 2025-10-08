@@ -5,8 +5,7 @@
 //  Created by . . on 9/30/25.
 //
 //  Places trees with per-tree variation.
-//  No physics bodies — collision uses obstacleSink + hitRadius.
-//  LOD uses far-only cull (no near geometry) to avoid SceneKit duplicate-tracking asserts.
+//  Trees now cast reliable shadows: castsShadow set on root and every geometry child.
 //
 
 import SceneKit
@@ -15,16 +14,18 @@ import UIKit
 
 struct VegetationPlacer3D {
 
-    static func place(inChunk ci: IVec2,
-                      cfg: FirstPersonEngine.Config,
-                      noise: NoiseFields,
-                      recipe: BiomeRecipe) -> [SCNNode] {
+    @MainActor
+    static func place(
+        inChunk ci: IVec2,
+        cfg: FirstPersonEngine.Config,
+        noise: NoiseFields,
+        recipe: BiomeRecipe
+    ) -> [SCNNode] {
         let originTile = IVec2(ci.x * cfg.tilesX, ci.y * cfg.tilesZ)
 
         let ux = UInt64(bitPattern: Int64(ci.x))
         let uy = UInt64(bitPattern: Int64(ci.y))
         let seed = recipe.seed64 ^ (ux &* 0x9E3779B97F4A7C15) ^ (uy &* 0xBF58476D1CE4E5B9)
-
         let rng = GKMersenneTwisterRandomSource(seed: seed)
         var ra = RandomAdaptor(rng)
 
@@ -33,6 +34,7 @@ struct VegetationPlacer3D {
 
         for tz in stride(from: 0, to: cfg.tilesZ, by: step) {
             for tx in stride(from: 0, to: cfg.tilesX, by: step) {
+
                 let tileX = originTile.x + tx
                 let tileZ = originTile.y + tz
 
@@ -51,19 +53,19 @@ struct VegetationPlacer3D {
 
                 let jx = (rng.nextUniform() - 0.5) * 0.9
                 let jz = (rng.nextUniform() - 0.5) * 0.9
-
                 let wx = (Float(tileX) + Float(jx)) * cfg.tileSize
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
 
-                let (tree, hitRadius, _) = makeTreeNode(
-                    palette: AppColours.uiColors(from: recipe.paletteHex),
-                    rng: rng
-                )
+                let palette = AppColours.uiColors(from: recipe.paletteHex)
+                let (tree, hitRadius, _) = makeTreeNode(palette: palette, rng: rng)
 
                 tree.position = SCNVector3(wx, wy, wz)
                 tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
+
+                // Important: ensure the **root** casts
                 tree.castsShadow = true
+
                 applyLOD(to: tree)
                 nodes.append(tree)
             }
@@ -72,22 +74,20 @@ struct VegetationPlacer3D {
     }
 
     // MARK: - Varied low-poly conifer (no round spheres)
+
     private static func makeTreeNode(
         palette: [UIColor],
         rng: GKMersenneTwisterRandomSource
     ) -> (SCNNode, Float, CGFloat) {
+
         var r = RandomAdaptor(rng)
 
         let tall = rng.nextUniform() > 0.35
-        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r)
-                                   : CGFloat.random(in: 0.75...1.15, using: &r)
-        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r)
-                                   : CGFloat.random(in: 0.05...0.08, using: &r)
+        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r) : CGFloat.random(in: 0.75...1.15, using: &r)
+        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r) : CGFloat.random(in: 0.05...0.08, using: &r)
 
-        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r)
-                                     : CGFloat.random(in: 1.10...1.60, using: &r)
-        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r)
-                                     : CGFloat.random(in: 0.45...0.70, using: &r)
+        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r) : CGFloat.random(in: 1.10...1.60, using: &r)
+        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r) : CGFloat.random(in: 0.45...0.70, using: &r)
         let canopyTopR1: CGFloat = CGFloat.random(in: 0.06...0.16, using: &r)
 
         let twoStage = rng.nextUniform() > 0.55
@@ -98,16 +98,19 @@ struct VegetationPlacer3D {
         let barkBase = palette.indices.contains(4) ? palette[4] : .brown
         let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
 
-        let bark = barkBase
-            .adjustingHue(by: CGFloat.random(in: -0.02...0.02, using: &r),
-                          satBy: CGFloat.random(in: -0.08...0.08, using: &r),
-                          briBy: CGFloat.random(in: -0.05...0.05, using: &r))
-        let leaf = leafBase
-            .adjustingHue(by: CGFloat.random(in: -0.03...0.03, using: &r),
-                          satBy: CGFloat.random(in: -0.10...0.10, using: &r),
-                          briBy: CGFloat.random(in: -0.06...0.06, using: &r))
+        func adjust(_ c: UIColor, dH: ClosedRange<CGFloat>, dS: ClosedRange<CGFloat>, dB: ClosedRange<CGFloat>) -> UIColor {
+            var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
+            c.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+            h = (h + CGFloat.random(in: dH, using: &r)).truncatingRemainder(dividingBy: 1); if h < 0 { h += 1 }
+            s = max(0, min(1, s + CGFloat.random(in: dS, using: &r)))
+            b = max(0, min(1, b + CGFloat.random(in: dB, using: &r)))
+            return UIColor(hue: h, saturation: s, brightness: b, alpha: a)
+        }
 
-        // Clamp ONLY downward-facing fragments to SDR so the flat underside can’t go HDR.
+        let bark = adjust(barkBase, dH: -0.02...0.02, dS: -0.08...0.08, dB: -0.05...0.05)
+        let leaf = adjust(leafBase, dH: -0.03...0.03, dS: -0.10...0.10, dB: -0.06...0.06)
+
+        // Clamp ONLY downward-facing fragments to SDR so flat undersides don’t bloom.
         let ldrClampDownFrag = """
         #pragma body
         if (_surface.normal.y < 0.05) {
@@ -115,6 +118,7 @@ struct VegetationPlacer3D {
         }
         """
 
+        // Trunk
         let trunk = SCNCylinder(radius: trunkR, height: trunkH)
         let trunkMat = SCNMaterial()
         trunkMat.lightingModel = .physicallyBased
@@ -123,9 +127,9 @@ struct VegetationPlacer3D {
         trunkMat.metalness.contents = 0.0
         trunk.materials = [trunkMat]
 
+        // Canopy 1
         let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
         canopy1.radialSegmentCount = 12
-
         let leafMat = SCNMaterial()
         leafMat.lightingModel = .physicallyBased
         leafMat.diffuse.contents = leaf
@@ -135,27 +139,32 @@ struct VegetationPlacer3D {
         leafMat.shaderModifiers = [.fragment: ldrClampDownFrag]
         canopy1.materials = [leafMat]
 
-        let canopy2: SCNGeometry? = twoStage ? {
+        // Optional second canopy
+        let canopy2Geom: SCNGeometry? = twoStage ? {
             let g = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
             g.radialSegmentCount = 10
-            g.materials = [leafMat]   // shares the same downward clamp
+            g.materials = [leafMat]   // share material
             return g
         }() : nil
 
+        // Assemble
         let node = SCNNode()
 
         let trunkNode = SCNNode(geometry: trunk)
         trunkNode.position = SCNVector3(0, trunkH / 2.0, 0)
+        trunkNode.castsShadow = true
 
         let canopyNode1 = SCNNode(geometry: canopy1)
         canopyNode1.position = SCNVector3(0, trunkH + canopyH1 * 0.5 - 0.02, 0)
+        canopyNode1.castsShadow = true
 
         node.addChildNode(trunkNode)
         node.addChildNode(canopyNode1)
 
-        if let g2 = canopy2 {
+        if let g2 = canopy2Geom {
             let cn2 = SCNNode(geometry: g2)
             cn2.position = SCNVector3(0, trunkH + canopyH1 + canopyH2 * 0.45, 0)
+            cn2.castsShadow = true
             node.addChildNode(cn2)
         }
 
@@ -165,8 +174,11 @@ struct VegetationPlacer3D {
         let treeHeight = trunkH + canopyH1 + canopyH2
         let hitRadius = Float(max(canopyR1 * 0.65, trunkR * 1.6))
 
-        // Vegetation-only lighting category; lit by vegSunLightNode (cat 0x2).
+        // Vegetation-only lighting category; sun includes this (0x00000403).
         node.categoryBitMask = 0x00000002
+
+        // Also mark the root as a caster (children set above too).
+        node.castsShadow = true
 
         return (node, hitRadius, treeHeight)
     }
@@ -178,16 +190,5 @@ struct VegetationPlacer3D {
                 g.levelsOfDetail = [SCNLevelOfDetail(geometry: nil, worldSpaceDistance: far)]
             }
         }
-    }
-}
-
-private extension UIColor {
-    func adjustingHue(by dH: CGFloat, satBy dS: CGFloat, briBy dB: CGFloat) -> UIColor {
-        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
-        getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-        h = (h + dH).truncatingRemainder(dividingBy: 1); if h < 0 { h += 1 }
-        s = max(0, min(1, s + dS))
-        b = max(0, min(1, b + dB))
-        return UIColor(hue: h, saturation: s, brightness: b, alpha: a)
     }
 }
