@@ -5,14 +5,10 @@
 //  Created by . . on 10/7/25.
 //
 //  Volumetric cloud impostors using a fragment-only SceneKit shader modifier.
-//  Goals:
-//  – No depth-of-field blur: keep all puffs crisp/in-focus.
-//  – Fluffy, thick cumulus look with small-scale “cauliflower” detail.
-//  – Irregular silhouettes so the card/plane never reads as a circle or rectangle.
-//  – Gentle single-scattering style lighting with forward-scatter lift and soft self-shadow.
-//
-//  This is SCNMaterial-based (no SCNProgram), so it works on iOS 26 SceneKit without
-//  renderer.prepare pipelines. Premultiplied alpha, depth reads/writes disabled.
+//  Changes in this revision:
+//  – Pure white albedo (no tint).
+//  – Removed ambient/self-light: no base term, no rim lift; sunlight only.
+//  – Kept forward-scatter + soft self-shadow so form reads, but all from sun.
 //
 
 import SceneKit
@@ -25,47 +21,45 @@ enum CloudImpostorProgram {
 
         let frag = """
         #pragma transparent
+
         // ========= uniforms (set on SCNMaterial) =========
         #pragma arguments
         float impostorHalfW;
         float impostorHalfH;
 
         // ray-march quality / density model
-        float stepMul;      // 0.35..1.40
-        float densityMul;   // base extinction
-        float thickness;    // slab depth in local Z (UV-depth units)
-        float densBias;     // tiny additive bias to stabilise thin wisps
+        float stepMul;
+        float densityMul;
+        float thickness;
+        float densBias;
 
         // shape / coverage
-        float coverage;     // 0..1, higher = fuller
-        float puffScale;    // micro feature scale
-        float edgeFeather;  // 0..0.5
-        float edgeCut;      // 0..0.5 hard cut outside feather
-        float edgeNoiseAmp; // rim wobble
-        float edgeErode;    // erode near rim
-        float centreFill;   // dilate centre
-        float shapeScale;   // 0.6..1.6
-        float shapeLo;      // mask lo
-        float shapeHi;      // mask hi
-        float shapeSeed;    // per-material seed
+        float coverage;
+        float puffScale;
+        float edgeFeather;
+        float edgeCut;
+        float edgeNoiseAmp;
+        float edgeErode;
+        float centreFill;
+        float shapeScale;
+        float shapeLo;
+        float shapeHi;
+        float shapeSeed;
 
-        // lighting
-        float3 sunDirView;  // normalised view-space sun direction
-        float hgG;          // Henyey–Greenstein anisotropy
-        float baseWhite;    // base white point (premultiplied colour)
-        float hiGain;       // forward-scatter gain
-        float edgeSoft;     // soft lift at silhouette
-        float microAmp;     // micro detail contrast
-        float occK;         // self-shadow strength
+        // lighting (sun-only)
+        float3 sunDirView;   // normalised view-space sun direction
+        float hgG;           // Henyey–Greenstein anisotropy
+        float baseWhite;     // white point (premultiplied colour), keep = 1
+        float hiGain;        // scatter gain
+        float edgeSoft;      // kept for compatibility; set to 0
+        float microAmp;
+        float occK;
 
         // ========= helpers =========
         #pragma declarations
 
         inline float hash1(float n){ return fract(sin(n) * 43758.5453123); }
-
-        inline float hash12(float2 p){
-            return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123);
-        }
+        inline float hash12(float2 p){ return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123); }
 
         inline float noise3(float3 x) {
             float3 p = floor(x), f = x - p;
@@ -82,21 +76,19 @@ enum CloudImpostorProgram {
             return mix(nxy0, nxy1, f.z);
         }
 
-        // 2D Worley distance (for blobby masks)
         inline float worley2(float2 x){
             float2 i = floor(x), f = x - i;
             float d = 1e9;
-            for (int y=-1; y<=1; ++y)
-            for (int xk=-1; xk<=1; ++xk){
-                float2 g = float2(xk,y);
+            for (int y = -1; y <= 1; ++y)
+            for (int xk = -1; xk <= 1; ++xk){
+                float2 g = float2(xk, y);
                 float2 o = float2(hash12(i+g), hash12(i+g+19.7));
                 float2 r = g + o - f;
-                d = min(d, dot(r,r));
+                d = min(d, dot(r, r));
             }
-            return sqrt(max(d,0.0));
+            return sqrt(max(d, 0.0));
         }
 
-        // 2-octave billowy puff field
         inline float puffFBM2(float2 x){
             float a = 0.0, w = 0.62, s = 1.0;
             float v = 1.0 - clamp(worley2(x*s), 0.0, 1.0);
@@ -106,7 +98,6 @@ enum CloudImpostorProgram {
             return clamp(a, 0.0, 1.0);
         }
 
-        // Macro + micro billow in impostor space (2.5D – z drifts the patterns)
         inline float densityUV(float2 uv, float z, float cov, float puffS, float microK) {
             float2 mCoord = uv * 0.62 + float2(z*0.15, -z*0.09);
             float macro = 1.0 - clamp(worley2(mCoord * 1.32), 0.0, 1.0);
@@ -117,20 +108,17 @@ enum CloudImpostorProgram {
             float2 pCoord = uv * max(1e-4, puffS * 195.0) + float2(z*0.33, -z*0.21);
             float puffs = puffFBM2(pCoord);
 
-            // blend with a touch of base noise so the interior never reads as flat
             float micro = mix(base, puffs, 0.72);
-            micro = mix(micro, puffs, microK); // user-tuned micro contrast
+            micro = mix(micro, puffs, microK);
 
             float coverInv = 1.0 - clamp(cov, 0.0, 1.0);
             float thLo = clamp(coverInv - 0.18, 0.0, 1.0);
             float thHi = clamp(coverInv + 0.24, 0.0, 1.0);
             float t = smoothstep(thLo, thHi, micro) * macro;
 
-            // slightly steeper response for a fuller core
             return pow(clamp(t, 0.0, 1.0), 1.12);
         }
 
-        // Irregular silhouette mask so the card never reads
         inline float shapeMaskUV(float2 uv, float scale, float lo, float hi, float seed) {
             float s1 = fract(sin(seed*12.9898) * 43758.5453);
             float s2 = fract(s1*1.6180339);
@@ -148,13 +136,11 @@ enum CloudImpostorProgram {
         // ========= fragment body =========
         #pragma body
 
-        // Quad UV in [-1,1], aspect-aware mapping
         float2 uv = _surface.diffuseTexcoord * 2.0 - 1.0;
         float2 halfs = float2(max(0.0001, impostorHalfW), max(0.0001, impostorHalfH));
         float s = max(halfs.x, halfs.y);
         float2 uvE = uv * halfs / s;
 
-        // Noisy elliptical rim => irregular cut + soft feather
         float r = length(uvE);
         float nEdge = noise3(float3(uvE * 3.15, 0.0));
         float rWobble = (nEdge * 2.0 - 1.0) * edgeNoiseAmp;
@@ -163,60 +149,55 @@ enum CloudImpostorProgram {
         if (rDist >= cutR) { discard_fragment(); }
 
         float featherR0 = cutR - clamp(edgeFeather, 0.0, 0.49);
-        float rimSoft = smoothstep(featherR0, cutR, rDist); // 0 centre → 1 rim
-        float interior = 1.0 - rimSoft;                    // 1 centre → 0 rim
+        float rimSoft = smoothstep(featherR0, cutR, rDist);
+        float interior = 1.0 - rimSoft;
 
-        // Irregular silhouette inside the card
         float sMask = shapeMaskUV(uvE, shapeScale, shapeLo, shapeHi, shapeSeed);
         float edgeMask = interior * sMask;
 
-        // Local morphological tweak: erode near rim, dilate at centre
         float covLocal  = mix(max(0.0, coverage - edgeErode),
                               min(1.0, coverage + centreFill), edgeMask);
         float fillGain  = mix(1.0, 1.0 + centreFill, edgeMask);
 
-        // March
         float Lm = clamp(thickness, 0.50, 8.0);
         int   N  = clamp(int(round(20.0 * clamp(stepMul, 0.35, 1.40))), 8, 36);
         float dt = Lm / float(N);
 
-        // per-fragment jitter to break banding, but keep tiny so it stays “in focus”
         float j = fract(sin(dot(uvE, float2(12.9898,78.233))) * 43758.5453);
         float t = (0.35 + 0.5*j) * dt;
 
-        // project sun into the impostor plane for soft self-shadow
         float3 sView = normalize(sunDirView);
         float2 sunUV = normalize(abs(sView.x) + abs(sView.y) > 1e-4
                                  ? float2(sView.x, sView.y)
                                  : float2(0.0001, 0.0001));
         float  sunZ  = sView.z;
 
-        float T = 1.0;           // transmittance
-        float3 C = float3(0.0);  // premultiplied colour accumulator
+        float T = 1.0;
+        float3 C = float3(0.0);
 
-        // forward-scatter factor (constant per quad; keeps cost down)
+        // Sun-only brightness via phase function (no ambient/base lift)
         float cosVS = clamp(-sView.z, -1.0, 1.0);
         float Fwd = hg(cosVS, hgG);
-        float liftAtEdge = mix(1.0, 1.0 + edgeSoft, rimSoft);
+        const float liftAtEdge = 1.0; // edgeSoft deliberately unused (sun-only)
 
         for (int i=0; i<N && T > 0.003; ++i) {
             float z = -0.5*Lm + t;
 
-            // core density at this step
             float d = densityUV(uvE, z, covLocal, max(1e-4, puffScale), microAmp) * edgeMask;
 
             if (d > 0.0006) {
-                // occlusion probe a little “towards the sun” inside the same slab
                 float2 uvOcc = uvE + sunUV * 0.22;
                 float  zOcc  = z   + sunZ * 0.22;
                 float  occ   = densityUV(uvOcc, zOcc, covLocal, max(1e-4, puffScale), microAmp);
                 float  shadow = 1.0 - clamp(occK * occ, 0.0, 0.85);
 
-                // extinction for this slice
                 float aStep = 1.0 - exp(-(max(0.0, densityMul) * (0.045*d + densBias)) * dt * fillGain);
 
-                // simple single-scatter look: white scaled by forward scatter & shadow
-                float l = (baseWhite * (0.36 + hiGain * Fwd)) * shadow * liftAtEdge;
+                // WHITE, sun-only:
+                //   – no constant term
+                //   – no rim lift
+                //   – scale only by phase + shadow
+                float l = (baseWhite * (hiGain * Fwd)) * shadow * liftAtEdge;
 
                 C += (l * aStep) * T;
                 T *= (1.0 - aStep);
@@ -239,18 +220,18 @@ enum CloudImpostorProgram {
         m.transparencyMode = .aOne
         m.shaderModifiers = [.fragment: frag]
 
-        // crisp impostor bounds (used by the shader for aspect-correct UVs)
+        // impostor bounds for aspect-correct UVs
         m.setValue(halfWidth,  forKey: "impostorHalfW")
         m.setValue(halfHeight, forKey: "impostorHalfH")
 
-        // tuned defaults for thick, fluffy cumulus
+        // tuned defaults
         m.setValue(1.15 as CGFloat,  forKey: "stepMul")
         m.setValue(2.20 as CGFloat,  forKey: "densityMul")
         m.setValue(3.10 as CGFloat,  forKey: "thickness")
         m.setValue(0.00 as CGFloat,  forKey: "densBias")
 
         m.setValue(0.62 as CGFloat,  forKey: "coverage")
-        m.setValue(0.0100 as CGFloat, forKey: "puffScale")   // smaller features → “in focus”
+        m.setValue(0.0100 as CGFloat, forKey: "puffScale")
         m.setValue(0.16 as CGFloat,  forKey: "edgeFeather")
         m.setValue(0.06 as CGFloat,  forKey: "edgeCut")
         m.setValue(0.16 as CGFloat,  forKey: "edgeNoiseAmp")
@@ -261,16 +242,15 @@ enum CloudImpostorProgram {
         m.setValue(0.72 as CGFloat,  forKey: "shapeHi")
         m.setValue(Float.random(in: 0...1000), forKey: "shapeSeed")
 
-        // lighting defaults; engine updates these every frame
+        // lighting defaults; engine updates sunDirView per frame
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
         m.setValue(0.56 as CGFloat,  forKey: "hgG")
-        m.setValue(0.90 as CGFloat,  forKey: "baseWhite")
-        m.setValue(0.85 as CGFloat,  forKey: "hiGain")
-        m.setValue(0.10 as CGFloat,  forKey: "edgeSoft")
+        m.setValue(1.00 as CGFloat,  forKey: "baseWhite")   // pure white
+        m.setValue(1.10 as CGFloat,  forKey: "hiGain")      // scatter gain
+        m.setValue(0.00 as CGFloat,  forKey: "edgeSoft")    // no rim lift
         m.setValue(0.26 as CGFloat,  forKey: "microAmp")
         m.setValue(1.15 as CGFloat,  forKey: "occK")
 
-        // explicit whites to avoid inherited tints
         m.diffuse.contents = UIColor.white
         m.multiply.contents = UIColor.white
         return m
