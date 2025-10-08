@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Volumetric billboard impostor using true 3D density.
-//  Sun-only lighting. Non-premultiplied output to match .aOne transparency.
+//  Volumetric billboard impostor: true 3D vapour + sun-only lighting.
+//  Premultiplied output; macro silhouette noise hides the card.
 //
 
 import SceneKit
@@ -32,13 +32,20 @@ enum CloudImpostorProgram {
         float edgeNoiseAmp;
         float rimFeatherBoost;
         float rimFadePow;
+        float shapeScale;
+        float shapeLo;
+        float shapeHi;
+        float shapePow;
+        float shapeSeed;
         float3 sunDirView;
         float hgG;
         float baseWhite;
         float hiGain;
         float occK;
 
+        // ===== helpers =====
         #pragma declarations
+
         inline float hash1(float n){ return fract(sin(n) * 43758.5453123); }
 
         inline float noise3(float3 x){
@@ -71,6 +78,16 @@ enum CloudImpostorProgram {
             return (1.0-g2)/(4.0*3.14159265*denom);
         }
 
+        // Uniform-free version so it compiles in the declarations block
+        inline float macroMask2D(float2 uv, float shapeScale_, float shapeLo_, float shapeHi_, float shapePow_, float shapeSeed_){
+            float sA = noise3(float3(uv*shapeScale_ + float2(shapeSeed_*0.13, shapeSeed_*0.29), 0.0));
+            float sB = noise3(float3(uv*(shapeScale_*1.93) + float2(-shapeSeed_*0.51, shapeSeed_*0.07), 1.7));
+            float m = 0.62*sA + 0.38*sB;
+            m = smoothstep(shapeLo_, shapeHi_, m);
+            m = pow(clamp(m,0.0,1.0), max(1.0, shapePow_));
+            return m;
+        }
+
         inline float sampleD3(float2 uvE, float z, float baseScale, float edgeMask, float coreFloorK){
             float3 p = float3(uvE * (baseScale*360.0), z * (baseScale*420.0));
 
@@ -89,24 +106,21 @@ enum CloudImpostorProgram {
             return d;
         }
 
+        // ===== fragment =====
         #pragma body
 
-        // Aspect-correct sprite space in [-1,1]
         float2 uv = _surface.diffuseTexcoord * 2.0 - 1.0;
         float2 halfs = float2(max(0.0001,impostorHalfW), max(0.0001,impostorHalfH));
         float s = max(halfs.x, halfs.y);
         float2 uvE = uv * halfs / s;
 
-        // Stabilise detail
         float px = max(fwidth(uvE.x), fwidth(uvE.y));
         float detailBoost = clamp(1.0/max(0.0002,px*28.0),1.0,8.0);
 
-        // Noisy circular cut with feather to hide the card
         float r = length(uvE);
         float nEdge = noise3(float3(uvE*3.15, 0.0));
         float rWobble = (nEdge*2.0-1.0) * edgeNoiseAmp;
         float rDist = r + rWobble;
-
         float cutR = 1.0 - clamp(edgeCut, 0.0, 0.49);
         if (rDist >= cutR) { discard_fragment(); }
 
@@ -114,15 +128,15 @@ enum CloudImpostorProgram {
         float rimSoft = smoothstep(cutR - featherW, cutR, rDist);
         float interior = pow(clamp(1.0 - rimSoft, 0.0, 1.0), max(1.0, rimFadePow));
 
-        float edgeMask = interior;
+        // Noise-shaped silhouette (pass uniforms as parameters)
+        float sMask = macroMask2D(uvE*0.90, shapeScale, shapeLo, shapeHi, shapePow, shapeSeed);
+        float edgeMask = interior * sMask;
         if (edgeMask < 0.01) { discard_fragment(); }
 
-        // Params
         float Lm = clamp(thickness, 0.50, 8.0);
         float baseScale = max(1e-4, puffScale) * detailBoost;
         float coreFloorK = clamp(0.20 + 0.22*coverage, 0.0, 0.6);
 
-        // 5 fixed z samples (Simpson weights 1,4,2,4,1)
         float d0 = sampleD3(uvE, -0.40, baseScale, edgeMask, coreFloorK);
         float d1 = sampleD3(uvE, -0.20, baseScale, edgeMask, coreFloorK);
         float d2 = sampleD3(uvE,  0.00, baseScale, edgeMask, coreFloorK);
@@ -130,10 +144,8 @@ enum CloudImpostorProgram {
         float d4 = sampleD3(uvE,  0.40, baseScale, edgeMask, coreFloorK);
         float avgD = (d0 + 4.0*d1 + 2.0*d2 + 4.0*d3 + d4) * (1.0/12.0);
 
-        // Sun direction (view space)
         float3 sView = normalize(sunDirView);
 
-        // Approximate normal from density slope
         float2 sunUV = normalize(abs(sView.x)+abs(sView.y)>1e-4 ? float2(sView.x,sView.y) : float2(0.0001,0.0001));
         float eps = 0.06;
         float sdP = sampleD3(uvE + sunUV*eps,  0.0, baseScale, edgeMask, coreFloorK);
@@ -142,25 +154,22 @@ enum CloudImpostorProgram {
         float gradZ = (d4 - d0) / 0.8;
         float3 approxN = normalize(float3(sunUV * (-gradS), -gradZ) + float3(0.0,0.0,1e-4));
 
-        // Sun-only single scattering
         float NdotL = clamp(dot(approxN, -sView), 0.0, 1.0);
         const float FOUR_PI = 12.566370614359172;
         float cosVS = clamp(-sView.z, -1.0, 1.0);
         float phase = hg(cosVS, hgG) * FOUR_PI;
 
-        // Two-tap self-shadow towards sun
         float occ1 = sampleD3(uvE + sunUV*0.20,  0.15, baseScale, edgeMask, coreFloorK);
         float occ2 = sampleD3(uvE + sunUV*0.38,  0.28, baseScale, edgeMask, coreFloorK);
         float occ = 0.65*occ1 + 0.35*occ2;
-        float lightVis = exp(-clamp(occK, 0.0, 1.2) * occ);
+        float lightVis = pow( exp(-clamp(occK, 0.0, 1.0) * occ), 0.60 );
 
-        // Extinction → alpha
         float sigma = max(0.0, densityMul) * (0.12*avgD + densBias);
         float alpha = clamp(1.0 - exp(-sigma * Lm), 0.0, 1.0);
 
-        // Non-premultiplied colour (matches .aOne): DO NOT multiply by alpha.
-        float sunEnergy = baseWhite * hiGain * phase * (0.30 + 0.70*NdotL) * lightVis;
-        float3 C = min(float3(1.0), float3(sunEnergy));
+        // Premultiplied white with subtle shaping
+        float sunEnergy = baseWhite * phase * (0.85 + 0.15*NdotL) * lightVis * hiGain;
+        float3 C = min(float3(1.0), float3(sunEnergy)) * alpha;
 
         _output.color = float4(C, alpha);
         """
@@ -172,32 +181,38 @@ enum CloudImpostorProgram {
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
         m.blendMode = .alpha
-        m.transparencyMode = .aOne
+        m.transparencyMode = .rgbZero   // premultiplied matches shader output
         m.shaderModifiers = [.fragment: frag]
 
-        // aspect-correct UVs
         m.setValue(halfWidth,  forKey: "impostorHalfW")
         m.setValue(halfHeight, forKey: "impostorHalfH")
 
-        // Defaults tuned for bright, white look
-        m.setValue(9.5  as CGFloat, forKey: "densityMul")
-        m.setValue(3.4  as CGFloat, forKey: "thickness")
-        m.setValue(0.02 as CGFloat, forKey: "densBias")
-        m.setValue(0.94 as CGFloat, forKey: "coverage")
+        // Bright white baseline, subtle self-shadow
+        m.setValue(8.0   as CGFloat, forKey: "densityMul")
+        m.setValue(3.2   as CGFloat, forKey: "thickness")
+        m.setValue(0.03  as CGFloat, forKey: "densBias")
+        m.setValue(0.94  as CGFloat, forKey: "coverage")
 
-        m.setValue(0.0042 as CGFloat, forKey: "puffScale")
-        m.setValue(0.12  as CGFloat, forKey: "edgeFeather")
-        m.setValue(0.06  as CGFloat, forKey: "edgeCut")
-        m.setValue(0.16  as CGFloat, forKey: "edgeNoiseAmp")
-        m.setValue(1.90  as CGFloat, forKey: "rimFeatherBoost")
-        m.setValue(2.80  as CGFloat, forKey: "rimFadePow")
+        m.setValue(0.0040 as CGFloat, forKey: "puffScale")
+        m.setValue(0.14   as CGFloat, forKey: "edgeFeather")
+        m.setValue(0.08   as CGFloat, forKey: "edgeCut")
+        m.setValue(0.18   as CGFloat, forKey: "edgeNoiseAmp")
+        m.setValue(2.10   as CGFloat, forKey: "rimFeatherBoost")
+        m.setValue(2.60   as CGFloat, forKey: "rimFadePow")
 
-        // Sun params; engine updates sunDirView per frame
+        // Macro silhouette noise
+        m.setValue(1.15   as CGFloat, forKey: "shapeScale")
+        m.setValue(0.40   as CGFloat, forKey: "shapeLo")
+        m.setValue(0.64   as CGFloat, forKey: "shapeHi")
+        m.setValue(1.70   as CGFloat, forKey: "shapePow")
+        m.setValue(Float.random(in: 0...10_000), forKey: "shapeSeed")
+
+        // Sun params; engine updates sunDirView each frame
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
         m.setValue(0.55  as CGFloat, forKey: "hgG")
-        m.setValue(1.8   as CGFloat, forKey: "baseWhite")
-        m.setValue(2.2   as CGFloat, forKey: "hiGain")
-        m.setValue(0.35  as CGFloat, forKey: "occK")
+        m.setValue(2.1   as CGFloat, forKey: "baseWhite")
+        m.setValue(1.6   as CGFloat, forKey: "hiGain")
+        m.setValue(0.30  as CGFloat, forKey: "occK")
 
         m.diffuse.contents  = UIColor.white
         m.multiply.contents = UIColor.white

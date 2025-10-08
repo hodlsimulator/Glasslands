@@ -5,6 +5,7 @@
 //  Created by . . on 10/4/25.
 //
 //  Builds the cloud billboard layer using volumetric impostor materials.
+//  Global size scale reduces puff size so clusters feel smaller and puffier.
 //
 
 import SceneKit
@@ -36,13 +37,17 @@ enum CloudBillboardFactory {
             return m
         }
 
+        // Smaller puffs → smaller, fluffier clouds
+        let GLOBAL_SIZE_SCALE: CGFloat = 0.58
+
         for cl in clusters {
             let group = SCNNode()
             group.castsShadow = false
 
             for p in cl.puffs {
-                let size = CGFloat(p.size)
+                let size = max(0.01, CGFloat(p.size) * GLOBAL_SIZE_SCALE)
                 let half = max(0.001, size * 0.5)
+
                 let plane = SCNPlane(width: size, height: size)
                 plane.firstMaterial = materialFor(halfW: half, halfH: half)
 
@@ -51,18 +56,22 @@ enum CloudBillboardFactory {
                 ea.z = Float(p.roll)
                 sprite.eulerAngles = ea
                 sprite.castsShadow = false
-                sprite.renderingOrder = 9_000 // draw AFTER sky/volumetric
+                sprite.renderingOrder = 9_000 // draw after the sky
 
                 let bb = SCNNode()
                 bb.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
-                let bc = SCNBillboardConstraint(); bc.freeAxes = .all
+
+                let bc = SCNBillboardConstraint()
+                bc.freeAxes = .all
                 bb.constraints = [bc]
+
                 bb.opacity = CGFloat(max(0, min(1, p.opacity)))
                 bb.renderingOrder = 9_000
                 bb.addChildNode(sprite)
 
                 group.addChildNode(bb)
             }
+
             root.addChildNode(group)
         }
 
