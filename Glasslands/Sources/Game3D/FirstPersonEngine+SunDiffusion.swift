@@ -5,8 +5,9 @@
 //  Created by . . on 10/6/25.
 //
 //  Sun control + soft cloud-shadow projection using a compute occlusion map.
-//  – Sun remains the only light.
-//  – Clouds cast shadows via the light’s gobo (mutated, not reassigned).
+//  – Sun is the only light.
+//  – Clouds cast soft shadows via the light’s gobo (RGBA, achromatic).
+//  – Projection footprint matches our computed map to avoid banding.
 //
 
 import SceneKit
@@ -17,10 +18,13 @@ import UIKit
 
 extension FirstPersonEngine {
 
+    // MARK: Sun diffusion (intensity, halo, and shadows)
+
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
         let cover = measureSunCover()
+
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
         let k: CGFloat = (E_now >= E_prev) ? 0.50 : 0.15
@@ -51,13 +55,15 @@ extension FirstPersonEngine {
         }
     }
 
+    // MARK: Cloud shadow projector (compute → gobo)
+
     private struct CloudUniforms {
-        var sunDirWorld: SIMD4<Float>
-        var sunTint: SIMD4<Float>
-        var params0: SIMD4<Float>
-        var params1: SIMD4<Float>
-        var params2: SIMD4<Float>
-        var params3: SIMD4<Float>
+        var sunDirWorld: SIMD4<Float>   // xyz dir, w unused
+        var sunTint: SIMD4<Float>       // unused
+        var params0: SIMD4<Float>       // time, wind.x, wind.y, baseY
+        var params1: SIMD4<Float>       // topY, coverage, densityMul, pad
+        var params2: SIMD4<Float>       // pad0, pad1, horizonLift, detailMul
+        var params3: SIMD4<Float>       // domainOffset.x, domainOffset.y, domainRotate, pad
     }
     private struct ShadowUniforms {
         var centerXZ: SIMD2<Float>
@@ -96,7 +102,7 @@ extension FirstPersonEngine {
         }
 
         if shadowTexture == nil {
-            // >>> RGBA texture so the gobo stays achromatic (no red cast)
+            // RGBA so the gobo is achromatic; avoids red/black tint.
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
                                                                 width: 1024, height: 1024,
                                                                 mipmapped: false)
@@ -122,12 +128,21 @@ extension FirstPersonEngine {
             let pipe = shadowPipeline,
             let q = shadowQueue,
             let outTex = shadowTexture,
-            let sunNode = sunLightNode
+            let sunNode = sunLightNode,
+            let sun = sunNode.light
         else { return }
 
+        // ~8 Hz updates
         let tNow = CACurrentMediaTime()
         if tNow - lastShadowTime < 0.12 { return }
         lastShadowTime = tNow
+
+        // Project a square around the camera so nearby terrain gets shadows.
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let camPos = pov.simdWorldPosition
+
+        // Keep this in sync with the SCNLight's projection footprint.
+        let halfSize: Float = 2200.0
 
         var u = CloudUniforms(
             sunDirWorld: SIMD4<Float>(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z, 0),
@@ -137,11 +152,7 @@ extension FirstPersonEngine {
             params2: SIMD4<Float>(0, 0, 0.10, 0.90),
             params3: SIMD4<Float>(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
-
-        let pov = (scnView?.pointOfView ?? camNode).presentation
-        let camPos = pov.simdWorldPosition
-        var su = ShadowUniforms(centerXZ: SIMD2<Float>(camPos.x, camPos.z),
-                                halfSize: 2200.0)
+        var su = ShadowUniforms(centerXZ: SIMD2<Float>(camPos.x, camPos.z), halfSize: halfSize)
 
         guard let bufU = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
               let bufS = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared)
@@ -164,11 +175,19 @@ extension FirstPersonEngine {
         enc.endEncoding()
         cmd.commit()
 
-        sunNode.light?.gobo?.intensity = 1.0
+        // Make the light's orthographic projection match our computed square.
+        // This prevents a visible seam where the projection footprint ends.
+        sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
+        sun.orthographicScale = CGFloat(halfSize * 2.0)
+
+        sun.gobo?.intensity = 1.0
     }
+
+    // MARK: Screen-space cover estimator
 
     private func measureSunCover() -> (peak: Float, union: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return (0.0, 0.0) }
+
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let cam = pov.simdWorldPosition
         let sunW = simd_normalize(sunDirWorld)

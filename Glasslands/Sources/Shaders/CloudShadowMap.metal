@@ -4,7 +4,8 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Computes a top-down cloud shadow map for directional gobo projection.
+//  Produces an achromatic gobo texture for the sun light.
+//  Edges fade to 1.0 so clamped sampling outside the footprint cannot tint terrain.
 //
 
 #include <metal_stdlib>
@@ -124,7 +125,13 @@ kernel void cloudShadowKernel(
     }
 
     float T = exp(-tau);
-    // Soft floor so terrain never goes pure black; grayscale in all channels.
+    // Soft floor so terrain never goes pure black.
     float shadow = 0.35f + 0.65f * pow(T, 0.88f);
+
+    // Edge fade: force the outer ~2% of the texture to 1.0 to kill seams/clamping tint.
+    float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));     // distance to nearest edge in [0,0.5]
+    float fade = smoothstep(0.00f, 0.02f, edge);               // 0 at border → 1 inward
+    shadow = mix(1.0f, shadow, fade);
+
     outShadow.write(float4(shadow, shadow, shadow, 1.0), gid);
 }
