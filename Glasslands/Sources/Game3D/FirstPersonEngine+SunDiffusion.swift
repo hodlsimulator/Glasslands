@@ -34,6 +34,8 @@ extension FirstPersonEngine {
         sun.type = .directional
         sun.intensity = 1500 * max(0.06, E)
         sun.color = UIColor(white: 1.0, alpha: 1.0)
+        // Make sure the sun affects every category (terrain, trees, sky impostors, etc.)
+        sun.categoryBitMask = Int(UInt32.max)
 
         // ---------- stable object shadows ----------
         sun.castsShadow = true
