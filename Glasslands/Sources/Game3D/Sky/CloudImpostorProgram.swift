@@ -5,7 +5,7 @@
 //  Created by . . on 10/7/25.
 //
 //  Ultra-dense, clumped cauliflower vapour with hidden billboard rims.
-//  Sun-only white. GPU-cheap via 5 fixed z-samples (unrolled – no arrays).
+//  Sun-only white. GPU-cheap via 5 fixed z-samples (unrolled; no arrays).
 //
 
 import SceneKit
@@ -44,7 +44,6 @@ enum CloudImpostorProgram {
         float rimFeatherBoost;
         float rimFadePow;
         float shapePow;
-        float coreFloor;      // tiny core density floor (kills interior holes)
 
         float3 sunDirView;
         float hgG;
@@ -75,6 +74,7 @@ enum CloudImpostorProgram {
         inline float lump4(float2 p){
             float2 c=floor(p), f=p-c;
             float v=0.0;
+
             float2 ic=c+float2(0.0,0.0);
             float2 rnd=float2(hash12(ic),hash12(ic+19.7));
             float2 q=f - rnd;
@@ -123,7 +123,7 @@ enum CloudImpostorProgram {
             float w=noise3(float3(uv*0.62, 2.3));
             float b=noise3(float3(uv*1.24,-1.7));
             float m=0.6*w+0.4*b;
-            return smoothstep(0.40,0.60,m);   // wider window so it never zeroes out
+            return smoothstep(0.40,0.60,m);   // wide window → never zeroes out
         }
 
         inline float hg(float mu,float g){
@@ -135,7 +135,9 @@ enum CloudImpostorProgram {
         inline float sampleD(float2 uvE, float z,
                              float edgeMask, float baseScale, float detailBoost){
             float m=cauliflower(uvE, z, baseScale, detailBoost);
-            m=max(m, coreFloor*edgeMask);               // core floor kills holes
+            // derive a safe core floor from centreFill (no extra uniform needed)
+            float coreFloorK = clamp(0.18 + 0.22 * centreFill, 0.0, 0.6);
+            m=max(m, coreFloorK*edgeMask);
             float macro2=macroMask2D(uvE*0.62 + float2(z*0.07,-z*0.05));
             return clamp(m*macro2,0.0,1.0)*edgeMask;
         }
@@ -178,11 +180,12 @@ enum CloudImpostorProgram {
         float Lm=clamp(thickness,0.50,8.0);
 
         // five fixed z samples (unrolled), Simpson weights 1-4-2-4-1 → /12
-        float d0=sampleD(uvE,-0.4,edgeMask,max(1e-4,puffScale),detailBoost);
-        float d1=sampleD(uvE,-0.2,edgeMask,max(1e-4,puffScale),detailBoost);
-        float d2=sampleD(uvE, 0.0,edgeMask,max(1e-4,puffScale),detailBoost);
-        float d3=sampleD(uvE, 0.2,edgeMask,max(1e-4,puffScale),detailBoost);
-        float d4=sampleD(uvE, 0.4,edgeMask,max(1e-4,puffScale),detailBoost);
+        float baseScale=max(1e-4,puffScale);
+        float d0=sampleD(uvE,-0.4,edgeMask,baseScale,detailBoost);
+        float d1=sampleD(uvE,-0.2,edgeMask,baseScale,detailBoost);
+        float d2=sampleD(uvE, 0.0,edgeMask,baseScale,detailBoost);
+        float d3=sampleD(uvE, 0.2,edgeMask,baseScale,detailBoost);
+        float d4=sampleD(uvE, 0.4,edgeMask,baseScale,detailBoost);
         float avgD=(d0 + 4.0*d1 + 2.0*d2 + 4.0*d3 + d4) * (1.0/12.0);
 
         // sun-only white
@@ -193,7 +196,7 @@ enum CloudImpostorProgram {
 
         // single-tap self-occlusion toward sun
         float2 sunUV=normalize(abs(sView.x)+abs(sView.y)>1e-4 ? float2(sView.x,sView.y) : float2(0.0001,0.0001));
-        float occ=sampleD(uvE + sunUV*0.22, 0.18, edgeMask, max(1e-4,puffScale), detailBoost);
+        float occ=sampleD(uvE + sunUV*0.22, 0.18, edgeMask, baseScale, detailBoost);
         float shadow=1.0 - clamp(occK*occ, 0.0, 0.85);
 
         // Beer–Lambert through the slab
@@ -242,7 +245,6 @@ enum CloudImpostorProgram {
         m.setValue(1.90 as CGFloat,  forKey: "rimFeatherBoost")
         m.setValue(3.00 as CGFloat,  forKey: "rimFadePow")
         m.setValue(1.80 as CGFloat,  forKey: "shapePow")
-        m.setValue(0.30 as CGFloat,  forKey: "coreFloor")
 
         // sun-only white; isotropic
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")

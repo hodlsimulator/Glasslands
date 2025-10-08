@@ -84,7 +84,6 @@ extension FirstPersonEngine {
                     m.setValue(1.90 as CGFloat,  forKey: "rimFeatherBoost")
                     m.setValue(3.00 as CGFloat,  forKey: "rimFadePow")
                     m.setValue(1.80 as CGFloat,  forKey: "shapePow")
-                    m.setValue(0.30 as CGFloat,  forKey: "coreFloor")
 
                     m.setValue(0.28 as CGFloat,  forKey: "microAmp")
                     m.setValue(0.40 as CGFloat,  forKey: "occK")
