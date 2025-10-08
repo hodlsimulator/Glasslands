@@ -28,12 +28,10 @@ extension FirstPersonEngine {
     @MainActor
     func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
         var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
-
         if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
             let look = -pov.presentation.simdWorldFront
-            if simd_dot(dir, look) < 0 { dir = -dir } // keep in front hemisphere for stable billboards
+            if simd_dot(dir, look) < 0 { dir = -dir }
         }
-
         sunDirWorld = dir
 
         if let sunLightNode {
@@ -43,12 +41,10 @@ extension FirstPersonEngine {
             sunLightNode.position = origin
             sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
         }
-
         if let disc = sunDiscNode {
             let dist = CGFloat(cfg.skyDistance)
             disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
         }
-
         applyCloudSunUniforms()
     }
 
@@ -61,50 +57,25 @@ extension FirstPersonEngine {
         let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
         let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
 
-        // --- Billboard impostors (white, sun-only; isotropic HG normalised) ---
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
+                    // Sun + white
                     m.setValue(sunViewV,        forKey: "sunDirView")
-                    m.setValue(0.00 as CGFloat, forKey: "hgG")        // isotropic scattering
-                    m.setValue(1.00 as CGFloat, forKey: "hiGain")     // with ×4π normalisation → white
+                    m.setValue(0.00 as CGFloat, forKey: "hgG")
                     m.setValue(1.00 as CGFloat, forKey: "baseWhite")
+                    m.setValue(1.00 as CGFloat, forKey: "hiGain")
 
+                    // Crisp + cheap
                     m.setValue(0.00 as CGFloat, forKey: "densBias")
-                    m.setValue(1.20 as CGFloat, forKey: "densityMul")
-                    m.setValue(2.20 as CGFloat, forKey: "thickness")
-
-                    m.setValue(0.20 as CGFloat, forKey: "microAmp")
+                    m.setValue(1.25 as CGFloat, forKey: "densityMul")
+                    m.setValue(2.00 as CGFloat, forKey: "thickness")
+                    m.setValue(0.55 as CGFloat, forKey: "stepMul")
+                    m.setValue(0.26 as CGFloat, forKey: "microAmp")
                     m.setValue(0.40 as CGFloat, forKey: "occK")
-
-                    m.setValue(0.60 as CGFloat, forKey: "stepMul")     // fewer steps → less lag
                 }
             }
-        }
-
-        // --- Volumetric layer (true vapour) — keep bright and cheap too ---
-        VolCloudUniformsStore.shared.configure(
-            baseY: 400, topY: 1400,
-            coverage: 0.48,
-            densityMul: 0.95,
-            stepMul: 0.65,
-            horizonLift: 0.10,
-            detailMul: 0.90,
-            puffScale: 0.0048,
-            puffStrength: 0.62,
-            macroScale: 0.00035,
-            macroThreshold: 0.58
-        )
-
-        if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: false),
-           let mat = sky.geometry?.firstMaterial {
-            mat.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
-            mat.setValue(SCNVector3(1.0, 0.97, 0.92),        forKey: "sunTint")
-            mat.setValue(1.9 as CGFloat,                     forKey: "turbidity")
-            mat.setValue(0.46 as CGFloat,                    forKey: "mieG")
-            mat.setValue(3.00 as CGFloat,                    forKey: "exposure")
-            mat.setValue(0.10 as CGFloat,                    forKey: "horizonLift")
         }
     }
 
