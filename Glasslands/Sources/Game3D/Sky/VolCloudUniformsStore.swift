@@ -18,30 +18,33 @@ public struct GLCloudUniforms {
     public var params1     : SIMD4<Float> // x=topY, y=coverage, z=densityMul, w=stepMul
     public var params2     : SIMD4<Float> // x=mieG, y=powderK, z=horizonLift, w=detailMul
     public var params3     : SIMD4<Float> // x=domainOffX, y=domainOffY, z=domainRotate, w=puffScale
-    public var params4     : SIMD4<Float> // x=puffStrength, y=quality(fixed fast), z=macroScale, w=macroThreshold
+    public var params4     : SIMD4<Float> // x=puffStrength, y=quality, z=macroScale, w=macroThreshold
 }
 
 public final class VolCloudUniformsStore {
     public static let shared = VolCloudUniformsStore()
 
     private var u: GLCloudUniforms
-    private var lock = os_unfair_lock_s()
+    private var lock = os_unfair_lock()
 
     private init() {
-        // Scattered, bright cumulus defaults
+        // Bright scattered-cumulus defaults
         u = GLCloudUniforms(
-            sunDirWorld: SIMD4<Float>(0, 1, 0, 0),
-            sunTint:     SIMD4<Float>(1, 1, 1, 0),
-            params0:     SIMD4<Float>(0, 0.60, 0.20, 400),     // time, wind.x, wind.y, baseY
-            params1:     SIMD4<Float>(1400, 0.34, 1.10, 0.70), // topY, coverage, densityMul, stepMul
-            params2:     SIMD4<Float>(0.60, 1.40, 0.10, 0.90), // mieG, powderK, horizonLift, detailMul
-            params3:     SIMD4<Float>(0, 0, 0, 0.0048),        // domainOffX, domainOffY, rotate, puffScale
-            params4:     SIMD4<Float>(0.62, 0.45, 0.00035, 0.58) // puffStrength, quality, macroScale, macroThreshold
+            sunDirWorld: SIMD4(0, 1, 0, 0),
+            sunTint:     SIMD4(1, 1, 1, 0),
+            params0:     SIMD4(0, 0.60, 0.20, 400),       // time, wind.x, wind.y, baseY
+            params1:     SIMD4(1400, 0.34, 1.10, 0.70),   // topY, coverage, densityMul, stepMul
+            params2:     SIMD4(0.60, 1.40, 0.10, 0.90),   // mieG, powderK, horizonLift, detailMul
+            params3:     SIMD4(0, 0, 0, 0.0048),          // domainOffX, domainOffY, rotate, puffScale
+            params4:     SIMD4(0.62, 0.45, 0.00035, 0.58) // puffStrength, quality, macroScale, macroThreshold
         )
     }
 
     public func snapshot() -> GLCloudUniforms {
-        os_unfair_lock_lock(&lock); let out = u; os_unfair_lock_unlock(&lock); return out
+        os_unfair_lock_lock(&lock)
+        let out = u
+        os_unfair_lock_unlock(&lock)
+        return out
     }
 
     // Fast per-frame update from the render clock.
@@ -56,7 +59,7 @@ public final class VolCloudUniformsStore {
         os_unfair_lock_unlock(&lock)
     }
 
-    // One-shot setup for a "scattered cumulus" look using volumetric vapour.
+    // Optional one-shot reconfiguration for style/quality.
     public func configure(
         baseY: Float,
         topY: Float,

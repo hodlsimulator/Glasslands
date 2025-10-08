@@ -38,6 +38,8 @@ extension FirstPersonEngine {
                 }
             }
         }
+
+        if on { prewarmCloudImpostorPipelines() }
     }
 
     // MARK: - Per-frame uniforms + impostor advection (renderer thread)
