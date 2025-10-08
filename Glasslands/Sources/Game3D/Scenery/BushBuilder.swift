@@ -11,6 +11,8 @@ import GameplayKit
 
 enum BushBuilder {
     static func makeBushNode(palette: [UIColor], rng: inout RandomAdaptor) -> SCNNode {
+        let node = SCNNode()
+
         let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
         let leaf = SceneryCommon.adjust(
             leafBase,
@@ -19,29 +21,38 @@ enum BushBuilder {
             dB: CGFloat.random(in: -0.06...0.06, using: &rng)
         )
 
-        let node = SCNNode()
         let count = Int.random(in: 3...5, using: &rng)
         for _ in 0..<count {
-            let s = CGFloat.random(in: 0.18...0.30, using: &rng)
-            let sph = SCNSphere(radius: s)
-            sph.segmentCount = 12
+            let r = CGFloat.random(in: 0.10...0.18, using: &rng)
+            let g = SCNSphere(radius: r)
+            g.segmentCount = 16
+
             let m = SCNMaterial()
             m.lightingModel = .physicallyBased
             m.diffuse.contents = leaf
             m.roughness.contents = 0.95
             m.metalness.contents = 0.0
-            m.shaderModifiers = [.fragment: SceneryCommon.ldrClampDownFrag]
-            sph.materials = [m]
-            let n = SCNNode(geometry: sph)
+            g.materials = [m]
+
+            let n = SCNNode(geometry: g)
             n.position = SCNVector3(
-                Float.random(in: -0.18...0.18, using: &rng),
-                Float.random(in:  0.05...0.18, using: &rng),
-                Float.random(in: -0.18...0.18, using: &rng)
+                CGFloat.random(in: -0.15...0.15, using: &rng),
+                r * CGFloat.random(in: 0.2...0.5, using: &rng),
+                CGFloat.random(in: -0.15...0.15, using: &rng)
             )
+            n.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &rng)
+            n.castsShadow = true
             node.addChildNode(n)
         }
+
         node.categoryBitMask = 0x00000002
-        SceneryCommon.applyLOD(to: node, far: 90)
+        node.castsShadow = true
+        node.enumerateChildNodes { c, _ in
+            c.categoryBitMask |= 0x00000002
+            c.castsShadow = true
+        }
+
+        SceneryCommon.applyLOD(to: node, far: 100)
         return node
     }
 }
