@@ -14,7 +14,7 @@ enum GroundShadowShader {
     float3 v_worldPos;
 
     #pragma body
-    float4 world = scn_node.modelTransform * float4(_geometry.position, 1.0);
+    float4 world = scn_node.modelTransform * _geometry.position;
     v_worldPos = world.xyz;
     """
 
@@ -45,8 +45,8 @@ enum GroundShadowShader {
     @MainActor
     static func applyIfNeeded(to material: SCNMaterial) {
         var mods = material.shaderModifiers ?? [:]
-        if mods[.geometry] != geometry { mods[.geometry] = geometry }
-        if mods[.fragment] != fragment { mods[.fragment] = fragment }
+        mods[.geometry] = geometry
+        mods[.fragment] = fragment
         material.shaderModifiers = mods
     }
 }
