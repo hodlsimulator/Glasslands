@@ -5,6 +5,7 @@
 //  Created by . . on 10/5/25.
 //
 //  Inside-out sphere that runs the volumetric vapour program.
+//  Excluded from lighting to keep the sun’s shadow frustum tight.
 //
 
 import SceneKit
@@ -33,14 +34,16 @@ enum VolumetricCloudLayer {
         mat.setValue(0.85 as CGFloat, forKey: "stepMul")
         mat.setValue(1.10 as CGFloat, forKey: "detailMul")
         mat.setValue(0.0045 as CGFloat, forKey: "puffScale")
-        mat.setValue(0.65 as CGFloat,  forKey: "puffStrength")
+        mat.setValue(0.65 as CGFloat, forKey: "puffStrength")
 
         sphere.firstMaterial = mat
 
         let node = SCNNode(geometry: sphere)
         node.name = "VolumetricCloudLayer"
         node.castsShadow = false
+        node.categoryBitMask = 0            // ← exclude from light categories
         node.renderingOrder = -9_990
+        node.categoryBitMask = 0
         return node
     }
 }
