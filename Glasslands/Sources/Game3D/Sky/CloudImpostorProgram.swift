@@ -4,8 +4,8 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Volumetric billboard impostor using true 3D density (no laminated 2D).
-//  Sun “paints” highlights and soft self-shadow. Unrolled 5-tap thickness trace.
+//  Volumetric billboard impostor using true 3D density.
+//  Sun-only lighting. Non-premultiplied output to match .aOne transparency.
 //
 
 import SceneKit
@@ -18,7 +18,7 @@ enum CloudImpostorProgram {
         let frag = """
         #pragma transparent
 
-        // ===== uniforms (one per line; no comments) =====
+        // ===== uniforms (one per line) =====
         #pragma arguments
         float impostorHalfW;
         float impostorHalfH;
@@ -38,7 +38,6 @@ enum CloudImpostorProgram {
         float hiGain;
         float occK;
 
-        // ===== helpers =====
         #pragma declarations
         inline float hash1(float n){ return fract(sin(n) * 43758.5453123); }
 
@@ -55,7 +54,6 @@ enum CloudImpostorProgram {
             return mix(nxy0,nxy1,f.z);
         }
 
-        // Billowy 3D FBM with a touch of domain warp → cauliflower
         inline float fbm3_billow(float3 p){
             float a=0.0, w=0.55;
             float3 q=p + (noise3(p*0.33+float3(2.1,-1.7,0.9))*2.0-1.0)*0.35;
@@ -73,11 +71,9 @@ enum CloudImpostorProgram {
             return (1.0-g2)/(4.0*3.14159265*denom);
         }
 
-        // 3D density sample at uvE, depth z in [-.5,.5]
         inline float sampleD3(float2 uvE, float z, float baseScale, float edgeMask, float coreFloorK){
             float3 p = float3(uvE * (baseScale*360.0), z * (baseScale*420.0));
 
-            // three soft “blobs” → lumpy core
             float3 s0=float3( 0.00,  0.00,  0.00);
             float3 s1=float3( 0.38, -0.18,  0.22);
             float3 s2=float3(-0.34,  0.26, -0.28);
@@ -93,7 +89,6 @@ enum CloudImpostorProgram {
             return d;
         }
 
-        // ===== fragment =====
         #pragma body
 
         // Aspect-correct sprite space in [-1,1]
@@ -102,7 +97,7 @@ enum CloudImpostorProgram {
         float s = max(halfs.x, halfs.y);
         float2 uvE = uv * halfs / s;
 
-        // Pixel footprint → stabilise details
+        // Stabilise detail
         float px = max(fwidth(uvE.x), fwidth(uvE.y));
         float detailBoost = clamp(1.0/max(0.0002,px*28.0),1.0,8.0);
 
@@ -135,7 +130,7 @@ enum CloudImpostorProgram {
         float d4 = sampleD3(uvE,  0.40, baseScale, edgeMask, coreFloorK);
         float avgD = (d0 + 4.0*d1 + 2.0*d2 + 4.0*d3 + d4) * (1.0/12.0);
 
-        // Sun direction in view space
+        // Sun direction (view space)
         float3 sView = normalize(sunDirView);
 
         // Approximate normal from density slope
@@ -147,25 +142,26 @@ enum CloudImpostorProgram {
         float gradZ = (d4 - d0) / 0.8;
         float3 approxN = normalize(float3(sunUV * (-gradS), -gradZ) + float3(0.0,0.0,1e-4));
 
-        // Lighting: sun paints the cloud
+        // Sun-only single scattering
         float NdotL = clamp(dot(approxN, -sView), 0.0, 1.0);
         const float FOUR_PI = 12.566370614359172;
         float cosVS = clamp(-sView.z, -1.0, 1.0);
-        float FwdNorm = hg(cosVS, hgG) * FOUR_PI;
+        float phase = hg(cosVS, hgG) * FOUR_PI;
 
         // Two-tap self-shadow towards sun
         float occ1 = sampleD3(uvE + sunUV*0.20,  0.15, baseScale, edgeMask, coreFloorK);
         float occ2 = sampleD3(uvE + sunUV*0.38,  0.28, baseScale, edgeMask, coreFloorK);
         float occ = 0.65*occ1 + 0.35*occ2;
-        float shadow = exp(-clamp(occK, 0.0, 1.2) * occ);
+        float lightVis = exp(-clamp(occK, 0.0, 1.2) * occ);
 
-        // Beer–Lambert through slab → alpha
+        // Extinction → alpha
         float sigma = max(0.0, densityMul) * (0.12*avgD + densBias);
         float alpha = clamp(1.0 - exp(-sigma * Lm), 0.0, 1.0);
 
-        // White under sun (no ambient)
-        float L = baseWhite * (0.35 + 0.65*NdotL) * (hiGain*FwdNorm) * shadow;
-        float3 C = float3(L * alpha);
+        // Non-premultiplied colour (matches .aOne): DO NOT multiply by alpha.
+        float sunEnergy = baseWhite * hiGain * phase * (0.30 + 0.70*NdotL) * lightVis;
+        float3 C = min(float3(1.0), float3(sunEnergy));
+
         _output.color = float4(C, alpha);
         """
 
@@ -183,11 +179,11 @@ enum CloudImpostorProgram {
         m.setValue(halfWidth,  forKey: "impostorHalfW")
         m.setValue(halfHeight, forKey: "impostorHalfH")
 
-        // Safe, dense defaults
-        m.setValue(8.00 as CGFloat, forKey: "densityMul")
-        m.setValue(3.20 as CGFloat, forKey: "thickness")
-        m.setValue(0.00 as CGFloat, forKey: "densBias")
-        m.setValue(0.92 as CGFloat, forKey: "coverage")
+        // Defaults tuned for bright, white look
+        m.setValue(9.5  as CGFloat, forKey: "densityMul")
+        m.setValue(3.4  as CGFloat, forKey: "thickness")
+        m.setValue(0.02 as CGFloat, forKey: "densBias")
+        m.setValue(0.94 as CGFloat, forKey: "coverage")
 
         m.setValue(0.0042 as CGFloat, forKey: "puffScale")
         m.setValue(0.12  as CGFloat, forKey: "edgeFeather")
@@ -196,11 +192,12 @@ enum CloudImpostorProgram {
         m.setValue(1.90  as CGFloat, forKey: "rimFeatherBoost")
         m.setValue(2.80  as CGFloat, forKey: "rimFadePow")
 
+        // Sun params; engine updates sunDirView per frame
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
-        m.setValue(0.55  as CGFloat, forKey: "hgG")       // mild forward bias
-        m.setValue(1.00  as CGFloat, forKey: "baseWhite")
-        m.setValue(1.00  as CGFloat, forKey: "hiGain")
-        m.setValue(0.40  as CGFloat, forKey: "occK")
+        m.setValue(0.55  as CGFloat, forKey: "hgG")
+        m.setValue(1.8   as CGFloat, forKey: "baseWhite")
+        m.setValue(2.2   as CGFloat, forKey: "hiGain")
+        m.setValue(0.35  as CGFloat, forKey: "occK")
 
         m.diffuse.contents  = UIColor.white
         m.multiply.contents = UIColor.white
