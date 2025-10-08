@@ -4,9 +4,9 @@
 //
 //  Created by . . on 10/8/25.
 //
-//  Volumetric vapour impostors using a fragment shader modifier.
-//  No SCNProgram buffer binding; all uniforms are plain #pragma arguments.
-//  Vapour density is ANCHORED to the plane’s model origin (so it moves as a unit).
+//  Volumetric vapour impostors via a SceneKit fragment shader modifier.
+//  Helpers live in #pragma declarations (top-level); only statements in #pragma body.
+//  Vapour sampling is anchored to the impostor’s model origin so the cloud moves as a unit.
 //
 
 import SceneKit
@@ -19,31 +19,31 @@ enum CloudImpostorMaterial {
         let frag = """
         #pragma transparent
 
-        // ---------- uniforms ----------
+        // ---------- uniforms supplied from Swift ----------
         #pragma arguments
-        float impostorHalfW;     // local half width
-        float impostorHalfH;     // local half height
-        float baseY;             // slab bottom world Y
-        float topY;              // slab top    world Y
-        float coverage;          // 0..1
-        float densityMul;        // overall sigma scale (~1.1)
-        float stepMul;           // 0.35..1.25
-        float detailMul;         // erode amount
-        float horizonLift;       // 0..1 (vertical bias)
-        float puffScale;         // micro puff size
-        float puffStrength;      // micro vs base blend
-        float macroScale;        // macro breakup
-        float macroThreshold;    // macro gate 0..1
-        float2 wind;             // XZ
-        float2 domainOffset;     // XZ
-        float  domainRotate;     // radians
+        float impostorHalfW;
+        float impostorHalfH;
+        float baseY;
+        float topY;
+        float coverage;
+        float densityMul;
+        float stepMul;
+        float detailMul;
+        float horizonLift;
+        float puffScale;
+        float puffStrength;
+        float macroScale;
+        float macroThreshold;
+        float3 wind;
+        float3 domainOffset;
+        float  domainRotate;
 
-        // ---------- helpers ----------
-        float fractf(float x){ return x - floor(x); }
-        float hash1(float n){ return fractf(sin(n) * 43758.5453123); }
-        float hash12(float2 p){ return fractf(sin(dot(p, float2(127.1,311.7))) * 43758.5453123); }
+        // ---------- helper functions / globals ----------
+        #pragma declarations
+        inline float hash1(float n) { return fract(sin(n) * 43758.5453123); }
+        inline float hash12(float2 p) { return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123); }
 
-        float noise3(float3 x){
+        inline float noise3(float3 x) {
             float3 p = floor(x), f = x - p;
             f = f * f * (3.0 - 2.0 * f);
             const float3 off = float3(1.0, 57.0, 113.0);
@@ -58,7 +58,7 @@ enum CloudImpostorMaterial {
             return mix(nxy0, nxy1, f.z);
         }
 
-        float fbm2(float3 p){
+        inline float fbm2(float3 p) {
             float a = 0.0, w = 0.5;
             a += noise3(p) * w;
             p = p * 2.02 + 19.19; w *= 0.5;
@@ -66,11 +66,11 @@ enum CloudImpostorMaterial {
             return a;
         }
 
-        float worley2(float2 x){
+        inline float worley2(float2 x) {
             float2 i = floor(x), f = x - i;
             float d = 1e9;
             for (int y=-1; y<=1; ++y)
-            for (int xk=-1; xk<=1; ++xk){
+            for (int xk=-1; xk<=1; ++xk) {
                 float2 g = float2(xk,y);
                 float2 o = float2(hash12(i+g), hash12(i+g+19.7));
                 float2 r = g + o - f;
@@ -79,7 +79,7 @@ enum CloudImpostorMaterial {
             return sqrt(max(d,0.0));
         }
 
-        float puffFBM2(float2 x){
+        inline float puffFBM2(float2 x) {
             float a = 0.0, w = 0.6, s = 1.0;
             float v = 1.0 - clamp(worley2(x*s), 0.0, 1.0);
             a += v*w; s *= 2.03; w *= 0.55;
@@ -88,26 +88,43 @@ enum CloudImpostorMaterial {
             return clamp(a, 0.0, 1.0);
         }
 
-        float hProfile(float y, float b, float t){
+        inline float hProfile(float y, float b, float t) {
             float h = clamp((y-b)/max(1.0,(t-b)), 0.0, 1.0);
             float up = smoothstep(0.03, 0.25, h);
             float dn = 1.0 - smoothstep(0.68, 1.00, h);
             return pow(clamp(up*dn, 0.0, 1.0), 0.80);
         }
 
-        // ---------- density anchored to impostor origin ----------
-        float densityAtAnchored(float3 wp, float2 anchorXZ)
+        // world pos of current fragment
+        inline float3 worldPos_fromViewPos(float3 viewPos) {
+            float4 mvInvPos = u_inverseModelViewTransform * float4(viewPos, 1.0);
+            float4 w = u_modelTransform * mvInvPos;
+            return w.xyz / max(1e-6, w.w);
+        }
+
+        inline void planeBasis(out float3 ux, out float3 vy, out float3 nrm, out float3 origin) {
+            ux = normalize(u_modelTransform[0].xyz);
+            vy = normalize(u_modelTransform[1].xyz);
+            nrm = normalize(cross(ux, vy));
+            float4 o4 = u_modelTransform * float4(0,0,0,1);
+            origin = o4.xyz / max(1e-6, o4.w);
+        }
+
+        // Density anchored to the impostor’s origin (XZ)
+        inline float densityAtAnchored(float3 wp, float2 anchorXZ)
         {
-            float2 xzRel = (wp.xz - anchorXZ) + domainOffset;
-            float ca = cos(domainRotate), sa = sin(domainRotate);
+            float2 off = domainOffset.xy;
+            float ang = domainRotate;
+            float ca = cos(ang), sa = sin(ang);
+
+            float2 xzRel = (wp.xz - anchorXZ) + off.xy;
             float2 xzr = float2(xzRel.x*ca - xzRel.y*sa,
                                 xzRel.x*sa + xzRel.y*ca);
 
             float h01 = hProfile(wp.y, baseY, topY);
-            float adv = mix(0.55, 1.55, h01);
-            float2 advXY = xzr + wind * adv * 0.0; // time term omitted (impostors advect physically)
+            float2 advXY = xzr; // time/advection handled by moving the billboards
 
-            float macro = 1.0 - clamp(worley2(advXY * macroScale), 0.0, 1.0);
+            float macro = 1.0 - clamp(worley2(advXY * max(1e-6, macroScale)), 0.0, 1.0);
             float macroMask = smoothstep(macroThreshold - 0.10, macroThreshold + 0.10, macro);
 
             float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00110;
@@ -131,65 +148,65 @@ enum CloudImpostorMaterial {
             return dens;
         }
 
-        // ---------- FRAGMENT ----------
+        // ---------- insert into SceneKit’s fragment ----------
+        #pragma body
+        // World basis for the impostor plane
+        float3 ux, vy, nrm, origin;
+        planeBasis(ux, vy, nrm, origin);
+        float2 anchorXZ = origin.xz;
+
+        // World-space position of this fragment on the plane
+        float3 wp = worldPos_fromViewPos(_surface.position);
+
+        // View direction in world space (transform view-space vector)
+        float3 Vmodel = normalize((u_inverseModelViewTransform * float4(_surface.view, 0)).xyz);
+        float3 V      = normalize((u_modelTransform * float4(Vmodel, 0)).xyz);
+
+        // Slab thickness from local half extents
+        float worldHalfX = length(u_modelTransform[0].xyz) * max(0.0001, impostorHalfW);
+        float worldHalfY = length(u_modelTransform[1].xyz) * max(0.0001, impostorHalfH);
+        float slabHalf   = max(worldHalfX, worldHalfY) * 0.9;
+
+        // Integrate symmetrically around the plane
+        float tEnt = -slabHalf;
+        float tExt =  slabHalf;
+        float Lm   = tExt - tEnt;
+        if (Lm <= 1e-5) { discard_fragment(); }
+
+        float distLOD  = clamp(Lm / 2500.0, 0.0, 1.2);
+        int   baseSteps = int(round(mix(8.0, 16.0, 1.0 - distLOD*0.7)));
+        int   N = clamp(int(round(float(baseSteps) * clamp(stepMul, 0.35, 1.25))), 6, 20);
+        float dt = Lm / float(N);
+
+        // Small per-fragment jitter
+        float2 st = _surface.diffuseTexcoord;
+        float j = fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453);
+        float t  = tEnt + (0.25 + 0.5*j) * dt;
+
+        float T = 1.0;
+        for (int i=0; i < N && T > 0.004; ++i)
         {
-            // Camera position and view ray
-            float3 camPos = (u_inverseViewTransform * float4(0,0,0,1)).xyz;
-            float3 V = normalize(_surface.position - camPos);
+            float3 sp = wp + V * t;
 
-            // Model basis (plane axes) + origin
-            float3 ux   = normalize(u_modelTransform[0].xyz);
-            float3 vy   = normalize(u_modelTransform[1].xyz);
-            float3 nrm  = normalize(cross(ux, vy));
-            float3 origin = (u_modelTransform * float4(0,0,0,1)).xyz;
-            float2 anchorXZ = origin.xz;
+            // Edge falloff in plane space
+            float3 d = sp - origin;
+            float lpX = dot(d, ux);
+            float lpY = dot(d, vy);
+            float er = length(float2(lpX/worldHalfX, lpY/worldHalfY));
+            float edgeMask = smoothstep(1.0, 0.95, 1.0 - er);
 
-            float denom = dot(V, nrm);
-            if (denom < 0.0) { nrm = -nrm; denom = -denom; }
-            if (denom < 1e-5) { discard_fragment(); }
+            float rho = densityAtAnchored(sp, anchorXZ) * edgeMask;
+            if (rho < 0.0025) { t += dt; continue; }
 
-            float tPlane = dot(origin - camPos, nrm) / denom;
-            if (tPlane < 0.0) { discard_fragment(); }
-
-            float worldHalfX = length(u_modelTransform[0].xyz) * max(0.0001, impostorHalfW);
-            float worldHalfY = length(u_modelTransform[1].xyz) * max(0.0001, impostorHalfH);
-            float slabHalf   = max(worldHalfX, worldHalfY) * 0.9;
-
-            float tEnt = max(0.0, tPlane - slabHalf);
-            float tExt = tPlane + slabHalf;
-            float Lm   = tExt - tEnt;
-            if (Lm <= 1e-5) { discard_fragment(); }
-
-            int   Nbase = 12;
-            int   N = clamp(int(round(float(Nbase) * clamp(stepMul, 0.35, 1.25))), 6, 20);
-            float dt = Lm / float(N);
-            float t  = tEnt + dt * 0.5;
-
-            float T = 1.0;
-            for (int i=0; i<N && T>0.004; ++i)
-            {
-                float3 sp = camPos + V * t;
-
-                // Edge falloff in plane space
-                float3 d = sp - origin;
-                float lpX = dot(d, ux);
-                float lpY = dot(d, vy);
-                float er = length(float2(lpX/worldHalfX, lpY/worldHalfY));
-                float edgeMask = smoothstep(1.0, 0.95, 1.0 - er);
-
-                float rho = densityAtAnchored(sp, anchorXZ) * edgeMask;
-                if (rho < 0.0025) { t += dt; continue; }
-
-                float sigma = max(0.0, densityMul) * 0.032;
-                float aStep = 1.0 - exp(-rho * sigma * dt);
-                T *= (1.0 - aStep);
-                t += dt;
-            }
-
-            float alpha = clamp(1.0 - T, 0.0, 1.0);
-            float3 rgb  = float3(1.0) * alpha;  // premultiplied white
-            _output.color = float4(rgb, alpha);
+            float sigma = max(0.0, densityMul) * 0.032;
+            float aStep = 1.0 - exp(-rho * sigma * dt);
+            T *= (1.0 - aStep);
+            t += dt;
         }
+
+        float alpha = clamp(1.0 - T, 0.0, 1.0);
+        float3 rgb  = float3(1.0) * alpha; // premultiplied white
+        _output.color = float4(rgb, alpha);
         """
 
         let m = SCNMaterial()
@@ -202,7 +219,7 @@ enum CloudImpostorMaterial {
         m.transparencyMode = .aOne
         m.shaderModifiers = [.fragment: frag]
 
-        // Defaults (safe/fast)
+        // Defaults (per-impostor). No per-frame binders needed.
         m.setValue(halfW, forKey: "impostorHalfW")
         m.setValue(halfH, forKey: "impostorHalfH")
         m.setValue(400.0 as CGFloat, forKey: "baseY")
@@ -220,7 +237,6 @@ enum CloudImpostorMaterial {
         m.setValue(SCNVector3(0, 0, 0), forKey: "domainOffset")
         m.setValue(0.0 as CGFloat, forKey: "domainRotate")
 
-        // Visual parity: keep white like the sprite path
         m.diffuse.contents = UIColor.white
         m.multiply.contents = UIColor.white
         return m
