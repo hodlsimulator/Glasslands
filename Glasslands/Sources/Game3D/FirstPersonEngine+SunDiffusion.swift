@@ -122,6 +122,7 @@ extension FirstPersonEngine {
         if tNow - tPrev < 0.12 { return }
         sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
 
+        // Anchor the map in world space near the camera, snapped to a grid so it doesn't "swim".
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
         let grid: Float = 256.0
@@ -182,9 +183,9 @@ extension FirstPersonEngine {
         enc.endEncoding()
         cmd.commit()
 
+        // Use the map directly on materials (avoid gobo double-darkening).
         sun.gobo?.intensity = 0.0
 
-        // Bind as SCNMaterialProperty for reliability.
         let texProp = SCNMaterialProperty(contents: out)
         texProp.minificationFilter = .linear
         texProp.magnificationFilter = .linear
@@ -195,7 +196,7 @@ extension FirstPersonEngine {
         scene.rootNode.enumerateChildNodes { n, _ in
             guard let g = n.geometry else { return }
             for m in g.materials {
-                if m.shaderModifiers?[.fragment] == GroundShadowShader.fragment {
+                if m.shaderModifiers?[.surface] == GroundShadowShader.surface {
                     m.setValue(texProp, forKey: "gl_shadowTex")
                     m.setValue(params,   forKey: "gl_shadowParams")
                 }
