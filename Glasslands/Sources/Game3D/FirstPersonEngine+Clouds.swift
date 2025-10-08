@@ -15,7 +15,7 @@ private enum AdvectClock { static var last: TimeInterval = 0 }
 
 extension FirstPersonEngine {
 
-    // MARK: - Volumetric cloud impostors (no SCNProgram binders)
+    // MARK: - Volumetric cloud impostors (SCNProgram)
     @MainActor
     func enableVolumetricCloudImpostors(_ on: Bool) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
@@ -24,23 +24,8 @@ extension FirstPersonEngine {
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
-
             if on {
-                // Compute local half-extents per geometry once at install time.
-                let (hx, hy): (CGFloat, CGFloat) = {
-                    if let p = g as? SCNPlane {
-                        return (max(0.001, p.width * 0.5), max(0.001, p.height * 0.5))
-                    } else {
-                        let bb = g.boundingBox
-                        let w = CGFloat(max(0.001, (bb.max.x - bb.min.x) * 0.5))
-                        let h = CGFloat(max(0.001, (bb.max.y - bb.min.y) * 0.5))
-                        return (w, h)
-                    }
-                }()
-
-                let m = CloudImpostorMaterial.make(halfW: hx, halfH: hy)
-
-                // Preserve tint/transparency from the previous material.
+                let m = CloudImpostorProgram.makeMaterial()
                 if let old = g.firstMaterial {
                     m.multiply.contents = old.multiply.contents
                     m.transparency = old.transparency
@@ -48,6 +33,7 @@ extension FirstPersonEngine {
                 g.firstMaterial = m
             } else {
                 for m in g.materials {
+                    m.program = nil
                     m.shaderModifiers = nil
                 }
             }

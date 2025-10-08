@@ -11,7 +11,6 @@ import SceneKit
 import UIKit
 
 enum CloudBillboardFactory {
-
     @MainActor
     static func makeNode(
         from clusters: [CloudClusterSpec],
@@ -21,21 +20,14 @@ enum CloudBillboardFactory {
         root.name = "CumulusBillboardLayer"
         root.castsShadow = false
 
-        // Share one material per atlas image.
-        let template = CloudBillboardMaterial.makeCurrent()
+        // One shared SCNProgram material per atlas index (impostor program).
         var cache: [Int: SCNMaterial] = [:]
-
         @inline(__always)
-        func material(forAtlasIndex i: Int) -> SCNMaterial {
+        func material(forAtlasIndex i: Int, size: CGFloat) -> SCNMaterial {
             if let m = cache[i] { return m }
-            let m = template.copy() as! SCNMaterial
-            let count = atlas.images.count
-            if count > 0 {
-                let idx = ((i % count) + count) % count
-                m.diffuse.contents = atlas.images[idx]
-            } else {
-                m.diffuse.contents = CloudSpriteTexture.fallbackWhite2x2
-            }
+            let m = CloudImpostorProgram.makeMaterial()
+            // We don't actually sample the atlas; keep white for stability.
+            m.diffuse.contents = UIColor.white
             m.multiply.contents = UIColor.white
             cache[i] = m
             return m
@@ -54,23 +46,22 @@ enum CloudBillboardFactory {
                 bb.constraints = [bc]
 
                 let plane = SCNPlane(width: CGFloat(p.size), height: CGFloat(p.size))
-                plane.firstMaterial = material(forAtlasIndex: p.atlasIndex)
+                plane.firstMaterial = material(forAtlasIndex: p.atlasIndex, size: CGFloat(p.size))
 
                 let sprite = SCNNode(geometry: plane)
                 sprite.eulerAngles.z = p.roll
                 sprite.castsShadow = false
 
-                // Draw clouds AFTER the sun for occlusion-by-order.
+                // Draw clouds after the sun so order gives soft occlusion.
                 sprite.renderingOrder = -9_000
                 bb.renderingOrder = -9_000
 
-                // Per-puff opacity lives on the node so the material stays shared.
+                // Per-puff opacity lives on the node to keep materials shared.
                 bb.opacity = CGFloat(max(0, min(1, p.opacity)))
 
                 bb.addChildNode(sprite)
                 group.addChildNode(bb)
             }
-
             root.addChildNode(group)
         }
 
