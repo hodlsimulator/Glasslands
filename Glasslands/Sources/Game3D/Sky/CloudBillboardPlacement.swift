@@ -4,8 +4,9 @@
 //
 //  Created by . . on 10/4/25.
 //
-//  Blue-noise placements and cauliflower-style clusters for billboarded cumulus.
-//  Fully synchronous so callers don’t need `await`.
+//  Blue-noise placements and cluster construction for billboarded cumulus.
+//  This build makes each cluster a FEW large, overlapping puffs so it reads as a
+//  single big cloud (no “dozens of tiny bits”). Also reduces plane count → less lag.
 //
 
 import Foundation
@@ -13,39 +14,13 @@ import simd
 
 enum CloudBillboardPlacement {
 
-    // MARK: RNG / helpers
     @inline(__always) private static func frand(_ s: inout UInt32) -> Float {
         s = 1_664_525 &* s &+ 1_013_904_223
         return Float(s >> 8) * (1.0 / 16_777_216.0)
     }
-    @inline(__always) private static func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * t }
     @inline(__always) private static func sat(_ x: Float) -> Float { max(0, min(1, x)) }
 
-    // MARK: Blue-noise-ish placements (disk)
-    static func poissonDisk(
-        _ n: Int, radius R: Float,
-        minSepNear: Float, minSepFar: Float,
-        seed: inout UInt32
-    ) -> [simd_float2] {
-        var pts: [simd_float2] = []
-        pts.reserveCapacity(max(0, n))
-        let maxTries = max(1, n) * 2600
-        var tries = 0
-        while pts.count < n && tries < maxTries {
-            tries += 1
-            let t = frand(&seed)
-            let r = sqrt(t) * R
-            let a = frand(&seed) * (.pi * 2)
-            let p = simd_float2(cosf(a) * r, sinf(a) * r)
-            let sep = lerp(minSepNear, minSepFar, r / max(1e-6, R))
-            var ok = true
-            for q in pts where simd_distance(p, q) < sep { ok = false; break }
-            if ok { pts.append(p) }
-        }
-        return pts
-    }
-
-    // MARK: Blue-noise-ish placements (annulus)
+    // NOTE: keep signatures the same as your project (no async)
     static func poissonAnnulus(
         _ n: Int, r0: Float, r1: Float,
         minSepNear: Float, minSepFar: Float,
@@ -59,11 +34,12 @@ enum CloudBillboardPlacement {
         while pts.count < n && tries < maxTries {
             tries += 1
             let t = frand(&seed)
-            let r = sqrt(lerp(r0sq, r1sq, t))
+            let r = sqrt((1 - t) * r0sq + t * r1sq)     // unbiased in area
             let a = frand(&seed) * (.pi * 2)
             let p = simd_float2(cosf(a) * r, sinf(a) * r)
+            // interpolate required separation across annulus
             let tr = sat((r - r0) / max(1, r1 - r0))
-            let sep = lerp(minSepNear, minSepFar, powf(tr, 0.8))
+            let sep = (1 - tr) * minSepNear + tr * minSepFar
             var ok = true
             for q in pts where simd_distance(p, q) < sep { ok = false; break }
             if ok { pts.append(p) }
@@ -71,7 +47,6 @@ enum CloudBillboardPlacement {
         return pts
     }
 
-    // MARK: Cluster construction (“pile of balls” base + crown + caps)
     static func buildCluster(
         at anchorXZ: simd_float2,
         baseY: Float,
@@ -86,69 +61,84 @@ enum CloudBillboardPlacement {
         let dist = simd_length(anchorXZ)
         let tR = sat((dist - lo) / max(1, hi - lo)) // 0 near → 1 far
 
-        // slightly smaller & fainter with distance so the far belt reads as a layer
-        let scale = (1.15 - 0.38 * tR) * scaleMul
+        // make clusters larger and more overlapped with distance compensation
+        let scale = (1.20 - 0.32 * tR) * scaleMul
 
-        let base: Float      = (560.0 + 320.0 * frand(&seed)) * scale
-        let thickness: Float = (280.0 + 210.0 * frand(&seed)) * scale
-        let baseLift: Float  = 18.0 + (frand(&seed) - 0.5) * 22.0
+        // base cloud size
+        let base: Float      = (720.0 + 360.0 * frand(&seed)) * scale
+        let thickness: Float = (300.0 + 240.0 * frand(&seed)) * scale
+        let baseLift: Float  = 24.0 + (frand(&seed) - 0.5) * 22.0
 
         var puffs: [CloudPuffSpec] = []
-        puffs.reserveCapacity(18)
+        puffs.reserveCapacity(10)
 
-        // --- Base ring: 5–7 large puffs
-        let baseCount = 5 + Int(frand(&seed) * 2.99)
-        let baseRad   = base * 0.50
-        for i in 0..<baseCount {
-            let a = (Float(i) / Float(baseCount)) * (.pi * 2) + frand(&seed) * 0.35
-            let r = baseRad * (0.78 + 0.30 * frand(&seed))
+        // ---- Core: 3 very large overlapping puffs (small radius → strong overlap)
+        let coreCount = 3
+        let coreRad   = base * 0.32
+        for i in 0..<coreCount {
+            let a = (Float(i) / Float(coreCount)) * (.pi * 2) + frand(&seed) * 0.33
+            let r = coreRad * (0.65 + 0.20 * frand(&seed))
             let pos = simd_float3(anchorXZ.x + cosf(a) * r,
                                   baseY + baseLift,
                                   anchorXZ.y + sinf(a) * r)
-            let size = base * (0.76 + 0.18 * frand(&seed))
+            let size = base * (1.18 + 0.16 * frand(&seed))   // BIG
             let roll = frand(&seed) * (.pi * 2)
             puffs.append(CloudPuffSpec(pos: pos, size: size, roll: roll, atlasIndex: 0,
-                                       opacity: (0.92 - 0.14 * tR) * opacityMul,
+                                       opacity: (0.94 - 0.10 * tR) * opacityMul,
                                        tint: tint))
         }
 
-        // --- Crown ring: 3–4 medium puffs
-        let crownCount = 3 + Int(frand(&seed) * 2.5)
-        let crownRad   = base * 0.34
+        // ---- Crown: 2 large puffs a bit higher
+        let crownCount = 2
+        let crownRad   = base * 0.24
         for i in 0..<crownCount {
-            let a = (Float(i) / Float(crownCount)) * (.pi * 2) + frand(&seed) * 0.42
-            let r = crownRad * (0.70 + 0.28 * frand(&seed))
+            let a = (Float(i) / Float(crownCount)) * (.pi * 2) + frand(&seed) * 0.45
+            let r = crownRad * (0.65 + 0.20 * frand(&seed))
             let pos = simd_float3(anchorXZ.x + cosf(a) * r,
-                                  baseY + baseLift + thickness * (0.28 + 0.10 * frand(&seed)),
+                                  baseY + baseLift + thickness * (0.32 + 0.10 * frand(&seed)),
                                   anchorXZ.y + sinf(a) * r)
-            let size = base * (0.56 + 0.12 * frand(&seed))
+            let size = base * (0.98 + 0.14 * frand(&seed))
             let roll = frand(&seed) * (.pi * 2)
             puffs.append(CloudPuffSpec(pos: pos, size: size, roll: roll, atlasIndex: 0,
-                                       opacity: (0.95 - 0.16 * tR) * opacityMul,
+                                       opacity: (0.96 - 0.12 * tR) * opacityMul,
                                        tint: tint))
         }
 
-        // --- Caps: 1–2 small up-drafts
-        let capCount = 1 + Int(frand(&seed) * 2.4)
-        for _ in 0..<capCount {
+        // ---- Cap: 1 medium puff on top
+        do {
             let a = frand(&seed) * (.pi * 2)
-            let r = crownRad * (0.25 + 0.30 * frand(&seed))
+            let r = crownRad * (0.30 + 0.20 * frand(&seed))
             let pos = simd_float3(anchorXZ.x + cosf(a) * r,
-                                  baseY + baseLift + thickness * (0.55 + 0.20 * frand(&seed)),
+                                  baseY + baseLift + thickness * (0.62 + 0.14 * frand(&seed)),
                                   anchorXZ.y + sinf(a) * r)
-            let size = base * (0.40 + 0.12 * frand(&seed))
+            let size = base * (0.78 + 0.12 * frand(&seed))
             let roll = frand(&seed) * (.pi * 2)
             puffs.append(CloudPuffSpec(pos: pos, size: size, roll: roll, atlasIndex: 0,
-                                       opacity: (0.98 - 0.18 * tR) * opacityMul,
+                                       opacity: (0.98 - 0.14 * tR) * opacityMul,
                                        tint: tint))
         }
 
-        // --- Light jitter so clusters don’t stamp
+        // ---- Fillers: 2 inner blobs to close tiny gaps, very near centre
+        let fillCount = 2
+        for _ in 0..<fillCount {
+            let a = frand(&seed) * (.pi * 2)
+            let r = base * (0.08 + 0.08 * frand(&seed))
+            let pos = simd_float3(anchorXZ.x + cosf(a) * r,
+                                  baseY + baseLift + thickness * (0.10 + 0.18 * frand(&seed)),
+                                  anchorXZ.y + sinf(a) * r)
+            let size = base * (0.68 + 0.10 * frand(&seed))
+            let roll = frand(&seed) * (.pi * 2)
+            puffs.append(CloudPuffSpec(pos: pos, size: size, roll: roll, atlasIndex: 0,
+                                       opacity: (0.97 - 0.10 * tR) * opacityMul,
+                                       tint: tint))
+        }
+
+        // slight jitter so clusters don’t stamp
         for i in 0..<puffs.count {
             var p = puffs[i]
-            p.pos.x += (frand(&seed) - 0.5) * base * 0.05
-            p.pos.z += (frand(&seed) - 0.5) * base * 0.05
-            p.roll  += (frand(&seed) - 0.5) * 0.3
+            p.pos.x += (frand(&seed) - 0.5) * base * 0.04
+            p.pos.z += (frand(&seed) - 0.5) * base * 0.04
+            p.roll  += (frand(&seed) - 0.5) * 0.25
             puffs[i] = p
         }
 

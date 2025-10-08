@@ -6,6 +6,7 @@
 //
 //  Dense, round cauliflower vapour with hidden billboard rims.
 //  Sun-only white. Fast path: 5 fixed z-samples (unrolled), no per-pixel loops.
+//  Important: macro gating is optional (default 0) so a sprite doesn't break into islands.
 //
 
 import SceneKit
@@ -43,6 +44,9 @@ enum CloudImpostorProgram {
         float rimFadePow;
         float shapePow;
 
+        // NEW: weight of macro gating inside the sprite (0 = off, 1 = fully on)
+        float macroWeight;
+
         float3 sunDirView;
         float hgG;
         float baseWhite;
@@ -68,61 +72,29 @@ enum CloudImpostorProgram {
             return mix(nxy0,nxy1,f.z);
         }
 
-        // cheap cellular “lump”: max of four soft circles in a 2×2 neighbourhood
-        inline float lump4(float2 p){
-            float2 c=floor(p), f=p-c;
-            float v=0.0;
-
-            float2 ic=c+float2(0.0,0.0);
-            float2 rnd=float2(hash12(ic),hash12(ic+19.7));
-            float2 q=f - rnd;
-            float d2=dot(q,q);
-            float rad=0.35 + 0.27*hash12(ic+7.3);
-            float r2=rad*rad;
-            v=max(v, 1.0 - smoothstep(r2*(1.0-0.48), r2, d2)); // <- correct order (round puffs)
-
-            ic=c+float2(1.0,0.0);
-            rnd=float2(hash12(ic),hash12(ic+19.7));
-            q=f - float2(1.0,0.0) - rnd; d2=dot(q,q);
-            rad=0.35 + 0.27*hash12(ic+7.3); r2=rad*rad;
-            v=max(v, 1.0 - smoothstep(r2*(1.0-0.48), r2, d2));
-
-            ic=c+float2(0.0,1.0);
-            rnd=float2(hash12(ic),hash12(ic+19.7));
-            q=f - float2(0.0,1.0) - rnd; d2=dot(q,q);
-            rad=0.35 + 0.27*hash12(ic+7.3); r2=rad*rad;
-            v=max(v, 1.0 - smoothstep(r2*(1.0-0.48), r2, d2));
-
-            ic=c+float2(1.0,1.0);
-            rnd=float2(hash12(ic),hash12(ic+19.7));
-            q=f - float2(1.0,1.0) - rnd; d2=dot(q,q);
-            rad=0.35 + 0.27*hash12(ic+7.3); r2=rad*rad;
-            v=max(v, 1.0 - smoothstep(r2*(1.0-0.48), r2, d2));
-            return v;
+        inline float worley2(float2 x){
+            float2 i=floor(x), f=x-i; float d=1e9;
+            for(int y=-1;y<=1;++y) for(int xk=-1;xk<=1;++xk){
+                float2 g=float2(xk,y);
+                float2 o=float2(hash12(i+g),hash12(i+g+19.7));
+                float2 r=g+o-f; d=min(d,dot(r,r));
+            }
+            return sqrt(max(d,0.0));
         }
 
-        // cauliflower micro (3 scales of lump4 + tiny value-noise lift)
-        inline float microCauli(float2 uv, float z, float baseScale, float detailBoost){
-            float s0=baseScale*180.0*detailBoost;
-            float s1=baseScale*320.0*detailBoost;
-            float s2=baseScale*520.0*detailBoost;
-            float2 o0=float2(z*0.33,-z*0.21);
-            float2 o1=float2(z*0.60, z*0.15);
-            float2 o2=float2(-z*0.45,z*0.27);
-            float p0=lump4(uv*s0 + o0);
-            float p1=lump4(uv*s1 + o1);
-            float p2=lump4(uv*s2 + o2);
-            float vN=noise3(float3(uv*1.9,z*0.7));
-            float c=0.44*p0 + 0.34*p1 + 0.24*p2;
-            c=mix(c, max(c,vN), 0.12);
-            return clamp(c,0.0,1.0);
+        // 2-octave billowy cellular → cauliflower
+        inline float puffFBM2(float2 x){
+            float a=0.0,w=0.62,s=1.0;
+            float v=1.0-clamp(worley2(x*s),0.0,1.0); a+=v*w; s*=2.03; w*=0.55;
+            v=1.0-clamp(worley2(x*s),0.0,1.0);       a+=v*w;
+            return clamp(a,0.0,1.0);
         }
 
         inline float macroMask2D(float2 uv){
             float w=noise3(float3(uv*0.62, 2.3));
             float b=noise3(float3(uv*1.24,-1.7));
             float m=0.6*w+0.4*b;
-            return smoothstep(0.40,0.60,m);
+            return smoothstep(0.42,0.58,m);
         }
 
         inline float hg(float mu,float g){
@@ -131,11 +103,25 @@ enum CloudImpostorProgram {
             return (1.0-g2)/(4.0*3.14159265*denom);
         }
 
-        inline float sampleD(float2 uvE,float z,float baseScale,float detailBoost,float edgeMask,float coreFloorK){
-            float micro=microCauli(uvE, z, baseScale, detailBoost);
-            micro=max(micro, coreFloorK*edgeMask);                // core floor kills tiny holes
-            float macro=macroMask2D(uvE*0.62 + float2(z*0.07,-z*0.05));
-            return clamp(micro*macro,0.0,1.0)*edgeMask;
+        inline float sampleD(float2 uvE,float z,float baseScale,float detailBoost,float edgeMask,float coreFloorK,float macroW){
+            float2 o0=float2(z*0.33,-z*0.21);
+            float2 o1=float2(z*0.60, z*0.15);
+            float2 o2=float2(-z*0.45, z*0.27);
+            float s0=baseScale*180.0*detailBoost;
+            float s1=baseScale*320.0*detailBoost;
+            float s2=baseScale*520.0*detailBoost;
+            float p0=puffFBM2(uvE*s0 + o0);
+            float p1=puffFBM2(uvE*s1 + o1);
+            float p2=puffFBM2(uvE*s2 + o2);
+            float micro=0.44*p0 + 0.34*p1 + 0.24*p2;
+            // small core floor so we don't get pinholes
+            micro=max(micro, coreFloorK*edgeMask);
+
+            // optional macro gating (default 0 → does nothing)
+            float macro = macroMask2D(uvE*0.62 + float2(z*0.07,-z*0.05));
+            float gate  = mix(1.0, macro, clamp(macroW, 0.0, 1.0));
+
+            return clamp(micro * gate, 0.0, 1.0) * edgeMask;
         }
 
         // ===== fragment =====
@@ -173,15 +159,16 @@ enum CloudImpostorProgram {
         float Lm=clamp(thickness,0.50,8.0);
         float baseScale=max(1e-4,puffScale);
 
-        // derive a small core floor outside helpers; pass it in
-        float coreFloorK = clamp(0.22 + 0.20*coverage, 0.0, 0.6);
+        // derive small core floor outside helpers; pass it in
+        float coreFloorK = clamp(0.25 + 0.18*coverage, 0.0, 0.6);
+        float macroW = clamp(macroWeight, 0.0, 1.0);          // default 0 → no sprite fragmentation
 
         // 5 fixed z-samples (unrolled): Simpson weights 1,4,2,4,1 → /12
-        float d0=sampleD(uvE,-0.4,baseScale,detailBoost,edgeMask,coreFloorK);
-        float d1=sampleD(uvE,-0.2,baseScale,detailBoost,edgeMask,coreFloorK);
-        float d2=sampleD(uvE, 0.0,baseScale,detailBoost,edgeMask,coreFloorK);
-        float d3=sampleD(uvE, 0.2,baseScale,detailBoost,edgeMask,coreFloorK);
-        float d4=sampleD(uvE, 0.4,baseScale,detailBoost,edgeMask,coreFloorK);
+        float d0=sampleD(uvE,-0.4,baseScale,detailBoost,edgeMask,coreFloorK,macroW);
+        float d1=sampleD(uvE,-0.2,baseScale,detailBoost,edgeMask,coreFloorK,macroW);
+        float d2=sampleD(uvE, 0.0,baseScale,detailBoost,edgeMask,coreFloorK,macroW);
+        float d3=sampleD(uvE, 0.2,baseScale,detailBoost,edgeMask,coreFloorK,macroW);
+        float d4=sampleD(uvE, 0.4,baseScale,detailBoost,edgeMask,coreFloorK,macroW);
         float avgD=(d0 + 4.0*d1 + 2.0*d2 + 4.0*d3 + d4) * (1.0/12.0);
 
         // sun-only white
@@ -192,7 +179,7 @@ enum CloudImpostorProgram {
 
         // single occlusion tap towards sun
         float2 sunUV=normalize(abs(sView.x)+abs(sView.y)>1e-4 ? float2(sView.x,sView.y) : float2(0.0001,0.0001));
-        float occ=sampleD(uvE + sunUV*0.22, 0.18, baseScale, detailBoost, edgeMask, coreFloorK);
+        float occ=sampleD(uvE + sunUV*0.22, 0.18, baseScale, detailBoost, edgeMask, coreFloorK, macroW);
         float shadow=1.0 - clamp(occK*occ, 0.0, 0.85);
 
         // Beer–Lambert through slab
@@ -219,14 +206,14 @@ enum CloudImpostorProgram {
         m.setValue(halfWidth,  forKey: "impostorHalfW")
         m.setValue(halfHeight, forKey: "impostorHalfH")
 
-        // dense but safe defaults (match your uniforms push if you have one)
+        // dense but safe defaults
         m.setValue(0.50 as CGFloat,  forKey: "stepMul")
-        m.setValue(7.50 as CGFloat,  forKey: "densityMul")
+        m.setValue(7.00 as CGFloat,  forKey: "densityMul")
         m.setValue(3.00 as CGFloat,  forKey: "thickness")
         m.setValue(0.00 as CGFloat,  forKey: "densBias")
 
         m.setValue(0.90 as CGFloat,  forKey: "coverage")
-        m.setValue(0.0048 as CGFloat, forKey: "puffScale")
+        m.setValue(0.0045 as CGFloat, forKey: "puffScale")
         m.setValue(0.12 as CGFloat,  forKey: "edgeFeather")
         m.setValue(0.06 as CGFloat,  forKey: "edgeCut")
         m.setValue(0.14 as CGFloat,  forKey: "edgeNoiseAmp")
@@ -235,9 +222,12 @@ enum CloudImpostorProgram {
         m.setValue(0.68 as CGFloat,  forKey: "shapeHi")
         m.setValue(Float.random(in: 0...1000), forKey: "shapeSeed")
 
-        m.setValue(1.80 as CGFloat,  forKey: "rimFeatherBoost")
-        m.setValue(2.80 as CGFloat,  forKey: "rimFadePow")
-        m.setValue(1.60 as CGFloat,  forKey: "shapePow")
+        m.setValue(1.70 as CGFloat,  forKey: "rimFeatherBoost")
+        m.setValue(2.60 as CGFloat,  forKey: "rimFadePow")
+        m.setValue(1.50 as CGFloat,  forKey: "shapePow")
+
+        // macro gating default OFF to avoid sprite fragmentation
+        m.setValue(0.00 as CGFloat,  forKey: "macroWeight")
 
         // sun-only white; isotropic
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
