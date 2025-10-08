@@ -18,12 +18,15 @@ extension FirstPersonEngine {
     // MARK: - Volumetric cloud impostors (shader-modifier path)
     @MainActor
     func enableVolumetricCloudImpostors(_ on: Bool) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return
+        }
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
 
             if on {
+                // Determine half-size in world units so shader can keep UVs aspect-correct
                 let (hx, hy): (CGFloat, CGFloat) = {
                     if let p = g as? SCNPlane {
                         return (max(0.001, p.width * 0.5), max(0.001, p.height * 0.5))
@@ -37,19 +40,25 @@ extension FirstPersonEngine {
 
                 let m = CloudImpostorProgram.makeMaterial(halfWidth: hx, halfHeight: hy)
 
-                // Preserve any sprite tint/transparency so look stays consistent.
+                // Preserve any sprite tint/transparency if present so look stays consistent.
                 if let old = g.firstMaterial {
                     m.multiply.contents = old.multiply.contents
                     m.transparency = old.transparency
                 }
+
                 g.firstMaterial = m
             } else {
+                // Back to plain billboards
                 for m in g.materials {
                     m.shaderModifiers = nil
                     m.program = nil
                 }
             }
         }
+
+        // **Important**: the billboard layer is created asynchronously.
+        // After swapping materials in, push the sun direction + tuned params now.
+        if on { applyCloudSunUniforms() }
     }
 
     // MARK: - Disabled prewarm (no-op to avoid SceneKit assertion on iOS 26)
