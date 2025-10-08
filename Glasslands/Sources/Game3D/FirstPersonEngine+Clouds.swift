@@ -15,18 +15,19 @@ private enum AdvectClock { static var last: TimeInterval = 0 }
 
 extension FirstPersonEngine {
 
-    // MARK: - Volumetric cloud impostors (SCNProgram)
+    // MARK: - Volumetric cloud impostors (disabled SCNProgram; safe sprites)
     @MainActor
     func enableVolumetricCloudImpostors(_ on: Bool) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
-            return
-        }
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
+
             if on {
                 let m = CloudImpostorProgram.makeMaterial()
                 if let old = g.firstMaterial {
+                    // Preserve sprite atlas/tint so visuals remain correct.
+                    m.diffuse.contents = old.diffuse.contents
                     m.multiply.contents = old.multiply.contents
                     m.transparency = old.transparency
                 }
@@ -38,9 +39,6 @@ extension FirstPersonEngine {
                 }
             }
         }
-
-        // Prewarming disabled: SceneKit asserts on iOS 26 when preparing SCNProgram-backed materials.
-        // prewarmCloudImpostorPipelines()
     }
 
     // MARK: - Disabled prewarm (no-op to avoid SceneKit assertion on iOS 26)
