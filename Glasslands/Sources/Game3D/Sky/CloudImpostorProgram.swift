@@ -4,7 +4,7 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Extremely dense, cauliflower micro-puffs with hidden billboard rims.
+//  Dense, clumped cauliflower vapour with hidden billboard rims.
 //  Sun-only white; adaptive steps; screen-space detail boost.
 //
 
@@ -87,29 +87,30 @@ enum CloudImpostorProgram {
             return clamp(a,0.0,1.0);
         }
 
-        // 4 layered cauliflower micro field (different scales & z phases)
+        // 3 layered cauliflower micro field (scales & z phases)
         inline float cauliflowerLayers(float2 uv, float z, float baseScale, float detailBoost){
-            float s0 = baseScale * 160.0 * detailBoost;
-            float s1 = baseScale * 260.0 * detailBoost;
-            float s2 = baseScale * 420.0 * detailBoost;
-            float s3 = baseScale * 680.0 * detailBoost;
+            float s0 = baseScale * 180.0 * detailBoost;
+            float s1 = baseScale * 300.0 * detailBoost;
+            float s2 = baseScale * 520.0 * detailBoost;
 
             float2 o0 = float2(z*0.33, -z*0.21);
             float2 o1 = float2(z*0.60,  z*0.15);
             float2 o2 = float2(-z*0.45, z*0.27);
-            float2 o3 = float2(z*0.12, -z*0.55);
 
             float p0 = puffFBM2(uv*s0 + o0);
             float p1 = puffFBM2(uv*s1 + o1);
             float p2 = puffFBM2(uv*s2 + o2);
-            float p3 = puffFBM2(uv*s3 + o3);
 
-            // Weighted sum → gently sharpened to keep “cauliflower” lobes
-            float c = 0.40*p0 + 0.32*p1 + 0.20*p2 + 0.12*p3;
+            float c = 0.45*p0 + 0.35*p1 + 0.25*p2;
             return pow(clamp(c,0.0,1.0), 1.08);
         }
 
         inline float macroMask2D(float2 uv){ return 1.0 - clamp(worley2(uv*1.32), 0.0, 1.0); }
+
+        // Soft OR for clumping: 1 - Π(1 - d_i)
+        inline float softOr3(float d0, float d1, float d2){
+            return 1.0 - (1.0 - d0)*(1.0 - d1)*(1.0 - d2);
+        }
 
         inline float hg(float mu,float g){
             float g2=g*g;
@@ -126,11 +127,11 @@ enum CloudImpostorProgram {
         float s=max(halfs.x,halfs.y);
         float2 uvE=uv*halfs/s;
 
-        // Screen-space detail: big on-screen → much finer micro
+        // Screen-space detail: larger on-screen → finer micro
         float px = max(fwidth(uvE.x), fwidth(uvE.y));
         float detailBoost = clamp(1.0 / max(0.0002, px * 28.0), 1.0, 10.0);
 
-        // --- Rim kill (hide the card even at extreme densities) ---
+        // --- Rim kill (hide the card) ---
         float r=length(uvE);
         float nEdge=noise3(float3(uvE*3.15,0.0));
         float rWobble=(nEdge*2.0-1.0)*edgeNoiseAmp;
@@ -154,7 +155,7 @@ enum CloudImpostorProgram {
         float covLocal=mix(max(0.0,coverage-edgeErode),min(1.0,coverage+centreFill),edgeMask);
         float fillGain=mix(1.0,1.0+centreFill,edgeMask);
 
-        // Slab & adaptive steps (more steps in dense centre, fewer at rim)
+        // Slab & adaptive steps (more in centre)
         float  Lm=clamp(thickness,0.50,8.0);
         int    Nbase = 18;
         float  qSteps = mix(0.70, 1.00, edgeMask);
@@ -172,23 +173,42 @@ enum CloudImpostorProgram {
         float  T=1.0;
         float3 C=float3(0.0);
 
+        // Macro clump once per fragment
         float macro2 = macroMask2D(uvE*0.62);
+
+        // Neighbour radius in impostor UVs (screen-space based)
+        float neighR = clamp(px * 24.0, 0.006, 0.030);
+        const float2 d1 = float2( 0.8660254,  0.5);
+        const float2 d2 = float2(-0.5,       0.8660254);
+        const float2 d3 = float2(-0.3660254,-0.930);
 
         for(int i=0;i<N && T>0.004;++i){
             float z=-0.5*Lm + t;
 
-            // 4-layer cauliflower micro, then clump with macro, then rim mask
-            float micro = cauliflowerLayers(uvE, z, max(1e-4,puffScale), detailBoost);
-            float d = pow(clamp(micro * macro2, 0.0, 1.0), 1.0) * edgeMask;
+            // Centre micro (3 layers)
+            float m0 = cauliflowerLayers(uvE, z, max(1e-4,puffScale), detailBoost);
+
+            // Clamp the gaps by “soft OR” with two neighbour taps (cheap)
+            float sCoarse = max(1e-4,puffScale) * 260.0 * detailBoost;
+            float2 o1 = float2(z*0.60,  z*0.15);
+            float2 o2 = float2(-z*0.45, z*0.27);
+            float mA = puffFBM2((uvE + d1*neighR)*sCoarse + o1);
+            float mB = puffFBM2((uvE + d2*neighR)*sCoarse + o2);
+            float mClump = softOr3(m0, mA, mB);
+
+            // Apply macro clumps and rim mask
+            float d = pow(clamp(mClump * macro2, 0.0, 1.0), 1.0) * edgeMask;
 
             if(d>0.0005){
                 // one-tap self-occlusion in sun direction
                 float2 sunUV = normalize(abs(sView.x)+abs(sView.y)>1e-4 ? float2(sView.x,sView.y) : float2(0.0001,0.0001));
                 float  zOcc  = z + sView.z*0.22;
-                float  occ   = cauliflowerLayers(uvE + sunUV*0.22, zOcc, max(1e-4,puffScale), detailBoost) * macro2;
+                float  oA    = puffFBM2((uvE + sunUV*0.22 + d1*neighR)*sCoarse + o1);
+                float  oB    = puffFBM2((uvE + sunUV*0.22 + d2*neighR)*sCoarse + o2);
+                float  o0    = cauliflowerLayers(uvE + sunUV*0.22, zOcc, max(1e-4,puffScale), detailBoost);
+                float  occ   = softOr3(o0, oA, oB) * macro2;
                 float  shadow= 1.0 - clamp(occK*occ, 0.0, 0.85);
 
-                // very high extinction: saturates T quickly → early out = cheaper
                 float sigma = max(0.0, densityMul) * (0.10*d + densBias);
                 float aStep = 1.0 - exp(-sigma * dt * fillGain);
 
@@ -196,8 +216,7 @@ enum CloudImpostorProgram {
                 C += (l * aStep) * T;
                 T *= (1.0 - aStep);
 
-                // super-dense early exit (saves work when “10× vapour” is reached)
-                if (T < 0.08) { break; }
+                if (T < 0.08) { break; } // super-dense → early exit
             }
 
             t += dt;
@@ -221,18 +240,18 @@ enum CloudImpostorProgram {
         m.setValue(halfWidth,  forKey: "impostorHalfW")
         m.setValue(halfHeight, forKey: "impostorHalfH")
 
-        // ===== very dense defaults (≈10× vapour) but still fast =====
-        m.setValue(0.48 as CGFloat,  forKey: "stepMul")      // ~10–13 steps centre, fewer at rim
-        m.setValue(4.00 as CGFloat,  forKey: "densityMul")   // strong extinction ⇒ early-out
-        m.setValue(3.20 as CGFloat,  forKey: "thickness")
+        // Dense + clumped defaults (fast via early-outs/adaptive steps)
+        m.setValue(0.46 as CGFloat,  forKey: "stepMul")
+        m.setValue(3.60 as CGFloat,  forKey: "densityMul")
+        m.setValue(3.00 as CGFloat,  forKey: "thickness")
         m.setValue(0.00 as CGFloat,  forKey: "densBias")
 
         m.setValue(0.92 as CGFloat,  forKey: "coverage")
-        m.setValue(0.0048 as CGFloat, forKey: "puffScale")   // very fine base, screen-boost will add more
+        m.setValue(0.0048 as CGFloat, forKey: "puffScale")
         m.setValue(0.12 as CGFloat,  forKey: "edgeFeather")
         m.setValue(0.06 as CGFloat,  forKey: "edgeCut")
         m.setValue(0.16 as CGFloat,  forKey: "edgeNoiseAmp")
-        m.setValue(0.58 as CGFloat,  forKey: "edgeErode")    // hard rim erosion so card never prints
+        m.setValue(0.58 as CGFloat,  forKey: "edgeErode")
         m.setValue(0.72 as CGFloat,  forKey: "centreFill")
         m.setValue(1.03 as CGFloat,  forKey: "shapeScale")
         m.setValue(0.44 as CGFloat,  forKey: "shapeLo")
