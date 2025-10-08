@@ -119,13 +119,6 @@ struct VegetationPlacer3D {
         let bark = adjust(barkBase, dH: -0.02...0.02, dS: -0.08...0.08, dB: -0.05...0.05)
         let leaf = adjust(leafBase, dH: -0.03...0.03, dS: -0.10...0.10, dB: -0.06...0.06)
 
-        let ldrClampDownFrag = """
-        #pragma body
-        if (_surface.normal.y < 0.05) {
-            _output.color.rgb = min(_output.color.rgb, float3(0.98)) * 0.92;
-        }
-        """
-
         // Trunk
         let trunk = SCNCylinder(radius: trunkR, height: trunkH)
         let trunkMat = SCNMaterial()

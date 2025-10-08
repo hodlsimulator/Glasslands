@@ -4,8 +4,7 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Produces an achromatic gobo texture for the sun light.
-//  Edges fade to 1.0 so clamped sampling outside the footprint cannot tint terrain.
+//  Achromatic gobo for cloud shade; edges fade to 1.0.
 //
 
 #include <metal_stdlib>
@@ -14,8 +13,8 @@ using namespace metal;
 inline float clamp01(float x){ return clamp(x, 0.0f, 1.0f); }
 inline float lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float frac(float x){ return x - floor(x); }
-
 inline float hash1(float n){ return frac(sin(n) * 43758.5453123f); }
+
 inline float noise3(float3 x){
     float3 p = floor(x), f = x - p;
     f = f * f * (3.0f - 2.0f * f);
@@ -33,7 +32,11 @@ inline float noise3(float3 x){
 
 inline float fbm5(float3 p){
     float a = 0.0f, w = 0.5f;
-    for (int i = 0; i < 5; ++i){ a += noise3(p) * w; p = p * 2.02f + 19.19f; w *= 0.5f; }
+    for (int i = 0; i < 3; ++i){      // 3 octaves instead of 5
+        a += noise3(p) * w;
+        p = p * 2.02f + 19.19f;
+        w *= 0.5f;
+    }
     return a;
 }
 
@@ -47,28 +50,29 @@ inline float heightProfile(float y, float baseY, float topY){
 struct CloudUniforms {
     float4 sunDirWorld;
     float4 sunTint;
-    float4 params0;   // time, wind.x, wind.y, baseY
-    float4 params1;   // topY, coverage, densityMul, pad
-    float4 params2;   // pad0, pad1, horizonLift, detailMul
-    float4 params3;   // domainOffset.x, domainOffset.y, domainRotate, pad
+    float4 params0; // time, wind.x, wind.y, baseY
+    float4 params1; // topY, coverage, densityMul, pad
+    float4 params2; // pad0, pad1, horizonLift, detailMul
+    float4 params3; // domainOffset.x, domainOffset.y, domainRotate, pad
 };
+
 struct ShadowUniforms {
     float2 centerXZ;
-    float  halfSize;
-    float  pad0;
+    float halfSize;
+    float pad0;
 };
 
 inline float densityAt(float3 wp, constant CloudUniforms& u){
     const float time = u.params0.x;
     const float2 wind = float2(u.params0.y, u.params0.z);
     const float baseY = u.params0.w;
-    const float topY  = u.params1.x;
-    const float coverage  = u.params1.y;
+    const float topY = u.params1.x;
+    const float coverage = u.params1.y;
     const float detailMul = max(0.0f, u.params2.w);
-    const float2 domOff   = float2(u.params3.x, u.params3.y);
-    const float ang       = u.params3.z;
-    const float ca = cos(ang), sa = sin(ang);
+    const float2 domOff = float2(u.params3.x, u.params3.y);
+    const float ang = u.params3.z;
 
+    const float ca = cos(ang), sa = sin(ang);
     float2 xz = wp.xz + domOff;
     float2 xzr = float2(xz.x*ca - xz.y*sa, xz.x*sa + xz.y*ca);
 
@@ -89,11 +93,11 @@ inline float densityAt(float3 wp, constant CloudUniforms& u){
 }
 
 kernel void cloudShadowKernel(
-    texture2d<float, access::write> outShadow [[texture(0)]],
-    constant CloudUniforms& uClouds         [[buffer(0)]],
-    constant ShadowUniforms& SU             [[buffer(1)]],
-    uint2 gid                               [[thread_position_in_grid]])
-{
+    texture2d<float, access::write> outShadow        [[texture(0)]],
+    constant CloudUniforms& uClouds                  [[buffer(0)]],
+    constant ShadowUniforms& SU                      [[buffer(1)]],
+    uint2 gid                                        [[thread_position_in_grid]]
+){
     if (gid.x >= outShadow.get_width() || gid.y >= outShadow.get_height()) return;
 
     const float W = float(outShadow.get_width());
@@ -105,12 +109,12 @@ kernel void cloudShadowKernel(
     float z = SU.centerXZ.y + (v * 2.0f - 1.0f) * SU.halfSize;
 
     float3 sunW = normalize(uClouds.sunDirWorld.xyz);
-
     const float baseY = uClouds.params0.w;
     const float topY  = uClouds.params1.x;
     const float densMul = max(0.0f, uClouds.params1.z);
 
-    const int NL = 32;
+    // Ray-march down the sun axis.
+    const int   NL     = 8;         // was 32
     const float totalH = max(1.0f, (topY - baseY)) / max(1, NL);
     const float stepL  = totalH * (abs(sunW.y) > 1e-4f ? (1.0f / abs(sunW.y)) : 1.0f);
 
@@ -125,12 +129,13 @@ kernel void cloudShadowKernel(
     }
 
     float T = exp(-tau);
-    // Soft floor so terrain never goes pure black.
-    float shadow = 0.35f + 0.65f * pow(T, 0.88f);
 
-    // Edge fade: force the outer ~2% of the texture to 1.0 to kill seams/clamping tint.
-    float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));     // distance to nearest edge in [0,0.5]
-    float fade = smoothstep(0.00f, 0.02f, edge);               // 0 at border → 1 inward
+    // Darker, more convincing shade under thick cloud.
+    float shadow = 0.25f + 0.75f * pow(T, 0.90f); // darker floor than 0.35f
+
+    // Fade the outer ~2% to 1.0 so clamping/wrap never tints the world edge.
+    float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));
+    float fade = smoothstep(0.00f, 0.02f, edge);
     shadow = mix(1.0f, shadow, fade);
 
     outShadow.write(float4(shadow, shadow, shadow, 1.0), gid);
