@@ -8,7 +8,7 @@
 import SceneKit
 
 enum GroundShadowShader {
-    // Surface-stage modifier: uses world-space position (_surface.position) so no varyings are needed.
+    // Surface-stage: world-space position is available as _surface.position.
     static let surface: String = """
     #pragma arguments
     texture2d<float> gl_shadowTex;
@@ -25,15 +25,15 @@ enum GroundShadowShader {
 
     constexpr sampler s(address::clamp_to_edge, filter::linear);
 
-    float shade = gl_shadowTex.sample(s, uv).r;
+    float shade = clamp(gl_shadowTex.sample(s, uv).r, 0.0, 1.0);
 
-    // Darken the base albedo
-    _surface.diffuse *= shade;
+    // Darken colour only; do NOT touch alpha or you get a blue wash over the world.
+    _surface.diffuse.rgb *= shade;
     """
 
     @MainActor
     static func applyIfNeeded(to material: SCNMaterial) {
-        // Replace any previous modifiers (removes old geometry/fragment entries that caused the magenta).
         material.shaderModifiers = [.surface: surface]
+        GroundShadowMaterials.shared.register(material)
     }
 }

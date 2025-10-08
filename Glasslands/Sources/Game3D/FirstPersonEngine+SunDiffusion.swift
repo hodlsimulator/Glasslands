@@ -20,7 +20,6 @@ extension FirstPersonEngine {
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
-        // Screen-space cover only drives look (softness/halo), not global intensity.
         let cover = measureSunCover()
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
@@ -28,24 +27,22 @@ extension FirstPersonEngine {
         let E = E_prev + (E_now - E_prev) * k
         sunNode.setValue(E, forKey: "GL_prevIrradiance")
 
-        // Stable key light; cloud shade comes from the gobo so the world doesn’t dim globally.
         sun.type = .directional
         sun.intensity = 1500
         sun.color = UIColor.white
 
-        // Keep object shadows present under cloud; soften slightly with cover.
         let D = max(0.0, 1.0 - E)
         sun.shadowRadius = 1.2 + (10.0 - 1.2) * D
         sun.shadowSampleCount = max(1, Int(round(6 + D * 8))) // 6…14
-        sun.shadowColor = UIColor(white: 0.0, alpha: 0.60)    // avoid near-invisible contact shadows
+        sun.shadowColor = UIColor(white: 0.0, alpha: 0.60)
 
         ensureCloudShadowProjector()
         updateCloudShadowMap()
 
-        // Visual sun halo only.
-        if let sunGroup = sunDiscNode,
-           let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
-           let haloMat = halo.geometry?.firstMaterial
+        if
+            let sunGroup = sunDiscNode,
+            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
+            let haloMat = halo.geometry?.firstMaterial
         {
             let baseHalo = (haloMat.value(forKey: "GL_baseHaloIntensity") as? CGFloat) ?? haloMat.emission.intensity
             if haloMat.value(forKey: "GL_baseHaloIntensity") == nil {
@@ -56,21 +53,20 @@ extension FirstPersonEngine {
         }
     }
 
-    // MARK: Cloud-shadow projector (compute → gobo)
+    // MARK: Cloud-shadow projector (compute → material uniform)
     @MainActor
     private func ensureCloudShadowProjector() {
-        guard let view = scnView,
-              let device = view.device,
-              let sun = sunLightNode?.light
-        else { return }
+        guard let view = scnView, let device = view.device, let sun = sunLightNode?.light else { return }
 
         if (sunLightNode?.value(forKey: "GL_shadowQ") as? MTLCommandQueue) == nil {
             sunLightNode?.setValue(device.makeCommandQueue(), forKey: "GL_shadowQ")
         }
+
         if (sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState) == nil {
-            guard let lib  = try? device.makeDefaultLibrary(bundle: .main),
-                  let fn   = lib.makeFunction(name: "cloudShadowKernel"),
-                  let pipe = try? device.makeComputePipelineState(function: fn)
+            guard
+                let lib  = try? device.makeDefaultLibrary(bundle: .main),
+                let fn   = lib.makeFunction(name: "cloudShadowKernel"),
+                let pipe = try? device.makeComputePipelineState(function: fn)
             else { return }
             sunLightNode?.setValue(pipe, forKey: "GL_shadowPipe")
         }
@@ -90,22 +86,28 @@ extension FirstPersonEngine {
                 tex.replace(
                     region: MTLRegionMake2D(0, 0, W, H),
                     mipmapLevel: 0,
-                    withBytes: ptr.baseAddress!, bytesPerRow: W * 4
+                    withBytes: ptr.baseAddress!,
+                    bytesPerRow: W * 4
                 )
             }
+
+            // Create and cache a single SCNMaterialProperty bound to this texture.
+            let prop = SCNMaterialProperty(contents: tex)
+            prop.minificationFilter = .linear
+            prop.magnificationFilter = .linear
+            prop.mipFilter = .linear
+            sunLightNode?.setValue(prop, forKey: "GL_shadowTexProp")
         }
 
+        // Keep the gobo around if wanted, but never let it shade the world; material-based shadows will do that.
         if let tex = (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) {
             sun.gobo?.contents = tex
         }
-        sun.gobo?.intensity = 1.0
+        sun.gobo?.intensity = 0.0
         sun.gobo?.wrapS = .clamp
         sun.gobo?.wrapT = .clamp
         sun.gobo?.minificationFilter = .linear
         sun.gobo?.magnificationFilter = .linear
-
-        // No 'usesOrthographicProjection' here; that's an SCNCamera API.
-        // Directional lights project orthographically by nature; the size is set via 'orthographicScale' in updateCloudShadowMap().
     }
 
     @MainActor
@@ -117,12 +119,19 @@ extension FirstPersonEngine {
             let sun  = sunLightNode?.light
         else { return }
 
+        // Make sure the gobo never contributes, even on throttled frames.
+        sun.gobo?.intensity = 0.0
+
         let tNow = CACurrentMediaTime()
         let tPrev = (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0
-        if tNow - tPrev < 0.12 { return }
+        if tNow - tPrev < 0.12 {
+            // Even when throttled, still update the param uniform so there’s no “pop” when crossing grid cells.
+            pushShadowUniformsWithoutCompute()
+            return
+        }
         sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
 
-        // Anchor the map in world space near the camera, snapped to a grid so it doesn't "swim".
+        // World-anchored domain near the camera; snapped to avoid texture swimming.
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
         let grid: Float = 256.0
@@ -133,20 +142,6 @@ extension FirstPersonEngine {
 
         let halfSize: Float = 560.0
         sun.orthographicScale = CGFloat(halfSize)
-
-        struct CloudUniforms {
-            var sunDirWorld: simd_float4
-            var sunTint:     simd_float4
-            var params0:     simd_float4
-            var params1:     simd_float4
-            var params2:     simd_float4
-            var params3:     simd_float4
-        }
-        struct ShadowUniforms {
-            var centerXZ: simd_float2
-            var halfSize: Float
-            var pad0:     Float = 0
-        }
 
         var u = CloudUniforms(
             sunDirWorld: simd_float4(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z, 0),
@@ -183,56 +178,93 @@ extension FirstPersonEngine {
         enc.endEncoding()
         cmd.commit()
 
-        // Use the map directly on materials (avoid gobo double-darkening).
-        sun.gobo?.intensity = 0.0
+        // Push uniforms + texture to ground materials.
+        let prop = (sunLightNode?.value(forKey: "GL_shadowTexProp") as? SCNMaterialProperty)
+            ?? {
+                let p = SCNMaterialProperty(contents: out)
+                p.minificationFilter = .linear
+                p.magnificationFilter = .linear
+                p.mipFilter = .linear
+                sunLightNode?.setValue(p, forKey: "GL_shadowTexProp")
+                return p
+            }()
 
-        let texProp = SCNMaterialProperty(contents: out)
-        texProp.minificationFilter = .linear
-        texProp.magnificationFilter = .linear
-        texProp.mipFilter = .linear
+        prop.contents = out // same texture; harmless if unchanged.
 
         let params = SCNVector3(anchor.x, anchor.y, halfSize)
-
-        scene.rootNode.enumerateChildNodes { n, _ in
-            guard let g = n.geometry else { return }
-            for m in g.materials {
-                if m.shaderModifiers?[.surface] == GroundShadowShader.surface {
-                    m.setValue(texProp, forKey: "gl_shadowTex")
-                    m.setValue(params,   forKey: "gl_shadowParams")
-                }
-            }
+        for m in GroundShadowMaterials.shared.all() {
+            m.setValue(prop,   forKey: "gl_shadowTex")
+            m.setValue(params, forKey: "gl_shadowParams")
         }
     }
 
-    // MARK: - Cloud-shadow projector (compute → gobo)
+    // When throttled, keep params in sync so crossing a grid boundary doesn’t “pop”.
+    @MainActor
+    private func pushShadowUniformsWithoutCompute() {
+        guard
+            let out = sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture
+        else { return }
+
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let camPos = pov.simdWorldPosition
+        let grid: Float = 256.0
+        let anchor = simd_float2(
+            round(camPos.x / grid) * grid,
+            round(camPos.z / grid) * grid
+        )
+        let halfSize: Float = 560.0
+
+        let prop = (sunLightNode?.value(forKey: "GL_shadowTexProp") as? SCNMaterialProperty)
+            ?? {
+                let p = SCNMaterialProperty(contents: out)
+                p.minificationFilter = .linear
+                p.magnificationFilter = .linear
+                p.mipFilter = .linear
+                sunLightNode?.setValue(p, forKey: "GL_shadowTexProp")
+                return p
+            }()
+
+        prop.contents = out
+
+        let params = SCNVector3(anchor.x, anchor.y, halfSize)
+        for m in GroundShadowMaterials.shared.all() {
+            m.setValue(prop,   forKey: "gl_shadowTex")
+            m.setValue(params, forKey: "gl_shadowParams")
+        }
+    }
+
+    // MARK: - Types / helpers
 
     private struct CloudUniforms {
-        var sunDirWorld: simd_float4          // xyz = dir
-        var sunTint: simd_float4
-        var params0: simd_float4              // time, wind.x, wind.y, baseY
-        var params1: simd_float4              // topY, coverage, densityMul, pad
-        var params2: simd_float4              // pad0, pad1, horizonLift, detailMul
-        var params3: simd_float4              // domainOffset.x, domainOffset.y, domainRotate, pad
+        var sunDirWorld: simd_float4        // xyz = dir
+        var sunTint:     simd_float4
+        var params0:     simd_float4        // time, wind.x, wind.y, baseY
+        var params1:     simd_float4        // topY, coverage, densityMul, pad
+        var params2:     simd_float4        // pad0, pad1, horizonLift, detailMul
+        var params3:     simd_float4        // domainOffset.x, domainOffset.y, domainRotate, pad
     }
 
     private struct ShadowUniforms {
         var centerXZ: simd_float2
         var halfSize: Float
-        var pad0: Float = 0
+        var pad0:     Float = 0
     }
 
     private var shadowTexture: MTLTexture? {
         get { (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) }
         set { sunLightNode?.setValue(newValue, forKey: "GL_shadowTex") }
     }
+
     private var shadowPipeline: MTLComputePipelineState? {
         get { (sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState) }
         set { sunLightNode?.setValue(newValue, forKey: "GL_shadowPipe") }
     }
+
     private var shadowQueue: MTLCommandQueue? {
         get { (sunLightNode?.value(forKey: "GL_shadowQ") as? MTLCommandQueue) }
         set { sunLightNode?.setValue(newValue, forKey: "GL_shadowQ") }
     }
+
     private var lastShadowTime: CFTimeInterval {
         get { (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0 }
         set { sunLightNode?.setValue(newValue, forKey: "GL_shadowT") }
@@ -240,20 +272,22 @@ extension FirstPersonEngine {
 
     // Billboard cover estimator used for sun halo / penumbra feel.
     private func measureSunCover() -> (peak: Float, union: Float) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true)
-        else { return (0.0, 0.0) }
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return (0.0, 0.0)
+        }
 
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let cam = pov.simdWorldPosition
         let sunW = simd_normalize(sunDirWorld)
-
         let sunR: Float = degreesToRadians(6.0) * 0.5
         let feather: Float = 0.15 * (.pi / 180.0)
+
         var peak: Float = 0.0
         var oneMinus: Float = 1.0
 
         layer.enumerateChildNodes { node, _ in
             guard let plane = node.geometry as? SCNPlane else { return }
+
             let pw = node.presentation.simdWorldPosition
             let toP = simd_normalize(pw - cam)
             let cosAng = simd_clamp(simd_dot(sunW, toP), -1.0, 1.0)
@@ -264,6 +298,7 @@ extension FirstPersonEngine {
 
             let size: Float = Float(plane.width)
             let puffR: Float = atanf((size * 0.30) / max(1e-3, dist))
+
             let overlap = (puffR + sunR + feather) - dAngle
             if overlap <= 0 { return }
 
