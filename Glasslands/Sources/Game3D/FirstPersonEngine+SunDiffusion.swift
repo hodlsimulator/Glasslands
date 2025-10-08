@@ -7,7 +7,7 @@
 //  Sun control + soft cloud-shadow projection using a compute occlusion map.
 //  – Sun is the only light.
 //  – Clouds cast soft shadows via the light’s gobo (RGBA, achromatic).
-//  – Projection footprint matches our computed map to avoid banding.
+//  – Directional light uses FORWARD shadows with a fixed ortho frustum to stop flicker/clipping.
 //
 
 import SceneKit
@@ -34,11 +34,27 @@ extension FirstPersonEngine {
         sun.type = .directional
         sun.intensity = 1500 * max(0.06, E)
         sun.color = UIColor(white: 1.0, alpha: 1.0)
+
+        // --- stable object shadows ---
         sun.castsShadow = true
-        sun.shadowMode = .deferred
-        sun.shadowSampleCount = max(1, Int(round(2 + (1.0 - E) * 14)))
-        sun.shadowRadius = 2.0 + 8.0 * (1.0 - E)
+        sun.shadowMode = .forward                     // more stable with gobo
+        sun.shadowMapSize = CGSize(width: 2048, height: 2048)
+        sun.shadowSampleCount = 8
+        sun.shadowRadius = 2.0
+        sun.shadowBias = 2.0
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.45)
+
+        // lock the frustum so it doesn't resize/clip while walking
+        sun.automaticallyAdjustsShadowProjection = false
+        let halfSize: Float = 2200.0                  // keep in sync with gobo square below
+        sun.orthographicScale = CGFloat(halfSize * 2.0)
+        sun.zNear = 10.0
+        sun.zFar  = 9000.0
+        if #available(iOS 15.0, *) {
+            sun.shadowCascadeCount = 3
+            sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
+            sun.shadowCascadeSplittingFactor = 0.7
+        }
 
         ensureCloudShadowProjector()
         updateCloudShadowMap()
@@ -102,7 +118,7 @@ extension FirstPersonEngine {
         }
 
         if shadowTexture == nil {
-            // RGBA so the gobo is achromatic; avoids red/black tint.
+            // RGBA so the gobo is achromatic; avoids color tint.
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
                                                                 width: 1024, height: 1024,
                                                                 mipmapped: false)
@@ -137,11 +153,9 @@ extension FirstPersonEngine {
         if tNow - lastShadowTime < 0.12 { return }
         lastShadowTime = tNow
 
-        // Project a square around the camera so nearby terrain gets shadows.
+        // Square around the camera → should match the light's ortho frustum.
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
-
-        // Keep this in sync with the SCNLight's projection footprint.
         let halfSize: Float = 2200.0
 
         var u = CloudUniforms(
@@ -175,10 +189,12 @@ extension FirstPersonEngine {
         enc.endEncoding()
         cmd.commit()
 
-        // Make the light's orthographic projection match our computed square.
-        // This prevents a visible seam where the projection footprint ends.
-        sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
+        // Keep the light's projection locked to the same footprint → no seams/flicker.
+        sun.automaticallyAdjustsShadowProjection = false
         sun.orthographicScale = CGFloat(halfSize * 2.0)
+        if #available(iOS 15.0, *) {
+            sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
+        }
 
         sun.gobo?.intensity = 1.0
     }
