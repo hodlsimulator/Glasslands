@@ -4,7 +4,8 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Glasslands — binder-free (only per-node size)
+//  Binder-free per frame; only per-node half-size is bound.
+//  Avoids any SceneKit queue asserts and writes the correct byte count.
 //
 
 import SceneKit
@@ -18,14 +19,15 @@ enum CloudImpostorProgram {
         prog.fragmentFunctionName = "cloud_impostor_fragment"
         prog.isOpaque = false
 
-        // Model matrix → "uModel"
+        // Model matrix → Metal symbol "uModel"
         prog.setSemantic(SCNModelTransform, forSymbol: "uModel", options: nil)
 
-        // Per-node half-size → "uHalfSize" (cheap; no per-frame binders)
+        // Per-node half-size → Metal symbol "uHalfSize"
         prog.handleBinding(ofBufferNamed: "uHalfSize",
                            frequency: .perNode) { stream, node, _, _ in
             var hx: Float = 0.5
             var hy: Float = 0.5
+
             if let p = node.geometry as? SCNPlane {
                 hx = Float(max(0.001, p.width  * 0.5))
                 hy = Float(max(0.001, p.height * 0.5))
@@ -34,8 +36,9 @@ enum CloudImpostorProgram {
                 hx = Float(max(0.001, (bb.max.x - bb.min.x) * 0.5))
                 hy = Float(max(0.001, (bb.max.y - bb.min.y) * 0.5))
             }
-            var size = simd_float2(hx, hy)
-            withUnsafeBytes(of: &size) { raw in
+
+            let sz = simd_float2(hx, hy)
+            withUnsafeBytes(of: sz) { raw in
                 stream.writeBytes(raw.baseAddress!, count: MemoryLayout<simd_float2>.size)
             }
         }
