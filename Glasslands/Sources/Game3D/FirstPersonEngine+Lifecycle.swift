@@ -94,36 +94,29 @@ extension FirstPersonEngine {
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Sun (casts shadows)
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1500
         sun.color = UIColor.white
 
-        // Shadow tuning: crisper contact + stable coverage around the player
+        // Shadows tuned for crisp outline + firm ground contact
         sun.castsShadow = true
         sun.shadowMode = .deferred
-        sun.shadowMapSize = CGSize(width: 2048, height: 2048)
+        sun.shadowMapSize = CGSize(width: 3072, height: 3072)
         sun.shadowSampleCount = 8
-        sun.shadowRadius = 2.5
+        sun.shadowRadius = 1.4
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.70)
 
-        // Key change: lower bias so tree/rock bases actually “touch” the ground
-        sun.shadowBias = 0.15
+        // Key: very low bias to eliminate the "halo" around the trunk base
+        sun.shadowBias = 0.004
 
-        // Fixed frustum (no auto) centred on the player
         sun.automaticallyAdjustsShadowProjection = false
+        sun.orthographicScale = 440
+        sun.maximumShadowDistance = 720
+        sun.shadowCascadeCount = 4
+        sun.shadowCascadeSplittingFactor = 0.72
 
-        // Wider orthographic footprint right around the camera;
-        // slightly shorter max distance preserves map resolution
-        sun.orthographicScale = 480
-        sun.maximumShadowDistance = 800
-
-        // Cascades dramatically improve near-camera shadow detail on large terrains
-        sun.shadowCascadeCount = 3
-        sun.shadowCascadeSplittingFactor = 0.85
-
-        // Light the terrain (0x400) + vegetation (0x2) + default (0x1)
+        // Terrain (0x400) + vegetation (0x2) + default (0x1)
         sun.categoryBitMask = 0x0000_0403
 
         let sunNode = SCNNode()
@@ -131,7 +124,6 @@ extension FirstPersonEngine {
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
 
-        // Directional sky fill (no shadows)
         let skyFill = SCNLight()
         skyFill.type = .directional
         skyFill.color = UIColor.white
@@ -144,7 +136,6 @@ extension FirstPersonEngine {
         skyFillNode.light = skyFill
         scene.rootNode.addChildNode(skyFillNode)
 
-        // Aim sky fill straight down (world −Y)
         let origin = yawNode.presentation.position
         skyFillNode.position = origin
         skyFillNode.look(
@@ -156,7 +147,7 @@ extension FirstPersonEngine {
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
 
-        // Aim the sun to match the HDR disc and cloud uniforms
+        // Same sun direction as before
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 

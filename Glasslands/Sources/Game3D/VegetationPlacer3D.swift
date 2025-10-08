@@ -76,8 +76,7 @@ struct VegetationPlacer3D {
         return nodes
     }
 
-    // MARK: - Varied low-poly conifer (no round spheres)
-
+    // MARK: - Varied low-poly conifer with crisp, two-tier silhouette
     private static func makeTreeNode(
         palette: [UIColor],
         rng: GKMersenneTwisterRandomSource
@@ -86,22 +85,29 @@ struct VegetationPlacer3D {
         var r = RandomAdaptor(rng)
 
         let tall = rng.nextUniform() > 0.35
-        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r) : CGFloat.random(in: 0.75...1.15, using: &r)
-        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r) : CGFloat.random(in: 0.05...0.08, using: &r)
+        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r)
+                                   : CGFloat.random(in: 0.75...1.15, using: &r)
+        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r)
+                                   : CGFloat.random(in: 0.05...0.08, using: &r)
 
-        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r) : CGFloat.random(in: 1.10...1.60, using: &r)
-        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r) : CGFloat.random(in: 0.45...0.70, using: &r)
-        let canopyTopR1: CGFloat = CGFloat.random(in: 0.06...0.16, using: &r)
+        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r)
+                                     : CGFloat.random(in: 1.10...1.60, using: &r)
+        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r)
+                                     : CGFloat.random(in: 0.45...0.70, using: &r)
+        let canopyTopR1: CGFloat = CGFloat.random(in: 0.02...0.05, using: &r)  // sharper tip
 
         let twoStage = rng.nextUniform() > 0.55
         let canopyH2: CGFloat = twoStage ? canopyH1 * CGFloat.random(in: 0.55...0.75, using: &r) : 0
         let canopyR2: CGFloat = twoStage ? canopyR1 * CGFloat.random(in: 0.75...0.95, using: &r) : 0
-        let canopyTopR2: CGFloat = twoStage ? canopyTopR1 * CGFloat.random(in: 0.55...0.85, using: &r) : 0
+        let canopyTopR2: CGFloat = twoStage ? canopyTopR1 * CGFloat.random(in: 0.35...0.60, using: &r) : 0
 
         let barkBase = palette.indices.contains(4) ? palette[4] : .brown
         let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
 
-        func adjust(_ c: UIColor, dH: ClosedRange<CGFloat>, dS: ClosedRange<CGFloat>, dB: ClosedRange<CGFloat>) -> UIColor {
+        func adjust(_ c: UIColor,
+                    dH: ClosedRange<CGFloat>,
+                    dS: ClosedRange<CGFloat>,
+                    dB: ClosedRange<CGFloat>) -> UIColor {
             var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
             c.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
             h = (h + CGFloat.random(in: dH, using: &r)).truncatingRemainder(dividingBy: 1); if h < 0 { h += 1 }
@@ -113,7 +119,6 @@ struct VegetationPlacer3D {
         let bark = adjust(barkBase, dH: -0.02...0.02, dS: -0.08...0.08, dB: -0.05...0.05)
         let leaf = adjust(leafBase, dH: -0.03...0.03, dS: -0.10...0.10, dB: -0.06...0.06)
 
-        // Clamp ONLY downward-facing fragments to SDR so flat undersides don’t bloom.
         let ldrClampDownFrag = """
         #pragma body
         if (_surface.normal.y < 0.05) {
@@ -130,43 +135,42 @@ struct VegetationPlacer3D {
         trunkMat.metalness.contents = 0.0
         trunk.materials = [trunkMat]
 
-        // Canopy 1
+        // Lower canopy – more segments to clean the silhouette
         let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
-        canopy1.radialSegmentCount = 12
+        canopy1.radialSegmentCount = 18
         let leafMat = SCNMaterial()
         leafMat.lightingModel = .physicallyBased
         leafMat.diffuse.contents = leaf
         leafMat.roughness.contents = 0.95
         leafMat.metalness.contents = 0.0
-        leafMat.isDoubleSided = false
-        leafMat.shaderModifiers = [.fragment: ldrClampDownFrag]
         canopy1.materials = [leafMat]
 
-        // Optional second canopy
+        // Optional upper canopy
         let canopy2Geom: SCNGeometry? = twoStage ? {
             let g = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
-            g.radialSegmentCount = 10
-            g.materials = [leafMat]   // share material
+            g.radialSegmentCount = 16
+            g.materials = [leafMat]
             return g
         }() : nil
 
-        // Assemble
         let node = SCNNode()
 
         let trunkNode = SCNNode(geometry: trunk)
         trunkNode.position = SCNVector3(0, trunkH / 2.0, 0)
         trunkNode.castsShadow = true
-
-        let canopyNode1 = SCNNode(geometry: canopy1)
-        canopyNode1.position = SCNVector3(0, trunkH + canopyH1 * 0.5 - 0.02, 0)
-        canopyNode1.castsShadow = true
-
         node.addChildNode(trunkNode)
+
+        // A slightly larger gap makes sure the trunk's shadow appears first on the ground
+        let gap1: CGFloat = 0.10   // ~10 cm
+        let canopyNode1 = SCNNode(geometry: canopy1)
+        canopyNode1.position = SCNVector3(0, trunkH + gap1 + canopyH1 * 0.5, 0)
+        canopyNode1.castsShadow = true
         node.addChildNode(canopyNode1)
 
         if let g2 = canopy2Geom {
+            let gap2: CGFloat = max(0.05, min(0.10, canopyH2 * 0.08))
             let cn2 = SCNNode(geometry: g2)
-            cn2.position = SCNVector3(0, trunkH + canopyH1 + canopyH2 * 0.45, 0)
+            cn2.position = SCNVector3(0, trunkH + gap1 + canopyH1 + gap2 + canopyH2 * 0.5, 0)
             cn2.castsShadow = true
             node.addChildNode(cn2)
         }
@@ -174,14 +178,15 @@ struct VegetationPlacer3D {
         node.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &r)
         node.eulerAngles.z = Float.random(in: -0.04...0.04, using: &r)
 
-        let treeHeight = trunkH + canopyH1 + canopyH2
+        let treeHeight = trunkH + gap1 + canopyH1 + (canopy2Geom == nil ? 0 : 0.0) + canopyH2
         let hitRadius = Float(max(canopyR1 * 0.65, trunkR * 1.6))
 
-        // Vegetation-only lighting category; sun includes this (0x00000403).
         node.categoryBitMask = 0x00000002
-
-        // Also mark the root as a caster (children set above too).
         node.castsShadow = true
+        node.enumerateChildNodes { c, _ in
+            c.categoryBitMask |= 0x00000002
+            c.castsShadow = true
+        }
 
         return (node, hitRadius, treeHeight)
     }
