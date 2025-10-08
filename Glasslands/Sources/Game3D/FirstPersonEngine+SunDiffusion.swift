@@ -17,13 +17,10 @@ import UIKit
 
 extension FirstPersonEngine {
 
-    // MARK: Sun diffusion (intensity, halo, and shadows)
-
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
         let cover = measureSunCover()
-
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
         let k: CGFloat = (E_now >= E_prev) ? 0.50 : 0.15
@@ -37,7 +34,7 @@ extension FirstPersonEngine {
         sun.shadowMode = .deferred
         sun.shadowSampleCount = max(1, Int(round(2 + (1.0 - E) * 14)))
         sun.shadowRadius = 2.0 + 8.0 * (1.0 - E)
-        sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
+        sun.shadowColor = UIColor(white: 0.0, alpha: 0.45)
 
         ensureCloudShadowProjector()
         updateCloudShadowMap()
@@ -53,8 +50,6 @@ extension FirstPersonEngine {
             halo.isHidden = (1.0 - E) <= 1e-3
         }
     }
-
-    // MARK: Cloud shadow projector (compute → gobo)
 
     private struct CloudUniforms {
         var sunDirWorld: SIMD4<Float>
@@ -101,12 +96,14 @@ extension FirstPersonEngine {
         }
 
         if shadowTexture == nil {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: 1024, height: 1024, mipmapped: false)
+            // >>> RGBA texture so the gobo stays achromatic (no red cast)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                width: 1024, height: 1024,
+                                                                mipmapped: false)
             desc.usage = [.shaderWrite, .shaderRead]
             shadowTexture = device.makeTexture(descriptor: desc)
         }
 
-        // gobo is get-only: mutate the returned material property.
         if let gobo = sun.gobo {
             gobo.contents = shadowTexture
             gobo.intensity = 1.0
@@ -135,20 +132,10 @@ extension FirstPersonEngine {
         var u = CloudUniforms(
             sunDirWorld: SIMD4<Float>(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z, 0),
             sunTint: SIMD4<Float>(1,1,1,1),
-            params0: SIMD4<Float>(Float(tNow),
-                                  cloudWind.x, cloudWind.y,
-                                  400.0),
-            params1: SIMD4<Float>(1400.0,
-                                  0.44,
-                                  1.20,
-                                  0.0),
-            params2: SIMD4<Float>(0, 0,
-                                  0.10,
-                                  0.90),
-            params3: SIMD4<Float>(cloudDomainOffset.x,
-                                  cloudDomainOffset.y,
-                                  0.0,
-                                  0.0)
+            params0: SIMD4<Float>(Float(tNow), cloudWind.x, cloudWind.y, 400.0),
+            params1: SIMD4<Float>(1400.0, 0.44, 1.20, 0.0),
+            params2: SIMD4<Float>(0, 0, 0.10, 0.90),
+            params3: SIMD4<Float>(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
 
         let pov = (scnView?.pointOfView ?? camNode).presentation
@@ -159,13 +146,11 @@ extension FirstPersonEngine {
         guard let bufU = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
               let bufS = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared)
         else { return }
-
         memcpy(bufU.contents(), &u, MemoryLayout<CloudUniforms>.stride)
         memcpy(bufS.contents(), &su, MemoryLayout<ShadowUniforms>.stride)
 
         guard let cmd = q.makeCommandBuffer(),
-              let enc = cmd.makeComputeCommandEncoder()
-        else { return }
+              let enc = cmd.makeComputeCommandEncoder() else { return }
 
         enc.setComputePipelineState(pipe)
         enc.setTexture(outTex, index: 0)
@@ -173,23 +158,17 @@ extension FirstPersonEngine {
         enc.setBuffer(bufS, offset: 0, index: 1)
 
         let w = pipe.threadExecutionWidth
-        let h = pipe.maxTotalThreadsPerThreadgroup / w
-        let tg = MTLSize(width: w, height: max(1, h), depth: 1)
-        let grid = MTLSize(width: outTex.width, height: outTex.height, depth: 1)
-        enc.dispatchThreads(grid, threadsPerThreadgroup: tg)
+        let h = max(1, pipe.maxTotalThreadsPerThreadgroup / w)
+        enc.dispatchThreads(MTLSize(width: outTex.width, height: outTex.height, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
         enc.endEncoding()
         cmd.commit()
 
-        if let sun = sunNode.light {
-            sun.gobo?.intensity = 1.0
-        }
+        sunNode.light?.gobo?.intensity = 1.0
     }
-
-    // MARK: Screen-space cover estimator
 
     private func measureSunCover() -> (peak: Float, union: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return (0.0, 0.0) }
-
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let cam = pov.simdWorldPosition
         let sunW = simd_normalize(sunDirWorld)
