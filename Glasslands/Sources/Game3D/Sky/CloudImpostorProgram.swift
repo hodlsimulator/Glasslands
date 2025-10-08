@@ -5,10 +5,10 @@
 //  Created by . . on 10/7/25.
 //
 //  Volumetric cloud impostors (fragment-only SceneKit shader modifier).
-//  Changes:
-//  • Screen-space detail boost using fwidth(...) so near/overhead puffs stay crisp.
-//  • Sun-only white (no ambient/self-light), HG normalised (g=0 → 1.0).
-//  • Conservative step count for lower lag.
+//  • Sun-only white (no ambient/self).
+//  • Screen-space detail boost so nearby puffs stay crisp.
+//  • New "rim kill" shaping so dense interiors never reveal the card outline.
+//  • Early-outs to keep GPU cost down.
 //
 
 import SceneKit
@@ -44,11 +44,16 @@ enum CloudImpostorProgram {
         float shapeHi;
         float shapeSeed;
 
+        // New: tighter edge control
+        float rimFeatherBoost;   // multiplies feather width
+        float rimFadePow;        // pow() on interior falloff (>=1)
+        float shapePow;          // pow() on silhouette noise (>=1)
+
         float3 sunDirView;
         float hgG;
         float baseWhite;
         float hiGain;
-        float edgeSoft;   // kept for compat (not used in light)
+        float edgeSoft;   // kept for compat (unused for light)
         float microAmp;
         float occK;
 
@@ -142,13 +147,23 @@ enum CloudImpostorProgram {
         float cutR=1.0-clamp(edgeCut,0.0,0.49);
         if(rDist>=cutR){ discard_fragment(); }
 
-        float featherR0=cutR-clamp(edgeFeather,0.0,0.49);
+        // Wider/louder feather + pow falloff near rim
+        float featherW = clamp(edgeFeather * max(0.5, rimFeatherBoost), 0.0, 0.49);
+        float featherR0=cutR-featherW;
         float rimSoft=smoothstep(featherR0,cutR,rDist);
         float interior=1.0-rimSoft;
+        interior = pow(clamp(interior,0.0,1.0), max(1.0, rimFadePow));
 
+        // Extra silhouette break-up (pow on shape mask)
         float sMask=shapeMaskUV(uvE,shapeScale,shapeLo,shapeHi,shapeSeed);
+        sMask = pow(clamp(sMask,0.0,1.0), max(1.0, shapePow));
+
         float edgeMask=interior*sMask;
 
+        // If almost none of this pixel contributes, drop it early (perf + no halos)
+        if (edgeMask < 0.01) { discard_fragment(); }
+
+        // Fuller centres than rims; erode rims harder as density rises
         float covLocal=mix(max(0.0,coverage-edgeErode),min(1.0,coverage+centreFill),edgeMask);
         float fillGain=mix(1.0,1.0+centreFill,edgeMask);
 
@@ -209,32 +224,37 @@ enum CloudImpostorProgram {
         m.setValue(halfWidth,  forKey: "impostorHalfW")
         m.setValue(halfHeight, forKey: "impostorHalfH")
 
-        // Defaults: crisp + cheap
+        // Defaults: dense interior, hidden rim; crisp + cheap
         m.setValue(0.55 as CGFloat,  forKey: "stepMul")      // ~12–14 steps
-        m.setValue(1.25 as CGFloat,  forKey: "densityMul")
-        m.setValue(2.00 as CGFloat,  forKey: "thickness")
+        m.setValue(1.35 as CGFloat,  forKey: "densityMul")   // more vapour
+        m.setValue(2.20 as CGFloat,  forKey: "thickness")
         m.setValue(0.00 as CGFloat,  forKey: "densBias")
 
-        m.setValue(0.62 as CGFloat,  forKey: "coverage")
-        m.setValue(0.0075 as CGFloat, forKey: "puffScale")   // finer base detail
+        m.setValue(0.78 as CGFloat,  forKey: "coverage")     // fuller
+        m.setValue(0.0068 as CGFloat, forKey: "puffScale")   // finer base detail
         m.setValue(0.12 as CGFloat,  forKey: "edgeFeather")
         m.setValue(0.06 as CGFloat,  forKey: "edgeCut")
         m.setValue(0.14 as CGFloat,  forKey: "edgeNoiseAmp")
-        m.setValue(0.24 as CGFloat,  forKey: "edgeErode")
-        m.setValue(0.34 as CGFloat,  forKey: "centreFill")
+        m.setValue(0.44 as CGFloat,  forKey: "edgeErode")    // harder rim erosion
+        m.setValue(0.52 as CGFloat,  forKey: "centreFill")
         m.setValue(1.03 as CGFloat,  forKey: "shapeScale")
         m.setValue(0.44 as CGFloat,  forKey: "shapeLo")
         m.setValue(0.72 as CGFloat,  forKey: "shapeHi")
         m.setValue(Float.random(in: 0...1000), forKey: "shapeSeed")
 
-        // Sun-only white; isotropic
+        // New rim shaping controls
+        m.setValue(1.35 as CGFloat,  forKey: "rimFeatherBoost")
+        m.setValue(2.30 as CGFloat,  forKey: "rimFadePow")
+        m.setValue(1.60 as CGFloat,  forKey: "shapePow")
+
+        // Sun-only white; isotropic by default
         m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
         m.setValue(0.00 as CGFloat,  forKey: "hgG")
         m.setValue(1.00 as CGFloat,  forKey: "baseWhite")
         m.setValue(1.00 as CGFloat,  forKey: "hiGain")
         m.setValue(0.00 as CGFloat,  forKey: "edgeSoft")
         m.setValue(0.26 as CGFloat,  forKey: "microAmp")
-        m.setValue(0.40 as CGFloat,  forKey: "occK")
+        m.setValue(0.45 as CGFloat,  forKey: "occK")
 
         m.diffuse.contents  = UIColor.white
         m.multiply.contents = UIColor.white
