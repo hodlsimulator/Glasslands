@@ -4,6 +4,10 @@
 //
 //  Created by . . on 10/5/25.
 //
+//  Sun + sky helpers, plus cloud-material uniform updates.
+//  This revision makes billboards sun-lit white (no self-light) and
+//  dials down per-pixel work to reduce lag.
+//
 
 import SceneKit
 import simd
@@ -16,8 +20,8 @@ extension FirstPersonEngine {
 
     @inline(__always)
     func sunDirection(azimuthDeg: Float, elevationDeg: Float) -> simd_float3 {
-        let az = azimuthDeg * Float.pi / 180
-        let el = elevationDeg * Float.pi / 180
+        let az = azimuthDeg * .pi / 180
+        let el = elevationDeg * .pi / 180
         let x = sinf(az) * cosf(el)
         let y = sinf(el)
         let z = cosf(az) * cosf(el)
@@ -29,13 +33,14 @@ extension FirstPersonEngine {
         var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
 
         if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
+            // Keep the sun in the camera’s front hemisphere for stable billboard shading
             let look = -pov.presentation.simdWorldFront
             if simd_dot(dir, look) < 0 { dir = -dir }
         }
 
         sunDirWorld = dir
 
-        // Directional lights emit along node −Z, so aim along the incoming light = −dir.
+        // Aim the SCNLight (directional lights emit along -Z)
         if let sunLightNode {
             let origin = yawNode.presentation.position
             let incoming = SCNVector3(-dir.x, -dir.y, -dir.z)
@@ -44,6 +49,7 @@ extension FirstPersonEngine {
             sunLightNode.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
         }
 
+        // HDR sprite sun follows the direction
         if let disc = sunDiscNode {
             let dist = CGFloat(cfg.skyDistance)
             disc.simdPosition = simd_float3(dir.x, dir.y, dir.z) * Float(dist)
@@ -51,6 +57,8 @@ extension FirstPersonEngine {
 
         applyCloudSunUniforms()
     }
+
+    // MARK: - Apply sun → cloud uniforms (billboards + volumetrics)
 
     @MainActor
     func applyCloudSunUniforms() {
@@ -61,39 +69,64 @@ extension FirstPersonEngine {
         let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
         let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
 
-        // Billboards (white, sun-only; semi-transparent + self-shadow)
+        // --- Billboard impostors (pure white, sun-only; faster marching) ---
         if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
             layer.enumerateChildNodes { node, _ in
                 guard let g = node.geometry else { return }
                 for m in g.materials {
-                    m.setValue(sunViewV,        forKey: "sunDirView")
-                    m.setValue(0.56 as CGFloat, forKey: "hgG")
-                    m.setValue(0.70 as CGFloat, forKey: "baseWhite")
-                    m.setValue(0.65 as CGFloat, forKey: "hiGain")
-                    m.setValue(0.06 as CGFloat, forKey: "edgeSoft")
+                    // Direction + phase
+                    m.setValue(sunViewV,           forKey: "sunDirView")
+                    m.setValue(0.56 as CGFloat,    forKey: "hgG")
 
-                    m.setValue(1.90 as CGFloat, forKey: "opaK")       // alpha strength
-                    m.setValue(1.00 as CGFloat, forKey: "densBias")   // overall thickness
-                    m.setValue(0.18 as CGFloat, forKey: "microAmp")   // texture amount
-                    m.setValue(1.10 as CGFloat, forKey: "occK")       // self-shadow
+                    // Sun-only white (no rim/ambient)
+                    m.setValue(1.00 as CGFloat,    forKey: "baseWhite")
+                    m.setValue(3.80 as CGFloat,    forKey: "hiGain")     // brighter response to sun
+                    m.setValue(0.00 as CGFloat,    forKey: "edgeSoft")   // kill rim lift
+
+                    // Absorption / density
+                    m.setValue(0.00 as CGFloat,    forKey: "densBias")   // <- was 1.0 (made everything dark)
+                    m.setValue(1.80 as CGFloat,    forKey: "densityMul")
+                    m.setValue(2.60 as CGFloat,    forKey: "thickness")
+
+                    // Detail & shadow
+                    m.setValue(0.22 as CGFloat,    forKey: "microAmp")
+                    m.setValue(0.95 as CGFloat,    forKey: "occK")
+
+                    // Quality/perf
+                    m.setValue(0.70 as CGFloat,    forKey: "stepMul")    // ~14 steps instead of ~20
                 }
             }
         }
 
-        // Physics sky (lighter blue)
+        // --- Volumetric layer (true ray-march) ---
+        // Keep it sun-only and fast: configure the live uniforms once.
+        VolCloudUniformsStore.shared.configure(
+            baseY: 400,
+            topY: 1400,
+            coverage: 0.48,
+            densityMul: 0.95,   // slightly lighter absorption
+            stepMul: 0.65,      // fewer steps
+            horizonLift: 0.10,
+            detailMul: 0.90,
+            puffScale: 0.0048,
+            puffStrength: 0.62,
+            macroScale: 0.00035,
+            macroThreshold: 0.58
+        )
+
+        // Atmosphere sky gets the sun too (not used for cloud light)
         if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: false),
-           let mat = sky.geometry?.firstMaterial
-        {
+           let mat = sky.geometry?.firstMaterial {
             mat.setValue(SCNVector3(sunW.x, sunW.y, sunW.z), forKey: "sunDirWorld")
             mat.setValue(SCNVector3(1.0, 0.97, 0.92),        forKey: "sunTint")
-            mat.setValue(1.9  as CGFloat,                    forKey: "turbidity")
+            mat.setValue(1.9 as CGFloat,                     forKey: "turbidity")
             mat.setValue(0.46 as CGFloat,                    forKey: "mieG")
             mat.setValue(3.00 as CGFloat,                    forKey: "exposure")
             mat.setValue(0.10 as CGFloat,                    forKey: "horizonLift")
         }
     }
 
-    // MARK: - HDR Sun (disc + halo)
+    // MARK: - HDR sun sprites (unchanged)
 
     @MainActor
     func makeHDRSunNode(
@@ -120,13 +153,13 @@ extension FirstPersonEngine {
         coreMat.emission.contents = UIColor.white
         coreMat.emission.intensity = coreIntensity
         corePlane.firstMaterial = coreMat
+
         let coreNode = SCNNode(geometry: corePlane)
         coreNode.name = "SunDiscHDR"
         coreNode.castsShadow = false
-        let bbCore = SCNBillboardConstraint()
-        bbCore.freeAxes = .all
+        let bbCore = SCNBillboardConstraint(); bbCore.freeAxes = .all
         coreNode.constraints = [bbCore]
-        coreNode.renderingOrder = -20_000   // draw BEFORE clouds
+        coreNode.renderingOrder = -20_000
 
         let haloPlane = SCNPlane(width: haloDiameter, height: haloDiameter)
         haloPlane.cornerRadius = haloDiameter * 0.5
@@ -140,13 +173,13 @@ extension FirstPersonEngine {
         haloMat.emission.intensity = haloIntensity
         haloMat.transparencyMode = .aOne
         haloPlane.firstMaterial = haloMat
+
         let haloNode = SCNNode(geometry: haloPlane)
         haloNode.name = "SunHaloHDR"
         haloNode.castsShadow = false
-        let bbHalo = SCNBillboardConstraint()
-        bbHalo.freeAxes = .all
+        let bbHalo = SCNBillboardConstraint(); bbHalo.freeAxes = .all
         haloNode.constraints = [bbHalo]
-        haloNode.renderingOrder = -19_990   // also before clouds, after core
+        haloNode.renderingOrder = -19_990
 
         let group = SCNNode()
         group.addChildNode(haloNode)
@@ -164,7 +197,6 @@ extension FirstPersonEngine {
             cg.fill(CGRect(origin: .zero, size: size))
 
             let center = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
-
             let steps = 8
             var colors: [CGColor] = []
             var locations: [CGFloat] = []
@@ -174,7 +206,6 @@ extension FirstPersonEngine {
                 colors.append(UIColor(white: 1.0, alpha: a).cgColor)
                 locations.append(p)
             }
-
             guard let gradient = CGGradient(
                 colorsSpace: CGColorSpaceCreateDeviceRGB(),
                 colors: colors as CFArray,
