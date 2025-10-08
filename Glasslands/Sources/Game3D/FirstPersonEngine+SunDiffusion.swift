@@ -4,10 +4,9 @@
 //
 //  Created by . . on 10/6/25.
 //
-//  Sun control + soft cloud-shadow projection (gobo).
-//  – Sun is the only light.
-//  – FORWARD shadows with fixed ortho frustum so object shadows are stable.
-//  – Cloud gobo remains RGBA & edge-faded to avoid banding.
+//  Per-frame sun diffusion + cloud-shadow gobo.
+//  – Object shadows follow the stable 786737 lighting setup (no frustum poking here).
+//  – Cloud gobo updates its texture only; it never changes the light's projection.
 //
 
 import SceneKit
@@ -19,49 +18,39 @@ import UIKit
 extension FirstPersonEngine {
 
     // MARK: Sun diffusion (intensity, halo, and shadows)
-
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
-        // ← ADD THESE TWO LINES RIGHT HERE
-        sun.categoryBitMask = Int(UInt32.max)     // light affects all categories (incl. terrain 0x00000400)
-        sunNode.categoryBitMask = Int(UInt32.max) // belt & braces: node category also wide open
-
+        // Irradiance proxy from billboard overlap (0…1)
         let cover = measureSunCover()
-
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
+
+        // Smooth: faster when clearing, gentler when clouding over
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
         let k: CGFloat = (E_now >= E_prev) ? 0.50 : 0.15
         let E = E_prev + (E_now - E_prev) * k
         sunNode.setValue(E, forKey: "GL_prevIrradiance")
 
+        // Sun is the only light
         sun.type = .directional
         sun.intensity = 1500 * max(0.06, E)
-        sun.color = UIColor(white: 1.0, alpha: 1.0)
+        sun.color = UIColor.white
 
-        // stable object shadows
-        sun.castsShadow = true
-        sun.shadowMode = .forward
-        sun.shadowMapSize = CGSize(width: 2048, height: 2048)
-        sun.shadowSampleCount = 12
-        sun.shadowRadius = 1.5
-        sun.shadowBias = 0.15
-        sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
+        // Object shadow appearance (do NOT alter projection/frustum here)
+        let D = max(0.0, 1.0 - E)
+        let penClear: CGFloat = 1.2
+        let penCloud: CGFloat = 12.0
+        sun.shadowRadius = penClear + (penCloud - penClear) * D
+        sun.shadowSampleCount = max(1, Int(round(2 + D * 14))) // 2..16
+        let alphaClear: CGFloat = 0.82
+        let alphaCloudy: CGFloat = 0.22
+        sun.shadowColor = UIColor(white: 0.0, alpha: alphaClear + (alphaCloudy - alphaClear) * D)
 
-        sun.automaticallyAdjustsShadowProjection = false
-        let halfSize: Float = 2200.0
-        sun.orthographicScale = CGFloat(halfSize * 2.0)
-        sun.zNear = 2.0
-        sun.zFar  = 9000.0
-        if #available(iOS 15.0, *) {
-            sun.shadowCascadeCount = 3
-            sun.shadowCascadeSplittingFactor = 0.7
-            sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
-        }
-
+        // Update cloud-shadow gobo (texture only)
         ensureCloudShadowProjector()
         updateCloudShadowMap()
 
+        // HDR halo intensity follows cloudiness
         if let sunGroup = sunDiscNode,
            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
            let haloMat = halo.geometry?.firstMaterial {
@@ -121,7 +110,6 @@ extension FirstPersonEngine {
         }
 
         if shadowTexture == nil {
-            // RGBA so the gobo is achromatic; avoids tint.
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
                                                                 width: 1024, height: 1024,
                                                                 mipmapped: false)
@@ -129,6 +117,7 @@ extension FirstPersonEngine {
             shadowTexture = device.makeTexture(descriptor: desc)
         }
 
+        // Attach as a gobo; do not modify the light's projection here
         if let gobo = sun.gobo {
             gobo.contents = shadowTexture
             gobo.intensity = 1.0
@@ -141,22 +130,16 @@ extension FirstPersonEngine {
 
     @MainActor
     private func updateCloudShadowMap() {
-        guard
-            let view = scnView,
-            let device = view.device,
-            let pipe = shadowPipeline,
-            let q = shadowQueue,
-            let outTex = shadowTexture,
-            let sunNode = sunLightNode,
-            let sun = sunNode.light
-        else { return }
+        guard let pipe = shadowPipeline,
+              let q = shadowQueue,
+              let outTex = shadowTexture else { return }
 
-        // ~8 Hz updates
+        // Throttle to ~8 Hz
         let tNow = CACurrentMediaTime()
         if tNow - lastShadowTime < 0.12 { return }
         lastShadowTime = tNow
 
-        // Square around camera → should match the light's ortho frustum.
+        // Build uniforms
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
         let halfSize: Float = 2200.0
@@ -169,16 +152,17 @@ extension FirstPersonEngine {
             params2: SIMD4<Float>(0, 0, 0.10, 0.90),
             params3: SIMD4<Float>(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
-        var su = ShadowUniforms(centerXZ: SIMD2<Float>(camPos.x, camPos.z), halfSize: halfSize)
+        var su = ShadowUniforms(centerXZ: SIMD2<Float>(camPos.x, camPos.z),
+                                halfSize: halfSize)
 
-        guard let bufU = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
-              let bufS = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared)
-        else { return }
+        guard let device = scnView?.device,
+              let bufU = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
+              let bufS = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared),
+              let cmd = q.makeCommandBuffer(),
+              let enc = cmd.makeComputeCommandEncoder() else { return }
+
         memcpy(bufU.contents(), &u, MemoryLayout<CloudUniforms>.stride)
         memcpy(bufS.contents(), &su, MemoryLayout<ShadowUniforms>.stride)
-
-        guard let cmd = q.makeCommandBuffer(),
-              let enc = cmd.makeComputeCommandEncoder() else { return }
 
         enc.setComputePipelineState(pipe)
         enc.setTexture(outTex, index: 0)
@@ -191,19 +175,9 @@ extension FirstPersonEngine {
                             threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
         enc.endEncoding()
         cmd.commit()
-
-        // Keep the light’s projection locked to the same footprint.
-        sun.automaticallyAdjustsShadowProjection = false
-        sun.orthographicScale = CGFloat(halfSize * 2.0)
-        if #available(iOS 15.0, *) {
-            sun.maximumShadowDistance = CGFloat(halfSize * 1.6)
-        }
-
-        sun.gobo?.intensity = 1.0
     }
 
     // MARK: Screen-space cover estimator (unchanged)
-
     private func measureSunCover() -> (peak: Float, union: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return (0.0, 0.0) }
 
@@ -223,20 +197,16 @@ extension FirstPersonEngine {
             let toP = simd_normalize(pw - cam)
             let cosAng = simd_clamp(simd_dot(sunW, toP), -1.0, 1.0)
             let dAngle = acosf(cosAng)
-
             let dist: Float = simd_length(pw - cam)
             if dist <= 1e-3 { return }
             let size: Float = Float(plane.width)
             let puffR: Float = atanf((size * 0.30) / max(1e-3, dist))
-
             let overlap = (puffR + sunR + feather) - dAngle
             if overlap <= 0 { return }
-
             let denom = max(1e-3, puffR + sunR + feather)
             var t = max(0.0, min(1.0, overlap / denom))
             let angArea = min(1.0, (puffR * puffR) / (sunR * sunR))
             t *= angArea
-
             peak = max(peak, t)
             oneMinus *= max(0.0, 1.0 - min(0.98, t))
         }

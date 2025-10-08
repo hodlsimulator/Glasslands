@@ -45,6 +45,7 @@ struct SceneryPlacer3D {
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
 
+                // Rocks
                 if (s > 0.18 || h > 0.80), Double.random(in: 0...1, using: &ra) < 0.18 {
                     let group = SCNNode()
                     let count = Int.random(in: 1...3, using: &ra)
@@ -61,9 +62,11 @@ struct SceneryPlacer3D {
                     }
                     group.position.y += 0.01
                     group.name = "rocks"
+                    enableShadowsRecursively(group)   // ← enable casting for all rocks in the group
                     nodes.append(group); continue
                 }
 
+                // Flowers (sprites) — no casting
                 if (m > 0.40 && m < 0.75) && s < 0.12 && r < 0.50,
                    Double.random(in: 0...1, using: &ra) < 0.14 {
                     let patch = makeFlowerPatchNode(palette: palette, rng: &ra)
@@ -72,35 +75,43 @@ struct SceneryPlacer3D {
                     nodes.append(patch); continue
                 }
 
+                // Mushrooms
                 if (m > 0.62 && h < 0.70) && s < 0.12 && r < 0.50,
                    Double.random(in: 0...1, using: &ra) < 0.10 {
                     let patch = MushroomBuilder.makeMushroomPatchNode(palette: palette, rng: &ra)
                     patch.position = SCNVector3(wx, wy, wz)
                     patch.setValue(CGFloat(0.18), forKey: "hitRadius")
+                    enableShadowsRecursively(patch)   // ← mushrooms cast
                     nodes.append(patch); continue
                 }
 
+                // Reeds
                 if r > 0.58 && s < 0.18,
                    Double.random(in: 0...1, using: &ra) < 0.16 {
                     let patch = ReedBuilder.makeReedPatchNode(palette: palette, rng: &ra)
                     patch.position = SCNVector3(wx, wy, wz)
                     patch.setValue(CGFloat(0.22), forKey: "hitRadius")
+                    enableShadowsRecursively(patch)   // ← reeds cast
                     nodes.append(patch); continue
                 }
 
+                // Crystals
                 if (m < 0.30 && h > 0.50 && s < 0.16),
                    Double.random(in: 0...1, using: &ra) < 0.06 {
                     let cluster = CrystalBuilder.makeCrystalClusterNode(palette: palette, rng: &ra)
                     cluster.position = SCNVector3(wx, wy, wz)
                     cluster.setValue(CGFloat(0.22), forKey: "hitRadius")
+                    enableShadowsRecursively(cluster) // ← crystals cast
                     nodes.append(cluster); continue
                 }
 
+                // Bushes
                 if (m > 0.50 && h < 0.75 && s < 0.16 && r < 0.50),
                    Double.random(in: 0...1, using: &ra) < 0.16 {
                     let bush = BushBuilder.makeBushNode(palette: palette, rng: &ra)
                     bush.position = SCNVector3(wx, wy, wz)
                     bush.setValue(CGFloat(0.28), forKey: "hitRadius")
+                    enableShadowsRecursively(bush)    // ← bushes cast
                     nodes.append(bush); continue
                 }
             }
@@ -184,5 +195,13 @@ struct SceneryPlacer3D {
             dS: CGFloat.random(in: -0.08...0.08, using: &rng),
             dB: CGFloat.random(in: -0.04...0.06, using: &rng)
         )
+    }
+
+    // MARK: - Shadow casting toggle (recursively turns on casting for a node and all children)
+
+    @inline(__always)
+    private static func enableShadowsRecursively(_ node: SCNNode) {
+        node.castsShadow = true
+        node.enumerateChildNodes { child, _ in child.castsShadow = true }
     }
 }

@@ -94,17 +94,21 @@ extension FirstPersonEngine {
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
-        // Sun (only illuminant)
+        // Sun (casts shadows) — same shape as 786737
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1500
         sun.color = UIColor.white
+
+        // IMPORTANT: let SceneKit manage the shadow frustum; this was the stable setup.
         sun.castsShadow = true
         sun.shadowMapSize = CGSize(width: 1024, height: 1024)
         sun.shadowSampleCount = 4
         sun.shadowRadius = 1.2
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.65)
         sun.automaticallyAdjustsShadowProjection = true
+
+        // Light the same categories we used when shadows worked (terrain|default|vegetation)
         sun.categoryBitMask = 0x0000_0403
 
         let sunNode = SCNNode()
@@ -112,26 +116,30 @@ extension FirstPersonEngine {
         sunNode.light = sun
         scene.rootNode.addChildNode(sunNode)
 
-        // Keep sky fill present but OFF (we may animate later)
+        // Directional sky fill (no shadows)
         let skyFill = SCNLight()
         skyFill.type = .directional
         skyFill.color = UIColor.white
-        skyFill.intensity = 0     // ← off
+        skyFill.intensity = 0
         skyFill.castsShadow = false
         skyFill.categoryBitMask = 0x0000_0403
+
         let skyFillNode = SCNNode()
         skyFillNode.name = "GL_SkyFill"
         skyFillNode.light = skyFill
         scene.rootNode.addChildNode(skyFillNode)
 
-        // Aim sky fill straight down for completeness
+        // Aim sky fill straight down (world −Y)
         let origin = yawNode.presentation.position
         skyFillNode.position = origin
         skyFillNode.look(at: SCNVector3(origin.x, origin.y - 1.0, origin.z),
-                         up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
+                         up: scene.rootNode.worldUp,
+                         localFront: SCNVector3(0, 0, -1))
 
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
+
+        // Aim the sun
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 
