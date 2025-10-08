@@ -6,7 +6,8 @@
 //
 //  Volumetric billboard impostor with true 3D vapour.
 //  Front-to-back single-scattering (view ray), sun-only lighting.
-//  Outputs NON-premultiplied colour to keep clouds white with .aOne blending.
+//  Non-premultiplied colour (.aOne) so lit vapour stays white.
+//  Depth READS enabled so terrain occludes clouds at the horizon.
 //
 
 import SceneKit
@@ -162,27 +163,26 @@ enum CloudImpostorProgram {
         float T = 1.0;
         float Cw = 0.0;
         float dt = Lm / float(N);
-        float sigmaS = max(0.0, densityMul) * 0.045; // tuned scatter coeff (keeps speed + whiteness)
+        float sigmaS = max(0.0, densityMul) * 0.045;
 
         // Phase term (normalised HG, view vs. sun)
         const float FOUR_PI = 12.566370614359172;
         float cosVS = clamp(-sView.z, -1.0, 1.0);
         float phase = hg(cosVS, hgG) * FOUR_PI;
 
-        float S = clamp(baseWhite * lightGain * phase * Lvis, 0.0, 8.0); // sun energy
+        float S = clamp(baseWhite * lightGain * phase * Lvis, 0.0, 8.0);
 
         for (int i=0;i<N;++i){
-            float rho = max(0.0, 0.12*dS[i] + densBias);        // density at sample
-            float aStep = 1.0 - exp(-sigmaS * rho * dt);        // alpha gained this step
-            Cw += T * S * aStep;                                // scattered white
-            T  *= (1.0 - aStep);                                // transmittance to next step
+            float rho = max(0.0, 0.12*dS[i] + densBias);
+            float aStep = 1.0 - exp(-sigmaS * rho * dt);
+            Cw += T * S * aStep;
+            T  *= (1.0 - aStep);
             if (T < 1e-3) break;
         }
 
-        // Final alpha is transmittance loss through the slab
         float alpha = clamp(1.0 - T, 0.0, 1.0);
 
-        // NON-premultiplied colour (for .aOne). Clamp to display white.
+        // NON-premultiplied colour (matches .aOne). Clamp to display white.
         float3 C = min(float3(1.0), float3(Cw));
 
         _output.color = float4(C, alpha);
@@ -192,10 +192,13 @@ enum CloudImpostorProgram {
         m.lightingModel = .constant
         m.isDoubleSided = false
         m.cullMode = .back
-        m.readsFromDepthBuffer = false
+
+        // IMPORTANT: let terrain occlude clouds at horizon
+        m.readsFromDepthBuffer = true
         m.writesToDepthBuffer = false
+
         m.blendMode = .alpha
-        m.transparencyMode = .aOne          // non-premultiplied, colour stays white
+        m.transparencyMode = .aOne
         m.shaderModifiers = [.fragment: frag]
 
         // aspect correction
