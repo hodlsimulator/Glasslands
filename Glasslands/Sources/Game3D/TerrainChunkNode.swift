@@ -26,7 +26,6 @@ struct TerrainChunkData: Sendable {
 }
 
 enum TerrainChunkNode {
-
     static func makeNode(
         originChunk: IVec2,
         cfg: FirstPersonEngine.Config,
@@ -63,26 +62,23 @@ enum TerrainChunkNode {
 
         let posSrc = SCNGeometrySource(
             data: posData, semantic: .vertex, vectorCount: data.positions.count,
-            usesFloatComponents: true, componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
-            dataStride: MemoryLayout<SIMD3<Float>>.stride)
-
+            usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
+        )
         let nrmSrc = SCNGeometrySource(
             data: nrmData, semantic: .normal, vectorCount: data.normals.count,
-            usesFloatComponents: true, componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
-            dataStride: MemoryLayout<SIMD3<Float>>.stride)
-
+            usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
+        )
         let uvSrc = SCNGeometrySource(
             data: uvData, semantic: .texcoord, vectorCount: data.uvs.count,
-            usesFloatComponents: true, componentsPerVector: 2,
-            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
-            dataStride: MemoryLayout<SIMD2<Float>>.stride)
-
+            usesFloatComponents: true, componentsPerVector: 2, bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<simd_float2>.stride
+        )
         let element = SCNGeometryElement(
             data: idxData, primitiveType: .triangles,
-            primitiveCount: data.indices.count / 3,
-            bytesPerIndex: MemoryLayout<UInt32>.size)
+            primitiveCount: data.indices.count / 3, bytesPerIndex: MemoryLayout<UInt32>.size
+        )
 
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
@@ -100,10 +96,8 @@ enum TerrainChunkNode {
         // Textures
         let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
         mat.diffuse.contents = albedoMTL
-        // Leave normal/macro OFF for this sun-only pass.
 
-        // Make the ground reflect less light (darker) without touching exposure or the sun.
-        // -2.0 stops → 0.25; adjust to taste (e.g. -1.5 → 0.3536).
+        // Darken ground slightly without touching exposure or sun
         let groundStops: CGFloat = -2.0
         mat.diffuse.intensity = pow(2.0, groundStops)
 
@@ -120,8 +114,12 @@ enum TerrainChunkNode {
         let scaleT = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
         mat.diffuse.contentsTransform = scaleT
 
+        // >>> Attach cloud shadow fragment modifier
+        GroundShadowShader.applyIfNeeded(to: mat)
+
         geom.materials = [mat]
         node.geometry = geom
+
         node.castsShadow = false
         node.categoryBitMask = 0x00000400
         return node

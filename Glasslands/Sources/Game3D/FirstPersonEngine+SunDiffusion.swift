@@ -110,19 +110,18 @@ extension FirstPersonEngine {
 
     @MainActor
     private func updateCloudShadowMap() {
-        guard let pipe = sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState,
-              let q    = sunLightNode?.value(forKey: "GL_shadowQ")    as? MTLCommandQueue,
-              let out  = sunLightNode?.value(forKey: "GL_shadowTex")  as? MTLTexture,
-              let sun  = sunLightNode?.light
+        guard
+            let pipe = sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState,
+            let q    = sunLightNode?.value(forKey: "GL_shadowQ")    as? MTLCommandQueue,
+            let out  = sunLightNode?.value(forKey: "GL_shadowTex")  as? MTLTexture,
+            let sun  = sunLightNode?.light
         else { return }
 
-        // Throttle ~8 Hz for smooth, cheap motion.
         let tNow = CACurrentMediaTime()
         let tPrev = (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0
         if tNow - tPrev < 0.12 { return }
         sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
 
-        // World-anchored, but quantised so the texture doesn’t “swim” with the camera.
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
         let grid: Float = 256.0
@@ -131,40 +130,39 @@ extension FirstPersonEngine {
             round(camPos.z / grid) * grid
         )
 
-        // Domain size; also drive the light’s ortho so gobo matches projection.
         let halfSize: Float = 560.0
         sun.orthographicScale = CGFloat(halfSize)
 
-        // Pack uniforms (kept compatible with the .metal file).
         struct CloudUniforms {
             var sunDirWorld: simd_float4
-            var sunTint: simd_float4
-            var params0: simd_float4
-            var params1: simd_float4
-            var params2: simd_float4
-            var params3: simd_float4
+            var sunTint:     simd_float4
+            var params0:     simd_float4
+            var params1:     simd_float4
+            var params2:     simd_float4
+            var params3:     simd_float4
         }
         struct ShadowUniforms {
             var centerXZ: simd_float2
             var halfSize: Float
-            var pad0: Float = 0
+            var pad0:     Float = 0
         }
 
         var u = CloudUniforms(
             sunDirWorld: simd_float4(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z, 0),
-            sunTint: simd_float4(1, 1, 1, 1),
-            params0: simd_float4(Float(tNow), cloudWind.x, cloudWind.y, 400.0),   // baseY
-            params1: simd_float4(1400.0, 0.44, 2.6, 0.0),                         // topY, coverage, densityMul
-            params2: simd_float4(0, 0, 0.10, 0.75),                               // horizonLift, detailMul
-            params3: simd_float4(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
+            sunTint:     simd_float4(1, 1, 1, 1),
+            params0:     simd_float4(Float(tNow), cloudWind.x, cloudWind.y, 400.0),
+            params1:     simd_float4(1400.0, 0.44, 2.6, 0.0),
+            params2:     simd_float4(0, 0, 0.10, 0.75),
+            params3:     simd_float4(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
         var su = ShadowUniforms(centerXZ: anchor, halfSize: halfSize)
 
-        guard let device = scnView?.device,
-              let bufU = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
-              let bufS = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared),
-              let cmd  = q.makeCommandBuffer(),
-              let enc  = cmd.makeComputeCommandEncoder()
+        guard
+            let device = scnView?.device,
+            let bufU = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
+            let bufS = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared),
+            let cmd  = q.makeCommandBuffer(),
+            let enc  = cmd.makeComputeCommandEncoder()
         else { return }
 
         memcpy(bufU.contents(), &u, MemoryLayout<CloudUniforms>.stride)
@@ -183,6 +181,26 @@ extension FirstPersonEngine {
         )
         enc.endEncoding()
         cmd.commit()
+
+        sun.gobo?.intensity = 0.0
+
+        // Bind as SCNMaterialProperty for reliability.
+        let texProp = SCNMaterialProperty(contents: out)
+        texProp.minificationFilter = .linear
+        texProp.magnificationFilter = .linear
+        texProp.mipFilter = .linear
+
+        let params = SCNVector3(anchor.x, anchor.y, halfSize)
+
+        scene.rootNode.enumerateChildNodes { n, _ in
+            guard let g = n.geometry else { return }
+            for m in g.materials {
+                if m.shaderModifiers?[.fragment] == GroundShadowShader.fragment {
+                    m.setValue(texProp, forKey: "gl_shadowTex")
+                    m.setValue(params,   forKey: "gl_shadowParams")
+                }
+            }
+        }
     }
 
     // MARK: - Cloud-shadow projector (compute → gobo)
