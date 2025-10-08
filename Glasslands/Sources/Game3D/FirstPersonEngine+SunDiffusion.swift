@@ -23,6 +23,10 @@ extension FirstPersonEngine {
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
+        // ← ADD THESE TWO LINES RIGHT HERE
+        sun.categoryBitMask = Int(UInt32.max)     // light affects all categories (incl. terrain 0x00000400)
+        sunNode.categoryBitMask = Int(UInt32.max) // belt & braces: node category also wide open
+
         let cover = measureSunCover()
 
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
@@ -34,21 +38,18 @@ extension FirstPersonEngine {
         sun.type = .directional
         sun.intensity = 1500 * max(0.06, E)
         sun.color = UIColor(white: 1.0, alpha: 1.0)
-        // Make sure the sun affects every category (terrain, trees, sky impostors, etc.)
-        sun.categoryBitMask = Int(UInt32.max)
 
-        // ---------- stable object shadows ----------
+        // stable object shadows
         sun.castsShadow = true
-        sun.shadowMode = .forward               // sturdy on iOS with gobos
+        sun.shadowMode = .forward
         sun.shadowMapSize = CGSize(width: 2048, height: 2048)
         sun.shadowSampleCount = 12
         sun.shadowRadius = 1.5
-        sun.shadowBias = 0.15                   // low bias → clear contact, no peter-panning
+        sun.shadowBias = 0.15
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.55)
 
-        // lock projection so it doesn’t resize when walking
         sun.automaticallyAdjustsShadowProjection = false
-        let halfSize: Float = 2200.0            // keep in sync with gobo square below
+        let halfSize: Float = 2200.0
         sun.orthographicScale = CGFloat(halfSize * 2.0)
         sun.zNear = 2.0
         sun.zFar  = 9000.0
