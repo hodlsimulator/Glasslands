@@ -4,8 +4,7 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Back-compat shim that delegates to the shader-modifier material.
-//  No SCNProgram buffer binders; uniforms are plain #pragma arguments.
+//  Glasslands — binder-free (only per-node size)
 //
 
 import SceneKit
@@ -19,15 +18,10 @@ enum CloudImpostorProgram {
         prog.fragmentFunctionName = "cloud_impostor_fragment"
         prog.isOpaque = false
 
-        // Per-frame vapour uniforms
-        prog.handleBinding(ofBufferNamed: "uCloudsGL",
-                           frequency: .perFrame,
-                           handler: VolCloudBinder.bind)
-
-        // Per-node model matrix → Metal symbol "uModel"
+        // Model matrix → "uModel"
         prog.setSemantic(SCNModelTransform, forSymbol: "uModel", options: nil)
 
-        // Per-node half-size (local) → Metal symbol "uHalfSize"
+        // Per-node half-size → "uHalfSize" (cheap; no per-frame binders)
         prog.handleBinding(ofBufferNamed: "uHalfSize",
                            frequency: .perNode) { stream, node, _, _ in
             var hx: Float = 0.5
