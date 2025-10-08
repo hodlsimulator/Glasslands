@@ -4,12 +4,9 @@
 //
 //  Created by . . on 10/3/25.
 //
-//  Cumulus cluster field in lat-long space.
-//  • Poisson-disk cluster centres → clear sky between clouds.
-//  • “Pile-of-balls” cluster splats with upward bias (cauliflower crowns).
-//  • Gentle micro noise so edges don’t look airbrushed.
-//
-//  The field is sampled with (u,v) in [0,1]^2.
+//  Lat–long cumulus field used for placement/coverage.
+//  This build generates FEWER, BIGGER clusters with a clear gap between
+//  clouds. It avoids the tiny-speck look and cuts draw calls → less lag.
 //
 
 import Foundation
@@ -34,36 +31,42 @@ struct CloudFieldLL {
     }
 
     static func build(width: Int, height: Int, coverage: Float, seed: UInt32) -> CloudFieldLL {
-        let gW = max(256, width)
-        let gH = max(128, height)
+        let gW = max(512, width)     // slightly higher base so interpolation looks good
+        let gH = max(256, height)
+
         var field = [Float](repeating: 0, count: gW * gH)
         var rng = LCG(seed ^ 0x7F4A_AE13)
 
-        // ---- Poisson-disk centres (lat-long), more near mid-sky band ----
+        // ---- Poisson-disk cluster centres (small count, proper separation) ----
+        // 22..44 clusters; higher coverage → more clusters, but still “dozens”, not hundreds.
         let cov = max(0.02, min(0.98, coverage))
-        let target = Int(Float(gW * gH) * cov * 0.00045)    // ~150–300 clusters depending on res/coverage
+        let targetClusters = max(18, min(44, Int(round(22.0 + cov * 22.0))))
 
-        // Minimum centre spacing in pixels, larger near zenith & very near horizon
-        let sepBasePx: Float = 48.0 * (0.6 + 0.8 * cov)     // stronger separation when coverage is high
+        // minimum centre spacing in *pixels* (wider spacing at higher coverage)
+        let sepBasePx: Float = 140.0 * (0.80 + 0.35 * cov)   // 112..175 px
+
         var centres: [(u: Float, v: Float, base: Float)] = []
-        centres.reserveCapacity(target)
+        centres.reserveCapacity(targetClusters)
 
-        var darts = 0, maxDarts = max(10_000, target * 80)
-        while centres.count < target && darts < maxDarts {
+        var darts = 0
+        let maxDarts = targetClusters * 800
+
+        while centres.count < targetClusters && darts < maxDarts {
             darts += 1
 
-            // Bias v into 0.12..0.88 band (avoid very bottom & very top)
+            // bias away from extreme zenith/horizon for nicer banding
             let vRaw = rng.unit()
-            let v = min(0.88, max(0.12, vRaw * 0.90 + 0.05))
-            let zen = 1.0 - v             // v=0 top → zenith=1
+            let v = min(0.88, max(0.12, vRaw * 0.88 + 0.06))
+            let zen = 1.0 - v
             let u = rng.unit()
 
-            // Size grows slightly towards zenith (perspective)
-            let scale = 0.85 + 0.95 * SkyMath.smooth01(zen) // 0.85..1.80
-            let base = (18.0 + 28.0 * rng.unit()) * scale
+            // bigger clusters towards zenith (perspective)
+            let sizeScale = 0.95 + 1.10 * SkyMath.smooth01(zen)     // ≈0.95..2.05
+            let base = (48.0 + 44.0 * rng.unit()) * sizeScale       // base puff radius in px
 
-            // Poisson spacing in *pixels*, adapt with v so far bands get more spacing
-            let sepPx = sepBasePx * (0.8 + 0.6 * SkyMath.smooth01(zen))
+            // Poisson spacing in pixels; slightly larger near zenith
+            let sepPx = sepBasePx * (0.88 + 0.35 * SkyMath.smooth01(zen))
+
             var ok = true
             for c in centres {
                 let du = (u - c.u) * Float(gW)
@@ -75,28 +78,30 @@ struct CloudFieldLL {
             centres.append((u, v, base))
         }
 
-        // ---- Splat clusters as “pile of balls” with a slight upward skew ----
+        // ---- Splat each cluster as a “pile of balls” with a crown (fills interior) ----
         for c in centres {
-            addCluster(into: &field, gW: gW, gH: gH,
-                       cx: c.u * Float(gW), cy: c.v * Float(gH),
-                       base: c.base, rng: &rng)
+            addCluster(into: &field,
+                       gW: gW, gH: gH,
+                       cx: c.u * Float(gW),
+                       cy: c.v * Float(gH),
+                       base: c.base,
+                       rng: &rng)
         }
 
-        // ---- Normalise + gentle S-curve + micro noise ----
+        // ---- Normalise + gentle S-curve + a breath of micro noise (cheap) ----
         var fmax: Float = 0
         for v in field where v.isFinite && v > fmax { fmax = v }
         let invMax: Float = fmax > 0 ? (1.0 / fmax) : 1.0
 
         for i in 0..<(gW * gH) {
-            var t = field[i] * invMax
-            t = max(0, t)
-            // 2-octave value noise to avoid flat blobs
-            let nx = (Float(i % gW) + 13.0) * 0.015
-            let ny = (Float(i / gW) + 17.0) * 0.015
-            let micro = 0.55 * valueFBM(x: nx, y: ny, seed: seed &+ 19, octaves: 2)
+            var t = max(0, field[i] * invMax)
+            // two-octave value fBm just to avoid “airbrushed” edges
+            let nx = (Float(i % gW) + 13.0) * 0.010
+            let ny = (Float(i / gW) + 17.0) * 0.010
+            let micro = 0.40 * valueFBM(x: nx, y: ny, seed: seed &+ 19, octaves: 2)
 
-            // Edge contrast + micro; keep midtones so windowing at higher thresholds still distinct
-            t = t * (0.72 + 0.28 * t) * (0.95 + 0.10 * micro)
+            // slight contrast curve + micro
+            t = t * (0.72 + 0.28 * t) * (0.96 + micro)
             field[i] = t
         }
 
@@ -137,21 +142,19 @@ struct CloudFieldLL {
         cx: Float, cy: Float, base: Float,
         rng: inout LCG
     ) {
-        // Number of constituent puffs (pile-of-balls); more → fewer interior gaps
-        let n = max(9, min(16, rng.int(11, 15)))
+        // 14–22 constituent puffs → solid fill without holes
+        let n = max(14, min(22, rng.int(16, 22)))
 
         for k in 0..<n {
-            // Slight upward skew so crowns form
-            let a = (Float(k) / Float(n)) * (.pi * 2.0) + rng.unit() * 0.45
-            let r = base * (0.16 + 0.58 * sqrtf(rng.unit()))
-            let up = base * (0.06 + 0.22 * rng.unit())
+            // ring + crown; slight upward skew to form a cauliflower top
+            let a = (Float(k) / Float(n)) * (.pi * 2.0) + rng.unit() * 0.35
+            let r = base * (0.22 + 0.65 * sqrtf(rng.unit()))
+            let up = base * (0.10 + 0.25 * rng.unit())
             let px = cx + cosf(a) * r
-            let py = cy - 0.25 * r + up
+            let py = cy - 0.22 * r + up
 
-            // Each puff is an anisotropic “squared-Lorentzian” blob
-            let rx = base * (0.55 + 0.35 * rng.unit())
-            let ry = base * (0.42 + 0.26 * rng.unit())
-
+            let rx = base * (0.85 + 0.25 * rng.unit())
+            let ry = base * (0.72 + 0.22 * rng.unit())
             splatLorentzian(into: &field, gW: gW, gH: gH, cx: px, cy: py, rx: rx, ry: ry,
                             amp: 1.0 + 0.35 * rng.unit())
         }
@@ -187,7 +190,7 @@ struct CloudFieldLL {
         }
     }
 
-    // Simple value noise + fBm for micro structure.
+    // Simple value noise + fBm for micro structure
     private static func valueNoise(x: Float, y: Float, seed: UInt32) -> Float {
         let xi = floorf(x), yi = floorf(y)
         let tx = x - xi, ty = y - yi
