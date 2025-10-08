@@ -18,15 +18,15 @@ enum CloudImpostorProgram {
         prog.fragmentFunctionName = "cloud_impostor_fragment"
         prog.isOpaque = false
 
-        // Per-frame GLCloudUniforms buffer (matches Metal "uCloudsGL")
+        // Per-frame GLCloudUniforms (matches Metal "uCloudsGL")
         prog.handleBinding(ofBufferNamed: "uCloudsGL",
                            frequency: .perFrame,
                            handler: VolCloudBinder.bind)
 
-        // Per-node model transform for ray/plane work (Metal symbol "uModel")
+        // Model transform → Metal symbol "uModel"
         prog.setSemantic(SCNModelTransform, forSymbol: "uModel", options: nil)
 
-        // Per-node half-size in local units (Metal symbol "uHalfSize")
+        // Per-node half-size → Metal symbol "uHalfSize"
         prog.handleBinding(ofBufferNamed: "uHalfSize",
                            frequency: .perNode) { stream, node, _, _ in
             var hx: Float = 0.5

@@ -13,13 +13,14 @@ import simd
 import UIKit
 
 @objc final class VolCloudBinder: NSObject {
+    // Called on SceneKit’s render queue
     @objc static func bind(_ stream: SCNBufferStream,
                            node: SCNNode?,
                            shadable: SCNShadable?,
                            renderer: SCNRenderer) {
-        var U = VolCloudUniformsStore.shared.snapshot()
-        withUnsafePointer(to: &U) { ptr in
-            stream.writeBytes(UnsafeRawPointer(ptr), count: MemoryLayout<GLCloudUniforms>.size)
+        let U = VolCloudUniformsStore.shared.snapshot()
+        withUnsafeBytes(of: U) { raw in
+            stream.writeBytes(raw.baseAddress!, count: raw.count)
         }
     }
 }
@@ -30,7 +31,7 @@ enum VolumetricCloudProgram {
         prog.vertexFunctionName   = "gl_vapour_vertex"
         prog.fragmentFunctionName = "gl_vapour_fragment"
 
-        // Name must match the Metal parameter in SkyVolumetricClouds.metal
+        // Per-frame uniforms (valid on iOS 26)
         prog.handleBinding(ofBufferNamed: "uCloudsGL",
                            frequency: .perFrame,
                            handler: VolCloudBinder.bind)

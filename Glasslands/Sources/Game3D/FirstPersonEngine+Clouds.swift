@@ -18,10 +18,7 @@ extension FirstPersonEngine {
     // MARK: - Volumetric cloud impostors
     @MainActor
     func enableVolumetricCloudImpostors(_ on: Bool) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
-            return
-        }
-
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
             if on {
@@ -40,14 +37,12 @@ extension FirstPersonEngine {
         }
     }
 
-    @MainActor
+    // MARK: - Per-frame uniforms + impostor advection (renderer thread)
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
-        // Centre the sky dome on the camera to avoid parallax seams.
         if skyAnchor.parent == scene.rootNode {
             skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
         }
 
-        // Initialise advection radii once.
         if cloudRMax <= 1.0 || cloudRMax < cloudRMin + 10.0 {
             let R = Float(cfg.skyDistance)
             let rNearMax: Float = max(560, R * 0.22)
@@ -62,56 +57,49 @@ extension FirstPersonEngine {
             let rUltra1: Float = rUltra0 + max(1600, R * 0.60)
             cloudRMin = rNearHole
             cloudRMax = rUltra1
-            _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1, rUltra0) // silence
+            _ = (rBridge0, rBridge1, rMid0, rMid1, rFar0, rFar1, rUltra0)
         }
 
-        // Per-frame uniforms for volumetric clouds (fast scattered-cumulus path).
         VolCloudUniformsStore.shared.update(
             time: Float(t),
             sunDirWorld: simd_normalize(sunDirWorld),
             wind: cloudWind,
-            domainOffset: cloudDomainOffset // remains global; impostors now anchor locally in shader
+            domainOffset: cloudDomainOffset
         )
 
-        // Advance billboard positions at a fixed rate to keep cost predictable.
         let dt: Float = 1.0 / 60.0
         advectAllCloudBillboards(dt: dt)
     }
-    
-    // MARK: - Billboard advection (covers every possible parentage)
-    @MainActor
+
+    // MARK: - Billboard advection (renderer thread)
     private func advectAllCloudBillboards(dt: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
 
-        @inline(__always)
-        func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
+        @inline(__always) func windLocal(_ w: simd_float2, _ yaw: Float) -> simd_float2 {
             let c = cosf(yaw), s = sinf(yaw)
             return simd_float2(w.x * c + w.y * s, -w.x * s + w.y * c)
         }
 
-        let wL   = windLocal(cloudWind, layer.presentation.eulerAngles.y)
+        let wL = windLocal(cloudWind, layer.presentation.eulerAngles.y)
         let wLen = simd_length(wL)
         let wDir = (wLen < 1e-6) ? simd_float2(1, 0) : (wL / wLen)
 
-        // Reference spin speed from the original far belt
         let Rmin: Float = cloudRMin
         let Rmax: Float = cloudRMax
         let Rref: Float = max(1, Rmin + 0.85 * (Rmax - Rmin))
         let vSpinRef: Float = cloudSpinRate * Rref
 
-        // Global slowdown + tighter wind clamp (much gentler overall)
         let wRef: Float = 0.6324555
-        let windMul     = simd_clamp(wLen / max(1e-5, wRef), 0.12, 0.90)
+        let windMul = simd_clamp(wLen / max(1e-5, wRef), 0.12, 0.90)
         let advectionGain: Float = 0.35
         let baseSpeedUnits: Float = vSpinRef * windMul * advectionGain
 
-        let span: Float    = max(1e-5, Rmax - Rmin)
+        let span: Float = max(1e-5, Rmax - Rmin)
         let wrapLen: Float = (2 * Rmax) + 0.20 * span
         let wrapCap: Float = Rmax + 0.10 * span
 
         var groups: [SCNNode] = []
         var orphans: [SCNNode] = []
-
         for child in layer.childNodes {
             var hasPuffs = false
             for bb in child.childNodes {
@@ -128,22 +116,13 @@ extension FirstPersonEngine {
 
         if !groups.isEmpty {
             for g in groups {
-                advectCluster(group: g,
-                              dir: wDir,
-                              baseV: baseSpeedUnits,
-                              dt: dt,
-                              Rmin: Rmin,
-                              Rmax: Rmax,
-                              span: span,
-                              wrapCap: wrapCap,
-                              wrapLen: wrapLen,
+                advectCluster(group: g, dir: wDir, baseV: baseSpeedUnits, dt: dt,
+                              Rmin: Rmin, Rmax: Rmax, span: span, wrapCap: wrapCap, wrapLen: wrapLen,
                               calmSpin: (wLen < 1e-4))
             }
         } else {
             layer.enumerateChildNodes { node, _ in
-                guard let cs = node.constraints,
-                      cs.contains(where: { $0 is SCNBillboardConstraint })
-                else { return }
+                guard let cs = node.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) else { return }
                 let d = wDir * (baseSpeedUnits * dt)
                 node.simdPosition.x += d.x
                 node.simdPosition.z += d.y
@@ -157,7 +136,6 @@ extension FirstPersonEngine {
         }
     }
 
-    @MainActor
     private func advectCluster(group: SCNNode,
                                dir: simd_float2,
                                baseV: Float,
@@ -167,8 +145,8 @@ extension FirstPersonEngine {
                                span: Float,
                                wrapCap: Float,
                                wrapLen: Float,
-                               calmSpin: Bool) {
-
+                               calmSpin: Bool)
+    {
         let gid = ObjectIdentifier(group)
         let c0: simd_float3 = {
             if let cached = cloudClusterCentroidLocal[gid] { return cached }
@@ -186,13 +164,11 @@ extension FirstPersonEngine {
 
         let cw = c0 + group.simdPosition
 
-        // Stronger near/far split: overhead ≈ 85% of base, far horizon ≈ 6% of base.
-        // Smooth ease-out towards the horizon so distant clouds barely creep.
-        let r   = simd_length(SIMD2(cw.x, cw.z))
-        let tR  = simd_clamp((r - Rmin) / span, 0, 1)
+        let r = simd_length(SIMD2(cw.x, cw.z))
+        let tR = simd_clamp((r - Rmin) / span, 0, 1)
         let p: Float = 2.4
         let nearFactor: Float = 0.85
-        let farFactor:  Float = 0.06
+        let farFactor: Float = 0.06
         let tEase = powf(tR, p)
         let parallax: Float = nearFactor + (farFactor - nearFactor) * tEase
 
