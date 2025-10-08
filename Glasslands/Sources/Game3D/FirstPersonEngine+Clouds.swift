@@ -39,7 +39,14 @@ extension FirstPersonEngine {
             }
         }
 
-        if on { prewarmCloudImpostorPipelines() }
+        // Prewarming disabled: SceneKit asserts on iOS 26 when preparing SCNProgram-backed materials.
+        // prewarmCloudImpostorPipelines()
+    }
+
+    // MARK: - Disabled prewarm (no-op to avoid SceneKit assertion on iOS 26)
+    @MainActor
+    func prewarmCloudImpostorPipelines() {
+        // Intentionally left empty. Avoids calling SCNRenderer.prepare(...) on SCNProgram-backed materials.
     }
 
     // MARK: - Per-frame uniforms + impostor advection (renderer thread)
@@ -324,24 +331,6 @@ extension FirstPersonEngine {
             if frag.contains(CloudBillboardMaterial.volumetricMarker) { ok += 1 } else { bad += 1 }
         }
         print("[Clouds] verify: geoms=\(geoms) replaced=\(replaced) ok=\(ok) bad=\(bad)")
-    }
-
-    @MainActor
-    func prewarmCloudImpostorPipelines() {
-        guard let v = scnView,
-              let root = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true)
-        else { return }
-
-        var seen = Set<ObjectIdentifier>()
-        root.enumerateChildNodes { node, _ in
-            guard let g = node.geometry else { return }
-            for m in g.materials {
-                let id = ObjectIdentifier(m)
-                if seen.insert(id).inserted {
-                    _ = v.prepare(m, shouldAbortBlock: nil)
-                }
-            }
-        }
     }
     
     @MainActor
