@@ -146,7 +146,6 @@ final class FirstPersonEngine: NSObject {
             guard let self else { return }
             root.eulerAngles.y = cloudInitialYaw
             self.skyAnchor.addChildNode(root)
-            self.cloudLayerNode = root
             self.enableVolumetricCloudImpostors(true)
         }
     }
