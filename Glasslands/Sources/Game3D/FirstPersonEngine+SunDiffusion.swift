@@ -12,6 +12,7 @@
 //  • Builds cluster occluders from billboard groups (so all clouds cast shade)
 //
 
+// Glasslands/Sources/Game3D/FirstPersonEngine+SunDiffusion.swift
 import SceneKit
 import simd
 import Metal
@@ -20,13 +21,11 @@ import UIKit
 
 extension FirstPersonEngine {
 
-    // MARK: Sun diffusion (key light + gobo control)
-
+    // MARK: Sun diffusion (key light + halo)
     @MainActor
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
-        // Estimate veil for a gentle halo / penumbra feel
         let cover = measureSunCover()
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
@@ -58,18 +57,17 @@ extension FirstPersonEngine {
         }
     }
 
-    // MARK: Cloud-shadow projector (compute → light gobo + shader-modifier attachments)
-
+    // MARK: Cloud-shadow projector (compute → light gobo + ground-attachments)
     @MainActor
     private func ensureCloudShadowProjector() {
         guard let view = scnView, let device = view.device, let sun = sunLightNode?.light else { return }
 
-        // Queue
+        // Command queue
         if (sunLightNode?.value(forKey: "GL_shadowQ") as? MTLCommandQueue) == nil {
             sunLightNode?.setValue(device.makeCommandQueue(), forKey: "GL_shadowQ")
         }
 
-        // Pipeline
+        // Compute pipeline
         if (sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState) == nil {
             guard let lib  = try? device.makeDefaultLibrary(bundle: .main),
                   let fn   = lib.makeFunction(name: "cloudShadowKernel"),
@@ -78,7 +76,7 @@ extension FirstPersonEngine {
             sunLightNode?.setValue(pipe, forKey: "GL_shadowPipe")
         }
 
-        // Texture (persistent)
+        // Persistent output texture
         if (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) == nil {
             let W = 256, H = 256
             let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -88,7 +86,6 @@ extension FirstPersonEngine {
             guard let tex = device.makeTexture(descriptor: desc) else { return }
             sunLightNode?.setValue(tex, forKey: "GL_shadowTex")
 
-            // Fill white so first frame is neutral
             let white = [UInt8](repeating: 0xFF, count: W * H * 4)
             white.withUnsafeBytes { ptr in
                 tex.replace(region: MTLRegionMake2D(0, 0, W, H),
@@ -96,7 +93,14 @@ extension FirstPersonEngine {
             }
         }
 
-        // Hook the sun’s gobo to the texture
+        // Fallback clusters buffer (ALWAYS bound at index 2)
+        if (sunLightNode?.value(forKey: "GL_emptyClusters") as? MTLBuffer) == nil {
+            let buf = device.makeBuffer(length: MemoryLayout<Cluster>.stride, options: .storageModeShared)!
+            memset(buf.contents(), 0, MemoryLayout<Cluster>.stride)
+            sunLightNode?.setValue(buf, forKey: "GL_emptyClusters")
+        }
+
+        // Hook gobo to the texture
         _ = sun.gobo
         if let tex = (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) {
             sun.gobo?.contents = tex
@@ -107,39 +111,26 @@ extension FirstPersonEngine {
         sun.gobo?.minificationFilter = .linear
         sun.gobo?.magnificationFilter = .linear
 
-        // Seed shader-modifier attachments immediately to avoid “missing value” on first draw.
+        // Seed ground shader attachments so first draw never misses args
         seedGroundShadowAttachments()
     }
 
-    // Push gl_shadowTex / gl_shadowParams to any material that registered the surface shader.
     @MainActor
     private func seedGroundShadowAttachments() {
         guard let out = sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture else { return }
 
-        let pov = (scnView?.pointOfView ?? camNode).presentation
-        let camPos = pov.simdWorldPosition
-        let grid: Float = 256.0
-        let anchor = simd_float2(
-            round(camPos.x / grid) * grid,
-            round(camPos.z / grid) * grid
-        )
-        let halfSize: Float = 560.0
-
-        let paramsV = SCNVector3(CGFloat(anchor.x), CGFloat(anchor.y), CGFloat(halfSize))
-
+        // Any initial params are fine; they’ll be overwritten next frame
+        let paramsV = SCNVector3(0, 0, 560)
         for m in GroundShadowMaterials.shared.all() {
-            // Texture argument
             if let prop = m.value(forKey: "gl_shadowTex") as? SCNMaterialProperty {
                 prop.contents = out
             } else {
                 m.setValue(SCNMaterialProperty(contents: out), forKey: "gl_shadowTex")
             }
-            // Float3 argument
             m.setValue(NSValue(scnVector3: paramsV), forKey: "gl_shadowParams")
         }
     }
 
-    // Swift mirrors of Metal structs
     private struct CloudUniforms {
         var sunDirWorld: simd_float4
         var sunTint    : simd_float4
@@ -151,7 +142,7 @@ extension FirstPersonEngine {
     private struct ShadowUniforms {
         var centerXZ: simd_float2
         var halfSize: Float
-        var projY  : Float
+        var pad0: Float = 0 // keep layouts in sync with Metal
     }
     private struct Cluster {
         var pos: simd_float3
@@ -167,7 +158,10 @@ extension FirstPersonEngine {
             let sun  = sunLightNode?.light
         else { return }
 
-        // World-anchored domain near the camera; snap to grid to avoid texture swimming
+        // Keep projector alive
+        sun.gobo?.intensity = 1.0
+
+        // World-anchored domain near camera; snap to grid to avoid swimming
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
 
@@ -177,11 +171,11 @@ extension FirstPersonEngine {
             round(camPos.z / grid) * grid
         )
 
-        // Keep the projector in sync with the map’s size
+        // Match the light’s orthographic projector to the map’s half-size
         let halfSize: Float = 560.0
         sun.orthographicScale = CGFloat(halfSize)
 
-        // Always update shader-modifier attachments every frame (cheap), so they’re never missing.
+        // Keep the surface shader attachments live every frame (cheap)
         do {
             let paramsV = SCNVector3(CGFloat(anchor.x), CGFloat(anchor.y), CGFloat(halfSize))
             for m in GroundShadowMaterials.shared.all() {
@@ -194,25 +188,24 @@ extension FirstPersonEngine {
             }
         }
 
-        // Throttle compute to ~5 Hz (clouds are slow)
+        // Throttle compute to ~5 Hz
         let tNow = CACurrentMediaTime()
         let tPrev = (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0
         if tNow - tPrev < 0.20 { return }
         sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
 
-        // ---- Uniforms
+        // ---- Uniforms (must match Metal)
         var u = CloudUniforms(
             sunDirWorld: simd_float4(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z, 0),
             sunTint    : simd_float4(1, 1, 1, 1),
             params0    : simd_float4(Float(tNow), cloudWind.x, cloudWind.y, 400.0),
-            // Slightly stronger density gives clearer ground shade
-            params1    : simd_float4(1400.0, 0.44, 3.6, 0.0),
-            params2    : simd_float4(0, 0, 0.10, 0.75),
+            params1    : simd_float4(1400.0, 0.44, 3.6, 0.0), // topY, coverage, densityMul
+            params2    : simd_float4(0, 0, 0.10, 0.75),       // horizon lift, detailMul
             params3    : simd_float4(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
-        var su = ShadowUniforms(centerXZ: anchor, halfSize: halfSize, projY: 0.0)
+        var su = ShadowUniforms(centerXZ: anchor, halfSize: halfSize)
 
-        // ---- Gather billboard clusters inside the projector footprint
+        // ---- Gather billboard clusters
         let clusters = buildShadowClusters(centerXZ: anchor, halfSize: halfSize)
 
         guard
@@ -226,25 +219,25 @@ extension FirstPersonEngine {
         memcpy(bufU.contents(), &u, MemoryLayout<CloudUniforms>.stride)
         memcpy(bufS.contents(), &su, MemoryLayout<ShadowUniforms>.stride)
 
-        // Pack clusters
-        let bufC: MTLBuffer?
+        // Cluster buffers — ALWAYS bind something at index 2
+        let emptyBuf = sunLightNode?.value(forKey: "GL_emptyClusters") as! MTLBuffer
         var nC: UInt32 = UInt32(clusters.count)
-        if clusters.isEmpty {
-            bufC = nil
-            nC = 0
-        } else {
-            bufC = device.makeBuffer(bytes: clusters,
-                                     length: clusters.count * MemoryLayout<Cluster>.stride,
-                                     options: .storageModeShared)
-        }
+        let bufC: MTLBuffer? = clusters.isEmpty
+            ? nil
+            : device.makeBuffer(bytes: clusters,
+                                length: clusters.count * MemoryLayout<Cluster>.stride,
+                                options: .storageModeShared)
 
         enc.setComputePipelineState(pipe)
         enc.setTexture(out, index: 0)
         enc.setBuffer(bufU, offset: 0, index: 0)
         enc.setBuffer(bufS, offset: 0, index: 1)
+
+        // Bind fallback first, then override if we have real clusters.
+        enc.setBuffer(emptyBuf, offset: 0, index: 2)
         if let bufC { enc.setBuffer(bufC, offset: 0, index: 2) }
-        var nClusters = nC
-        enc.setBytes(&nClusters, length: MemoryLayout<UInt32>.stride, index: 3)
+
+        enc.setBytes(&nC, length: MemoryLayout<UInt32>.stride, index: 3)
 
         let w = pipe.threadExecutionWidth
         let h = max(1, pipe.maxTotalThreadsPerThreadgroup / w)
@@ -254,13 +247,9 @@ extension FirstPersonEngine {
         )
         enc.endEncoding()
         cmd.commit()
-
-        // Keep the gobo active (it’s projecting the same map scene-wide)
-        sun.gobo?.intensity = 1.0
     }
 
     // Build a compact set of cluster occluders from the billboard layer.
-    // Uses SCNVector3-backed NSValue for caching to avoid size/alignment issues.
     @MainActor
     private func buildShadowClusters(centerXZ: simd_float2, halfSize: Float) -> [Cluster] {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
@@ -274,7 +263,7 @@ extension FirstPersonEngine {
         out.reserveCapacity(128)
 
         for group in layer.childNodes {
-            // Centroid (cached as SCNVector3)
+            // Centroid cache (use SCNVector3 to avoid NSValue size traps)
             let centroidLocal: simd_float3 = {
                 if let cached = group.value(forKey: "GL_centroidLocal") as? NSValue {
                     let v = cached.scnVector3Value
@@ -288,12 +277,11 @@ extension FirstPersonEngine {
                     }
                 }
                 let c = (n > 0) ? (sum / Float(n)) : .zero
-                let cv = SCNVector3(CGFloat(c.x), CGFloat(c.y), CGFloat(c.z))
-                group.setValue(NSValue(scnVector3: cv), forKey: "GL_centroidLocal")
+                group.setValue(NSValue(scnVector3: SCNVector3(CGFloat(c.x), CGFloat(c.y), CGFloat(c.z))),
+                               forKey: "GL_centroidLocal")
                 return c
             }()
 
-            // Approx radius (cached)
             let radiusLocal: Float = {
                 if let cached = group.value(forKey: "GL_radiusLocal") as? NSNumber {
                     return cached.floatValue
@@ -310,7 +298,6 @@ extension FirstPersonEngine {
 
             let cw = centroidLocal + group.presentation.simdWorldPosition
 
-            // Quick cull to the projector square
             if abs(cw.x - centerXZ.x) > (halfSize + radiusLocal + margin) { continue }
             if abs(cw.z - centerXZ.y) > (halfSize + radiusLocal + margin) { continue }
 
@@ -319,7 +306,6 @@ extension FirstPersonEngine {
 
         if out.isEmpty { return [] }
 
-        // Sort by distance and clamp
         out.sort {
             let a = $0.pos, b = $1.pos
             let da = hypot(a.x - centerXZ.x, a.z - centerXZ.y)
@@ -331,7 +317,7 @@ extension FirstPersonEngine {
         return Array(out.prefix(cap))
     }
 
-    // Billboard-cover estimator used for sun halo / penumbra feel.
+    // Sun halo estimator
     private func measureSunCover() -> (peak: Float, union: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return (0.0, 0.0)

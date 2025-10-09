@@ -26,7 +26,6 @@ struct TerrainChunkData: Sendable {
 }
 
 enum TerrainChunkNode {
-
     static func makeNode(
         originChunk: IVec2,
         cfg: FirstPersonEngine.Config,
@@ -34,28 +33,23 @@ enum TerrainChunkNode {
         recipe: BiomeRecipe
     ) -> SCNNode {
         let data = TerrainMeshBuilder.makeData(
-            originChunkX: originChunk.x,
-            originChunkY: originChunk.y,
-            tilesX: cfg.tilesX,
-            tilesZ: cfg.tilesZ,
-            tileSize: cfg.tileSize,
-            heightScale: cfg.heightScale,
-            noise: noise,
-            recipe: recipe
+            originChunkX: originChunk.x, originChunkY: originChunk.y,
+            tilesX: cfg.tilesX, tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize, heightScale: cfg.heightScale,
+            noise: noise, recipe: recipe
         )
         return node(from: data, cfg: cfg)
     }
 
-    @MainActor
-    static func node(from data: TerrainChunkData) -> SCNNode {
+    @MainActor static func node(from data: TerrainChunkData) -> SCNNode {
         node(from: data, cfg: FirstPersonEngine.Config())
     }
 
-    @MainActor
-    static func node(from data: TerrainChunkData, cfg: FirstPersonEngine.Config) -> SCNNode {
+    @MainActor static func node(from data: TerrainChunkData, cfg: FirstPersonEngine.Config) -> SCNNode {
         let node = SCNNode()
         node.name = "chunk_\(data.originChunkX)_\(data.originChunkY)"
 
+        // Geometry
         let posData = data.positions.withUnsafeBytes { Data($0) }
         let nrmData = data.normals.withUnsafeBytes { Data($0) }
         let uvData  = data.uvs.withUnsafeBytes { Data($0) }
@@ -63,26 +57,30 @@ enum TerrainChunkNode {
 
         let posSrc = SCNGeometrySource(
             data: posData, semantic: .vertex, vectorCount: data.positions.count,
-            usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
             dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
         )
         let nrmSrc = SCNGeometrySource(
             data: nrmData, semantic: .normal, vectorCount: data.normals.count,
-            usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: MemoryLayout<Float>.size,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
             dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
         )
         let uvSrc = SCNGeometrySource(
             data: uvData, semantic: .texcoord, vectorCount: data.uvs.count,
-            usesFloatComponents: true, componentsPerVector: 2, bytesPerComponent: MemoryLayout<Float>.size,
+            usesFloatComponents: true, componentsPerVector: 2,
+            bytesPerComponent: MemoryLayout<Float>.size,
             dataOffset: 0, dataStride: MemoryLayout<simd_float2>.stride
         )
         let element = SCNGeometryElement(
             data: idxData, primitiveType: .triangles,
-            primitiveCount: data.indices.count / 3, bytesPerIndex: MemoryLayout<UInt32>.size
+            primitiveCount: data.indices.count / 3,
+            bytesPerIndex: MemoryLayout<UInt32>.size
         )
-
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
 
+        // Material
         let mat = SCNMaterial()
         mat.lightingModel = .lambert
         mat.isLitPerPixel = true
@@ -94,11 +92,11 @@ enum TerrainChunkNode {
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = true
 
-        // Textures
+        // Albedo
         let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
         mat.diffuse.contents = albedoMTL
 
-        // Darken a touch so shade reads strongly.
+        // Subtle darkening so sun highlights don’t blow out
         let groundStops: CGFloat = -2.0
         mat.diffuse.intensity = pow(2.0, groundStops)
 
@@ -112,17 +110,15 @@ enum TerrainChunkNode {
         let repeatsPerTile = SceneKitHelpers.grassRepeatsPerTile
         let repeatsX = CGFloat(data.tilesX) * repeatsPerTile
         let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
-        let scaleT = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
-        mat.diffuse.contentsTransform = scaleT
+        mat.diffuse.contentsTransform = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
 
-        // Attach cloud-shadow surface shader (terrain-only).
-        GroundShadowShader.apply(to: mat)
+        // >>> Enable ground shadow sampling
+        GroundShadowShader.applyIfNeeded(to: mat)
 
         geom.materials = [mat]
         node.geometry = geom
-
         node.castsShadow = false
-        node.categoryBitMask = 0x00000400
+        node.categoryBitMask = 0x0000_0400
         return node
     }
 }

@@ -49,8 +49,6 @@ inline float heightProfile(float y, float baseY, float topY){
     return pow(clamp(up * dn, 0.0f, 1.0f), 0.80f);
 }
 
-// ======= Uniforms (must match Swift) =======================================
-
 struct CloudUniforms {
     float4 sunDirWorld;
     float4 sunTint;
@@ -63,16 +61,13 @@ struct CloudUniforms {
 struct ShadowUniforms {
     float2 centerXZ;
     float  halfSize;
-    float  projY;   // reserved; assists with heuristics (not required here)
+    float  pad0;   // keep 16-byte alignment; not used
 };
 
-// Billboard cluster packed from Swift (world space)
 struct Cluster {
     float3 pos;
     float  rad;
 };
-
-// ======= Densities =========================================================
 
 inline float densityProcedural(float3 wp, constant CloudUniforms& u){
     const float time = u.params0.x;
@@ -104,40 +99,29 @@ inline float densityProcedural(float3 wp, constant CloudUniforms& u){
     return clamp(dens, 0.0f, 1.0f);
 }
 
-// Simple anisotropic Gaussian blob per cluster.
-inline float densityClusters(float3 p,
-                             constant Cluster* clusters,
-                             uint nClusters)
+inline float densityClusters(float3 p, constant Cluster* clusters, uint nClusters)
 {
     const float minRad = 80.0f;
-    const float kR = 0.42f;  // horizontal sigma = kR * rad
-    const float kY = 0.55f;  // vertical   sigma = kY * rad
-    const float gain = 1.0f;
+    const float kR = 0.42f;
+    const float kY = 0.55f;
 
     float rho = 0.0f;
-
     for (uint i = 0; i < nClusters; ++i) {
         float3 c = clusters[i].pos;
         float  r = max(minRad, clusters[i].rad);
 
         float3 d = p - c;
-
         float sigR = max(12.0f, kR * r);
         float sigY = max(40.0f, kY * r);
 
         float hr2 = (d.x*d.x + d.z*d.z) / (sigR*sigR);
         float vy2 = (d.y*d.y) / (sigY*sigY);
+        if (hr2 + vy2 > 9.0f) continue; // >3σ
 
-        if (hr2 + vy2 > 9.0f) { continue; } // >3 sigma → negligible
-
-        float g = exp( -0.5f * (hr2 + vy2) );
-        rho += g * gain;
+        rho += exp(-0.5f * (hr2 + vy2));
     }
-
     return rho;
 }
-
-// ======= Kernel ============================================================
 
 kernel void cloudShadowKernel(
     texture2d<float, access::write>   outShadow   [[texture(0)]],
@@ -174,20 +158,16 @@ kernel void cloudShadowKernel(
     float3 d = -sunW * stepL;
 
     float tau = 0.0f;
-
-    for (int i = 0; i < NL && tau < 8.0f; ++i)
-    {
+    for (int i = 0; i < NL && tau < 8.0f; ++i) {
         float rhoP = densityProcedural(p, uClouds);
         float rhoC = (nClusters > 0) ? densityClusters(p, clusters, nClusters) : 0.0f;
-
-        float rho = rhoC * densMulClus + rhoP * (densMulProc * 0.35f);
+        float rho  = rhoC * densMulClus + rhoP * (densMulProc * 0.35f);
 
         tau += rho * (stepL * 0.020f);
         p   += d;
     }
 
     float T = exp(-tau);
-
     float shadow = 0.25f + 0.75f * pow(T, 0.90f);
 
     float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));
