@@ -17,12 +17,11 @@ import UIKit
 
 extension FirstPersonEngine {
 
-    // MARK: Sun diffusion (key light + halo)
+    // MARK: Sun diffusion + cloud-ground shadows (projector + surface shader)
     @MainActor
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
-        // Soft veil estimate just for halo aesthetics
         let cover = measureSunCover()
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
@@ -41,22 +40,9 @@ extension FirstPersonEngine {
 
         ensureCloudShadowProjector()
         updateCloudShadowMap()
-
-        if
-            let sunGroup = sunDiscNode,
-            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
-            let haloMat = halo.geometry?.firstMaterial
-        {
-            let baseHalo = (haloMat.value(forKey: "GL_baseHaloIntensity") as? CGFloat) ?? haloMat.emission.intensity
-            if haloMat.value(forKey: "GL_baseHaloIntensity") == nil {
-                haloMat.setValue(baseHalo, forKey: "GL_baseHaloIntensity")
-            }
-            haloMat.emission.intensity = baseHalo * (1.0 - E)
-            halo.isHidden = (1.0 - E) <= 1e-3
-        }
     }
 
-    // MARK: Cloud-shadow projector (compute → modulated shadow on terrain)
+    // MARK: Setup
     @MainActor
     private func ensureCloudShadowProjector() {
         guard let view = scnView, let device = view.device else { return }
@@ -76,32 +62,42 @@ extension FirstPersonEngine {
             sunLightNode?.setValue(pipe, forKey: "GL_shadowPipe")
         }
 
-        // Output texture
-        if (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) == nil {
+        // Two shadow textures for crossfade smoothing
+        func makeShadowTex() -> MTLTexture? {
             let W = 256, H = 256
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .bgra8Unorm, width: W, height: H, mipmapped: false
             )
             desc.usage = [.shaderWrite, .shaderRead]
             desc.storageMode = .shared
-            guard let tex = device.makeTexture(descriptor: desc) else { return }
-            sunLightNode?.setValue(tex, forKey: "GL_shadowTex")
-
-            // Initialise to white (no shade)
-            let white = [UInt8](repeating: 0xFF, count: W * H * 4)
-            white.withUnsafeBytes { ptr in
-                tex.replace(
-                    region: MTLRegionMake2D(0, 0, W, H),
-                    mipmapLevel: 0,
-                    withBytes: ptr.baseAddress!, bytesPerRow: W * 4
-                )
+            return device.makeTexture(descriptor: desc)
+        }
+        if (sunLightNode?.value(forKey: "GL_shadowTexA") as? MTLTexture) == nil {
+            guard let texA = makeShadowTex(), let texB = makeShadowTex() else { return }
+            sunLightNode?.setValue(texA, forKey: "GL_shadowTexA")
+            sunLightNode?.setValue(texB, forKey: "GL_shadowTexB")
+            sunLightNode?.setValue(NSNumber(value: 1), forKey: "GL_shadowFrontIndex") // 0→A, 1→B; front initially B
+            // Initialise both to white (no shade)
+            for t in [texA, texB] {
+                let W = t.width, H = t.height
+                let white = [UInt8](repeating: 0xFF, count: W * H * 4)
+                white.withUnsafeBytes { ptr in
+                    t.replace(region: MTLRegionMake2D(0, 0, W, H),
+                              mipmapLevel: 0, withBytes: ptr.baseAddress!, bytesPerRow: W * 4)
+                }
             }
+            sunLightNode?.setValue(CFTimeInterval(0), forKey: "GL_shadowFadeStart")
+            sunLightNode?.setValue(CFTimeInterval(0.25), forKey: "GL_shadowFadeDur")
+            sunLightNode?.setValue(CFTimeInterval(0.16), forKey: "GL_shadowUpdateInterval") // ~6 Hz
+            sunLightNode?.setValue(NSValue(scnVector3: SCNVector3Zero), forKey: "GL_anchor0")
+            sunLightNode?.setValue(NSValue(scnVector3: SCNVector3Zero), forKey: "GL_anchor1")
         }
 
-        // Fallback empty clusters buffer (always bind something at index 2)
+        // Padded empty-clusters buffer (fixes validator crash)
         if (sunLightNode?.value(forKey: "GL_emptyClusters") as? MTLBuffer) == nil {
-            let buf = view.device!.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared)!
-            memset(buf.contents(), 0, MemoryLayout<UInt32>.stride)
+            let bytes = max(MemoryLayout<Cluster>.stride, 64) // >= one Cluster, headroom safe
+            let buf = device.makeBuffer(length: bytes, options: .storageModeShared)!
+            memset(buf.contents(), 0, bytes)
             sunLightNode?.setValue(buf, forKey: "GL_emptyClusters")
         }
 
@@ -110,7 +106,7 @@ extension FirstPersonEngine {
             let L = SCNLight()
             L.type = .directional
             L.castsShadow = true
-            L.shadowMode = .modulated         // gobo acts as shadow mask
+            L.shadowMode = .modulated
             L.shadowColor = UIColor(white: 0.0, alpha: 1.0)
             L.categoryBitMask = 0x0000_0400   // terrain only
 
@@ -125,7 +121,7 @@ extension FirstPersonEngine {
         if let sun = sunLightNode?.light { sun.gobo?.contents = nil }
     }
 
-    // Swift mirrors of Metal structs
+    // Swift mirrors of Metal structs (match CloudShadowMap.metal)
     private struct CloudUniforms {
         var sunDirWorld: simd_float4
         var sunTint    : simd_float4
@@ -144,15 +140,22 @@ extension FirstPersonEngine {
         var rad: Float
     }
 
+    // MARK: Per-frame update (compute when needed; always update crossfade + bindings)
     @MainActor
     private func updateCloudShadowMap() {
         guard
-            let pipe = sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState,
             let q    = sunLightNode?.value(forKey: "GL_shadowQ") as? MTLCommandQueue,
-            let out  = sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture
+            let pipe = sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState,
+            let texA = sunLightNode?.value(forKey: "GL_shadowTexA") as? MTLTexture,
+            let texB = sunLightNode?.value(forKey: "GL_shadowTexB") as? MTLTexture
         else { return }
 
-        // Projector tracks the sun’s pose and uses the map as gobo
+        // Current front/back textures for projector + materials
+        let frontIndex = (sunLightNode?.value(forKey: "GL_shadowFrontIndex") as? NSNumber)?.intValue ?? 1
+        let front = (frontIndex == 0) ? texA : texB
+        let back  = (frontIndex == 0) ? texB : texA
+
+        // Projector follows the sun; gobo = current front (no crossfade needed there)
         if let proj = sunLightNode?.value(forKey: "GL_shadowProjector") as? SCNNode {
             let origin = yawNode.presentation.position
             let dir = simd_normalize(sunDirWorld)
@@ -161,7 +164,7 @@ extension FirstPersonEngine {
             proj.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
 
             _ = proj.light?.gobo
-            proj.light?.gobo?.contents = out
+            proj.light?.gobo?.contents = front
             proj.light?.gobo?.intensity = 1.0
             proj.light?.gobo?.wrapS = .clamp
             proj.light?.gobo?.wrapT = .clamp
@@ -169,89 +172,121 @@ extension FirstPersonEngine {
             proj.light?.gobo?.magnificationFilter = .linear
         }
 
-        // World-anchored domain near camera; snap to grid to avoid swimming
+        // Grid-anchored domain with hysteresis
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
         let grid: Float = 256.0
-        let anchor = simd_float2(
+        let desired = simd_float2(
             round(camPos.x / grid) * grid,
             round(camPos.z / grid) * grid
         )
 
-        // Throttle compute to ~5 Hz
+        // Previous anchors for crossfade
+        let oldA0 = (sunLightNode?.value(forKey: "GL_anchor0") as? NSValue)?.scnVector3Value ?? SCNVector3Zero
+        let oldA1 = (sunLightNode?.value(forKey: "GL_anchor1") as? NSValue)?.scnVector3Value ?? SCNVector3Zero
+        var anchor0 = simd_float2(Float(oldA0.x), Float(oldA0.z))
+        var anchor1 = simd_float2(Float(oldA1.x), Float(oldA1.z))
+
+        // Throttle compute, but also re-compute when the desired grid cell changes
         let tNow = CACurrentMediaTime()
         let tPrev = (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0
-        if tNow - tPrev < 0.20 { return }
-        sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
+        let interval = (sunLightNode?.value(forKey: "GL_shadowUpdateInterval") as? CFTimeInterval) ?? 0.16
+        let needCellShift = (desired.x != anchor1.x || desired.y != anchor1.y)
+        let shouldCompute = (tNow - tPrev >= interval) || needCellShift
 
-        // ---- Uniforms
+        // Compute uniforms
         var u = CloudUniforms(
             sunDirWorld: simd_float4(simd_normalize(sunDirWorld), 0),
             sunTint    : simd_float4(1, 1, 1, 1),
             params0    : simd_float4(Float(tNow), cloudWind.x, cloudWind.y, 400.0),
-            params1    : simd_float4(1400.0, 0.44, 3.6, 0.0),  // topY, coverage, densityMul
-            params2    : simd_float4(0, 0, 0.10, 0.75),        // horizon lift, detailMul
+            params1    : simd_float4(1400.0, 0.44, 3.6, 0.0),
+            params2    : simd_float4(0, 0, 0.10, 0.75),
             params3    : simd_float4(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
-        var su = ShadowUniforms(centerXZ: anchor, halfSize: 560.0)
 
-        // ---- Billboard clusters (may be empty if using volumetric-only sky)
-        let clusters = buildShadowClusters(centerXZ: anchor, halfSize: su.halfSize)
+        // Half-size of the projected domain; keep consistent across anchors
+        let halfSize: Float = 560.0
 
-        guard
-            let device = scnView?.device,
-            let bufU   = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
-            let bufS   = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared),
-            let cmd    = q.makeCommandBuffer(),
-            let enc    = cmd.makeComputeCommandEncoder()
-        else { return }
+        // Smooth crossfade parameter (even if we don’t compute this frame)
+        let fadeDur = (sunLightNode?.value(forKey: "GL_shadowFadeDur") as? CFTimeInterval) ?? 0.25
+        let fadeStart = (sunLightNode?.value(forKey: "GL_shadowFadeStart") as? CFTimeInterval) ?? 0
+        let blend = CGFloat(max(0.0, min(1.0, (fadeDur > 0) ? (tNow - fadeStart) / fadeDur : 1.0)))
 
-        memcpy(bufU.contents(), &u, MemoryLayout<CloudUniforms>.stride)
-        memcpy(bufS.contents(), &su, MemoryLayout<ShadowUniforms>.stride)
+        // If computing, render into back texture, then flip and restart crossfade
+        if shouldCompute, let device = scnView?.device,
+           let bufU = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: .storageModeShared),
+           let bufS = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: .storageModeShared),
+           let cmd  = q.makeCommandBuffer(),
+           let enc  = cmd.makeComputeCommandEncoder()
+        {
+            // New anchor targets the desired grid cell; old anchor becomes previous
+            anchor0 = anchor1
+            anchor1 = desired
 
-        // Cluster buffers — ALWAYS bind something at index 2
-        let emptyBuf = sunLightNode?.value(forKey: "GL_emptyClusters") as! MTLBuffer
-        var nC: UInt32 = UInt32(clusters.count)
-        let bufC: MTLBuffer? = clusters.isEmpty
-            ? nil
-            : device.makeBuffer(bytes: clusters,
-                                length: clusters.count * MemoryLayout<Cluster>.stride,
-                                options: .storageModeShared)
+            var su = ShadowUniforms(centerXZ: anchor1, halfSize: halfSize)
 
-        enc.setComputePipelineState(pipe)
-        enc.setTexture(out, index: 0)
-        enc.setBuffer(bufU, offset: 0, index: 0)
-        enc.setBuffer(bufS, offset: 0, index: 1)
-        enc.setBuffer(emptyBuf, offset: 0, index: 2)
-        if let bufC { enc.setBuffer(bufC, offset: 0, index: 2) }
-        enc.setBytes(&nC, length: MemoryLayout<UInt32>.stride, index: 3)
+            memcpy(bufU.contents(), &u, MemoryLayout<CloudUniforms>.stride)
+            memcpy(bufS.contents(), &su, MemoryLayout<ShadowUniforms>.stride)
 
-        let w = pipe.threadExecutionWidth
-        let h = max(1, pipe.maxTotalThreadsPerThreadgroup / w)
-        enc.dispatchThreads(
-            MTLSize(width: out.width, height: out.height, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1)
-        )
-        enc.endEncoding()
-        cmd.commit()
+            // Billboard clusters (can be empty); validator still expects a padded buffer at index 2
+            let clusters = buildShadowClusters(centerXZ: anchor1, halfSize: halfSize)
+            let emptyBuf = sunLightNode?.value(forKey: "GL_emptyClusters") as! MTLBuffer
+            var nC: UInt32 = UInt32(clusters.count)
+            let bufC: MTLBuffer? = clusters.isEmpty
+                ? nil
+                : device.makeBuffer(bytes: clusters,
+                                    length: clusters.count * MemoryLayout<Cluster>.stride,
+                                    options: .storageModeShared)
 
-        // ---- Feed terrain materials so the surface shader can darken locally
-        let params = NSValue(scnVector3: SCNVector3(anchor.x, anchor.y, su.halfSize))
+            enc.setComputePipelineState(pipe)
+            enc.setTexture(back, index: 0)
+            enc.setBuffer(bufU, offset: 0, index: 0)
+            enc.setBuffer(bufS, offset: 0, index: 1)
+            enc.setBuffer(bufC ?? emptyBuf, offset: 0, index: 2) // one or the other (crash fix)
+            enc.setBytes(&nC, length: MemoryLayout<UInt32>.stride, index: 3)
+
+            let w = pipe.threadExecutionWidth
+            let h = max(1, pipe.maxTotalThreadsPerThreadgroup / w)
+            enc.dispatchThreads(
+                MTLSize(width: back.width, height: back.height, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1)
+            )
+            enc.endEncoding()
+            cmd.commit()
+
+            // Flip front/back and start a new fade
+            sunLightNode?.setValue(NSNumber(value: (frontIndex == 0) ? 1 : 0), forKey: "GL_shadowFrontIndex")
+            sunLightNode?.setValue(tNow, forKey: "GL_shadowFadeStart")
+            sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
+        }
+
+        // Update anchors we expose to the shader (as SCNVector3 for convenience)
+        sunLightNode?.setValue(NSValue(scnVector3: SCNVector3(anchor0.x, 0, anchor0.y)), forKey: "GL_anchor0")
+        sunLightNode?.setValue(NSValue(scnVector3: SCNVector3(anchor1.x, 0, anchor1.y)), forKey: "GL_anchor1")
+
+        // ---- Feed terrain materials (crossfade + params each frame)
+        let params0 = NSValue(scnVector3: SCNVector3(anchor0.x, anchor0.y, halfSize))
+        let params1 = NSValue(scnVector3: SCNVector3(anchor1.x, anchor1.y, halfSize))
         for mat in GroundShadowMaterials.shared.all() {
-            // Bind as SCNMaterialProperty to guarantee SceneKit creates the sampler
-            let prop: SCNMaterialProperty = (mat.value(forKey: "gl_shadowTex") as? SCNMaterialProperty)
-                ?? SCNMaterialProperty(contents: out)
-            prop.contents = out
-            prop.wrapS = .clamp
-            prop.wrapT = .clamp
-            prop.minificationFilter = .linear
-            prop.magnificationFilter = .linear
-            mat.setValue(prop, forKey: "gl_shadowTex")
-            mat.setValue(params, forKey: "gl_shadowParams")
+            // Bind as SCNMaterialProperty so SceneKit provides a sampler
+            func setTex(_ key: String, _ tex: MTLTexture) {
+                let prop: SCNMaterialProperty = (mat.value(forKey: key) as? SCNMaterialProperty)
+                    ?? SCNMaterialProperty(contents: tex)
+                prop.contents = tex
+                prop.wrapS = .clamp; prop.wrapT = .clamp
+                prop.minificationFilter = .linear; prop.magnificationFilter = .linear
+                mat.setValue(prop, forKey: key)
+            }
+            setTex("gl_shadowTex0", front) // previous front (already shown via projector)
+            setTex("gl_shadowTex1", (front === texA) ? texA : texB) // current front after flip
+
+            mat.setValue(params0, forKey: "gl_shadowParams0")
+            mat.setValue(params1, forKey: "gl_shadowParams1")
+            mat.setValue(NSNumber(value: Double(blend)), forKey: "gl_shadowMix")
         }
     }
 
-    // Build compact set of billboard clusters (OK if empty w/ volumetrics)
+    // Build compact set of billboard clusters (OK if empty with volumetrics)
     @MainActor
     private func buildShadowClusters(centerXZ: simd_float2, halfSize: Float) -> [Cluster] {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
@@ -264,7 +299,6 @@ extension FirstPersonEngine {
         out.reserveCapacity(128)
 
         for group in layer.childNodes {
-            // Centroid cache
             let centroidLocal: simd_float3 = {
                 if let cached = group.value(forKey: "GL_centroidLocal") as? NSValue {
                     let v = cached.scnVector3Value

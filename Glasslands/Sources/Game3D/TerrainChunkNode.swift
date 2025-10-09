@@ -98,15 +98,12 @@ enum TerrainChunkNode {
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = true
 
-        // Albedo
         let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
         mat.diffuse.contents = albedoMTL
 
-        // Subtle darkening so sun highlights don’t blow out
         let groundStops: CGFloat = -2.0
         mat.diffuse.intensity = pow(2.0, groundStops)
 
-        // Tiling + filtering
         mat.diffuse.wrapS = .repeat
         mat.diffuse.wrapT = .repeat
         mat.diffuse.minificationFilter = .linear
@@ -118,13 +115,12 @@ enum TerrainChunkNode {
         let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
         mat.diffuse.contentsTransform = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
 
-        // Attach cloud-ground shader and register the material for updates
         GroundShadowShader.applyIfNeeded(to: mat)
 
         geom.materials = [mat]
         node.geometry = geom
 
-        // Terrain only; targeted by cloud-shadow projector
+        // Terrain category; projector targets this
         node.castsShadow = false
         node.categoryBitMask = 0x0000_0400
 

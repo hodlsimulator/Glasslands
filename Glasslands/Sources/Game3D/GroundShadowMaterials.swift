@@ -5,19 +5,20 @@
 //  Created by . . on 10/9/25.
 //
 
-import Foundation
 import SceneKit
 
-@MainActor
 final class GroundShadowMaterials {
     static let shared = GroundShadowMaterials()
     private let table = NSHashTable<SCNMaterial>.weakObjects()
+    private let lock = NSLock()
 
-    func register(_ material: SCNMaterial) {
-        if !table.allObjects.contains(where: { $0 === material }) {
-            table.add(material)
-        }
+    func register(_ m: SCNMaterial) {
+        lock.lock(); defer { lock.unlock() }
+        table.add(m)
     }
 
-    func all() -> [SCNMaterial] { table.allObjects }
+    func all() -> [SCNMaterial] {
+        lock.lock(); defer { lock.unlock() }
+        return table.allObjects
+    }
 }

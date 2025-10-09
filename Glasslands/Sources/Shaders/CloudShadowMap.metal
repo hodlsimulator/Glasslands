@@ -15,8 +15,8 @@ using namespace metal;
 inline float clamp01(float x){ return clamp(x, 0.0f, 1.0f); }
 inline float lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float frac(float x){ return x - floor(x); }
-inline float hash1(float n){ return frac(sin(n) * 43758.5453123f); }
 
+inline float hash1(float n){ return frac(sin(n) * 43758.5453123f); }
 inline float noise3(float3 x){
     float3 p = floor(x), f = x - p;
     f = f * f * (3.0f - 2.0f * f);
@@ -31,7 +31,6 @@ inline float noise3(float3 x){
     float nxy0 = mix(nx00, nx10, f.y), nxy1 = mix(nx01, nx11, f.y);
     return mix(nxy0, nxy1, f.z);
 }
-
 inline float fbm3(float3 p, int oct, float gain){
     float a = 0.0f, w = 0.5f;
     for (int i = 0; i < oct; ++i){
@@ -41,7 +40,6 @@ inline float fbm3(float3 p, int oct, float gain){
     }
     return a;
 }
-
 inline float heightProfile(float y, float baseY, float topY){
     float h = clamp01((y - baseY) / max(1.0f, (topY - baseY)));
     float up = smoothstep(0.03f, 0.25f, h);
@@ -57,13 +55,11 @@ struct CloudUniforms {
     float4 params2; // pad0, pad1, horizonLift, detailMul
     float4 params3; // domainOffset.x, domainOffset.y, domainRotate, pad
 };
-
 struct ShadowUniforms {
     float2 centerXZ;
     float  halfSize;
     float  pad0;
 };
-
 struct Cluster {
     float3 pos;
     float  rad;
@@ -73,8 +69,8 @@ inline float densityProcedural(float3 wp, constant CloudUniforms& u){
     const float time = u.params0.x;
     const float2 wind = float2(u.params0.y, u.params0.z);
     const float baseY = u.params0.w;
-    const float topY  = u.params1.x;
-    const float coverage  = clamp(u.params1.y, 0.0f, 1.0f);
+    const float topY = u.params1.x;
+    const float coverage = clamp(u.params1.y, 0.0f, 1.0f);
     const float detailMul = max(0.0f, u.params2.w);
     const float2 domOff = float2(u.params3.x, u.params3.y);
     const float ang = u.params3.z;
@@ -99,43 +95,37 @@ inline float densityProcedural(float3 wp, constant CloudUniforms& u){
     return clamp(dens, 0.0f, 1.0f);
 }
 
-inline float densityClusters(float3 p, constant Cluster* clusters, uint nClusters)
-{
+inline float densityClusters(float3 p, constant Cluster* clusters, uint nClusters) {
     const float minRad = 80.0f;
     const float kR = 0.42f;
     const float kY = 0.55f;
-
     float rho = 0.0f;
     for (uint i = 0; i < nClusters; ++i) {
         float3 c = clusters[i].pos;
-        float  r = max(minRad, clusters[i].rad);
-
+        float r = max(minRad, clusters[i].rad);
         float3 d = p - c;
         float sigR = max(12.0f, kR * r);
         float sigY = max(40.0f, kY * r);
-
         float hr2 = (d.x*d.x + d.z*d.z) / (sigR*sigR);
         float vy2 = (d.y*d.y) / (sigY*sigY);
         if (hr2 + vy2 > 9.0f) continue;
-
         rho += exp(-0.5f * (hr2 + vy2));
     }
     return rho;
 }
 
 kernel void cloudShadowKernel(
-    texture2d<float, access::write>   outShadow   [[texture(0)]],
-    constant CloudUniforms&           uClouds     [[buffer(0)]],
-    constant ShadowUniforms&          SU          [[buffer(1)]],
-    constant Cluster*                 clusters    [[buffer(2)]],
-    constant uint&                    nClusters   [[buffer(3)]],
-    uint2                             gid         [[thread_position_in_grid]]
+    texture2d<float, access::write> outShadow [[texture(0)]],
+    constant CloudUniforms& uClouds         [[buffer(0)]],
+    constant ShadowUniforms& SU             [[buffer(1)]],
+    constant Cluster* clusters              [[buffer(2)]],
+    constant uint& nClusters                [[buffer(3)]],
+    uint2 gid                               [[thread_position_in_grid]]
 ){
     if (gid.x >= outShadow.get_width() || gid.y >= outShadow.get_height()) return;
 
     const float W = float(outShadow.get_width());
     const float H = float(outShadow.get_height());
-
     float u = (float(gid.x) + 0.5f) / W;
     float v = (float(gid.y) + 0.5f) / H;
 
@@ -146,13 +136,12 @@ kernel void cloudShadowKernel(
 
     const float baseY = uClouds.params0.w;
     const float topY  = uClouds.params1.x;
-
     const float densMulProc = max(0.0f, uClouds.params1.z);
     const float densMulClus = 3.2f;
 
-    const int   NL     = 10;
+    const int NL = 10;
     const float totalH = max(1.0f, (topY - baseY)) / max(1, NL);
-    const float stepL  = totalH * (abs(sunW.y) > 1e-4f ? (1.0f / abs(sunW.y)) : 1.0f);
+    const float stepL = totalH * (abs(sunW.y) > 1e-4f ? (1.0f / abs(sunW.y)) : 1.0f);
 
     float3 p = float3(x, topY, z);
     float3 d = -sunW * stepL;
@@ -161,10 +150,9 @@ kernel void cloudShadowKernel(
     for (int i = 0; i < NL && tau < 8.0f; ++i) {
         float rhoP = densityProcedural(p, uClouds);
         float rhoC = (nClusters > 0) ? densityClusters(p, clusters, nClusters) : 0.0f;
-        float rho  = rhoC * densMulClus + rhoP * (densMulProc * 0.35f);
-
+        float rho = rhoC * densMulClus + rhoP * (densMulProc * 0.35f);
         tau += rho * (stepL * 0.020f);
-        p   += d;
+        p += d;
     }
 
     float T = exp(-tau);
