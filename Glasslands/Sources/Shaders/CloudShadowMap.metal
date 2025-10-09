@@ -4,12 +4,9 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Achromatic gobo for cloud shade projected by the directional light.
-//  Now combines two sources:
-//   (A) Real billboard clusters (fast Gaussian volumetrics per cluster)
-//   (B) Procedural vapour (your original fbm field) as a gentle fill
-//
-//  The result is a greyscale texture where 1.0 = no shade, 0.0 = darkest.
+//  Cloud-shadow map used both by the sun gobo and the ground shader modifier.
+//  Combines billboard clusters (fast Gaussian blobs) with the procedural vapour
+//  as a gentle fill so all clouds cast local shade.
 //
 
 #include <metal_stdlib>
@@ -52,7 +49,7 @@ inline float heightProfile(float y, float baseY, float topY){
     return pow(clamp(up * dn, 0.0f, 1.0f), 0.80f);
 }
 
-// ======= Uniforms (matches Swift) ==========================================
+// ======= Uniforms (must match Swift) =======================================
 
 struct CloudUniforms {
     float4 sunDirWorld;
@@ -66,24 +63,23 @@ struct CloudUniforms {
 struct ShadowUniforms {
     float2 centerXZ;
     float  halfSize;
-    float  projY;   // plane Y used only for cluster pre-cull heuristics
+    float  projY;   // reserved; assists with heuristics (not required here)
 };
 
 // Billboard cluster packed from Swift (world space)
 struct Cluster {
-    float3 pos;   // centre of the cluster in world (x,y,z)
-    float  rad;   // approximate horizontal radius (world units)
+    float3 pos;
+    float  rad;
 };
 
 // ======= Densities =========================================================
 
-// Procedural vapour — unchanged, just trimmed a tad for speed
 inline float densityProcedural(float3 wp, constant CloudUniforms& u){
     const float time = u.params0.x;
     const float2 wind = float2(u.params0.y, u.params0.z);
     const float baseY = u.params0.w;
     const float topY  = u.params1.x;
-    const float coverage  = clamp01(u.params1.y);
+    const float coverage  = clamp(u.params1.y, 0.0f, 1.0f);
     const float detailMul = max(0.0f, u.params2.w);
     const float2 domOff = float2(u.params3.x, u.params3.y);
     const float ang = u.params3.z;
@@ -108,17 +104,15 @@ inline float densityProcedural(float3 wp, constant CloudUniforms& u){
     return clamp(dens, 0.0f, 1.0f);
 }
 
-// Cluster density — simple anisotropic Gaussian blob per cluster.
-//
+// Simple anisotropic Gaussian blob per cluster.
 inline float densityClusters(float3 p,
                              constant Cluster* clusters,
                              uint nClusters)
 {
-    // Tunables (kept constant inside the loop for speed)
-    const float minRad = 80.0f;     // keep soft and wide so shade reads natural
-    const float kR = 0.42f;         // horizontal sigma = kR * rad
-    const float kY = 0.55f;         // vertical   sigma = kY * rad  (thicker than wide)
-    const float gain = 1.0f;        // per-sample density gain (scaled by step length outside)
+    const float minRad = 80.0f;
+    const float kR = 0.42f;  // horizontal sigma = kR * rad
+    const float kY = 0.55f;  // vertical   sigma = kY * rad
+    const float gain = 1.0f;
 
     float rho = 0.0f;
 
@@ -134,10 +128,7 @@ inline float densityClusters(float3 p,
         float hr2 = (d.x*d.x + d.z*d.z) / (sigR*sigR);
         float vy2 = (d.y*d.y) / (sigY*sigY);
 
-        // Very cheap distance cull; avoids exp() when far
-        if (hr2 + vy2 > 9.0f) { // >3 sigma
-            continue;
-        }
+        if (hr2 + vy2 > 9.0f) { continue; } // >3 sigma → negligible
 
         float g = exp( -0.5f * (hr2 + vy2) );
         rho += g * gain;
@@ -149,12 +140,12 @@ inline float densityClusters(float3 p,
 // ======= Kernel ============================================================
 
 kernel void cloudShadowKernel(
-    texture2d<float, access::write> outShadow [[texture(0)]],
-    constant CloudUniforms& uClouds [[buffer(0)]],
-    constant ShadowUniforms& SU [[buffer(1)]],
-    constant Cluster* clusters [[buffer(2)]],
-    constant uint& nClusters [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]
+    texture2d<float, access::write>   outShadow   [[texture(0)]],
+    constant CloudUniforms&           uClouds     [[buffer(0)]],
+    constant ShadowUniforms&          SU          [[buffer(1)]],
+    constant Cluster*                 clusters    [[buffer(2)]],
+    constant uint&                    nClusters   [[buffer(3)]],
+    uint2                             gid         [[thread_position_in_grid]]
 ){
     if (gid.x >= outShadow.get_width() || gid.y >= outShadow.get_height()) return;
 
@@ -172,29 +163,23 @@ kernel void cloudShadowKernel(
     const float baseY = uClouds.params0.w;
     const float topY  = uClouds.params1.x;
 
-    const float densMulProc = max(0.0f, uClouds.params1.z); // original field
-    const float densMulClus = 2.2f; // clusters are fewer & stronger → boost a bit
+    const float densMulProc = max(0.0f, uClouds.params1.z);
+    const float densMulClus = 2.2f;
 
-    // March along the sun ray, from cloud top downwards.
-    const int   NL     = 10; // small & cheap; we run at ~5 Hz
+    const int   NL     = 10;
     const float totalH = max(1.0f, (topY - baseY)) / max(1, NL);
     const float stepL  = totalH * (abs(sunW.y) > 1e-4f ? (1.0f / abs(sunW.y)) : 1.0f);
 
     float3 p = float3(x, topY, z);
     float3 d = -sunW * stepL;
 
-    // Beer–Lambert extinction
     float tau = 0.0f;
 
     for (int i = 0; i < NL && tau < 8.0f; ++i)
     {
-        // A) procedural vapour
         float rhoP = densityProcedural(p, uClouds);
-
-        // B) billboard clusters (real sky)
         float rhoC = (nClusters > 0) ? densityClusters(p, clusters, nClusters) : 0.0f;
 
-        // Mix: clusters dominate; procedural adds soft background only
         float rho = rhoC * densMulClus + rhoP * (densMulProc * 0.35f);
 
         tau += rho * (stepL * 0.020f);
@@ -203,10 +188,8 @@ kernel void cloudShadowKernel(
 
     float T = exp(-tau);
 
-    // Darker, more convincing shade under thick cloud.
     float shadow = 0.25f + 0.75f * pow(T, 0.90f);
 
-    // Fade the outer ~2% to 1.0 so clamping/wrap never tints the world edge.
     float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));
     float fade = smoothstep(0.00f, 0.02f, edge);
     shadow = mix(1.0f, shadow, fade);

@@ -4,9 +4,12 @@
 //
 //  Created by . . on 10/6/25.
 //
-//  Sun diffusion (intensity/halo) + cloud-shadow projector.
-//  Now feeds billboard clusters into the compute shader so ALL clouds
-//  cast moving local shade across the terrain.
+//  Sun diffusion + cloud-shadow map generation.
+//  Fixes included:
+//  • Always seeds shader-modifier attachments (gl_shadowTex / gl_shadowParams) before first draw
+//  • Updates attachments every frame (compute throttled to ~5 Hz)
+//  • Uses SCNVector3 caching to avoid NSValue size mismatch
+//  • Builds cluster occluders from billboard groups (so all clouds cast shade)
 //
 
 import SceneKit
@@ -23,7 +26,7 @@ extension FirstPersonEngine {
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
 
-        // Estimate how much the sun is veiled for a nice halo + penumbra feel
+        // Estimate veil for a gentle halo / penumbra feel
         let cover = measureSunCover()
         let E_now: CGFloat = (cover.peak <= 0.010) ? 1.0 : CGFloat(expf(-6.0 * cover.union))
         let E_prev = (sunNode.value(forKey: "GL_prevIrradiance") as? CGFloat) ?? E_now
@@ -41,7 +44,7 @@ extension FirstPersonEngine {
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.60)
 
         ensureCloudShadowProjector()
-        updateCloudShadowMap()     // ← updates ~5 Hz
+        updateCloudShadowMap()
 
         if let sunGroup = sunDiscNode,
            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
@@ -55,7 +58,7 @@ extension FirstPersonEngine {
         }
     }
 
-    // MARK: Cloud-shadow projector (compute → light gobo)
+    // MARK: Cloud-shadow projector (compute → light gobo + shader-modifier attachments)
 
     @MainActor
     private func ensureCloudShadowProjector() {
@@ -66,10 +69,10 @@ extension FirstPersonEngine {
             sunLightNode?.setValue(device.makeCommandQueue(), forKey: "GL_shadowQ")
         }
 
-        // Pipeline (CloudShadowMap.metal: cloudShadowKernel(...))
+        // Pipeline
         if (sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState) == nil {
-            guard let lib = try? device.makeDefaultLibrary(bundle: .main),
-                  let fn  = lib.makeFunction(name: "cloudShadowKernel"),
+            guard let lib  = try? device.makeDefaultLibrary(bundle: .main),
+                  let fn   = lib.makeFunction(name: "cloudShadowKernel"),
                   let pipe = try? device.makeComputePipelineState(function: fn)
             else { return }
             sunLightNode?.setValue(pipe, forKey: "GL_shadowPipe")
@@ -93,7 +96,7 @@ extension FirstPersonEngine {
             }
         }
 
-        // Hook up the gobo to the texture
+        // Hook the sun’s gobo to the texture
         _ = sun.gobo
         if let tex = (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) {
             sun.gobo?.contents = tex
@@ -103,9 +106,40 @@ extension FirstPersonEngine {
         sun.gobo?.wrapT = .clamp
         sun.gobo?.minificationFilter = .linear
         sun.gobo?.magnificationFilter = .linear
+
+        // Seed shader-modifier attachments immediately to avoid “missing value” on first draw.
+        seedGroundShadowAttachments()
     }
 
-    // Swift mirror of the Metal structs
+    // Push gl_shadowTex / gl_shadowParams to any material that registered the surface shader.
+    @MainActor
+    private func seedGroundShadowAttachments() {
+        guard let out = sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture else { return }
+
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let camPos = pov.simdWorldPosition
+        let grid: Float = 256.0
+        let anchor = simd_float2(
+            round(camPos.x / grid) * grid,
+            round(camPos.z / grid) * grid
+        )
+        let halfSize: Float = 560.0
+
+        let paramsV = SCNVector3(CGFloat(anchor.x), CGFloat(anchor.y), CGFloat(halfSize))
+
+        for m in GroundShadowMaterials.shared.all() {
+            // Texture argument
+            if let prop = m.value(forKey: "gl_shadowTex") as? SCNMaterialProperty {
+                prop.contents = out
+            } else {
+                m.setValue(SCNMaterialProperty(contents: out), forKey: "gl_shadowTex")
+            }
+            // Float3 argument
+            m.setValue(NSValue(scnVector3: paramsV), forKey: "gl_shadowParams")
+        }
+    }
+
+    // Swift mirrors of Metal structs
     private struct CloudUniforms {
         var sunDirWorld: simd_float4
         var sunTint    : simd_float4
@@ -133,15 +167,6 @@ extension FirstPersonEngine {
             let sun  = sunLightNode?.light
         else { return }
 
-        // Keep projector on even if this frame throttles
-        sun.gobo?.intensity = 1.0
-
-        // Throttle to ~5 Hz (clouds are slow)
-        let tNow = CACurrentMediaTime()
-        let tPrev = (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0
-        if tNow - tPrev < 0.20 { return }
-        sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
-
         // World-anchored domain near the camera; snap to grid to avoid texture swimming
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
@@ -152,9 +177,28 @@ extension FirstPersonEngine {
             round(camPos.z / grid) * grid
         )
 
-        // Match the light’s orthographic projector to the map’s half-size
+        // Keep the projector in sync with the map’s size
         let halfSize: Float = 560.0
         sun.orthographicScale = CGFloat(halfSize)
+
+        // Always update shader-modifier attachments every frame (cheap), so they’re never missing.
+        do {
+            let paramsV = SCNVector3(CGFloat(anchor.x), CGFloat(anchor.y), CGFloat(halfSize))
+            for m in GroundShadowMaterials.shared.all() {
+                if let prop = m.value(forKey: "gl_shadowTex") as? SCNMaterialProperty {
+                    prop.contents = out
+                } else {
+                    m.setValue(SCNMaterialProperty(contents: out), forKey: "gl_shadowTex")
+                }
+                m.setValue(NSValue(scnVector3: paramsV), forKey: "gl_shadowParams")
+            }
+        }
+
+        // Throttle compute to ~5 Hz (clouds are slow)
+        let tNow = CACurrentMediaTime()
+        let tPrev = (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0
+        if tNow - tPrev < 0.20 { return }
+        sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
 
         // ---- Uniforms
         var u = CloudUniforms(
@@ -179,7 +223,6 @@ extension FirstPersonEngine {
             let enc    = cmd.makeComputeCommandEncoder()
         else { return }
 
-        // Write uniforms
         memcpy(bufU.contents(), &u, MemoryLayout<CloudUniforms>.stride)
         memcpy(bufS.contents(), &su, MemoryLayout<ShadowUniforms>.stride)
 
@@ -211,17 +254,19 @@ extension FirstPersonEngine {
         )
         enc.endEncoding()
         cmd.commit()
+
+        // Keep the gobo active (it’s projecting the same map scene-wide)
+        sun.gobo?.intensity = 1.0
     }
 
     // Build a compact set of cluster occluders from the billboard layer.
-    // Culls to the gobo square with a small margin, sorts by distance, caps count.
+    // Uses SCNVector3-backed NSValue for caching to avoid size/alignment issues.
     @MainActor
     private func buildShadowClusters(centerXZ: simd_float2, halfSize: Float) -> [Cluster] {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return []
         }
 
-        // Slight margin so moving clouds don’t pop at the border
         let margin: Float = max(80.0, halfSize * 0.12)
         let minRad: Float = 80.0
 
@@ -229,12 +274,11 @@ extension FirstPersonEngine {
         out.reserveCapacity(128)
 
         for group in layer.childNodes {
-            // Compute and cache local centroid once
+            // Centroid (cached as SCNVector3)
             let centroidLocal: simd_float3 = {
                 if let cached = group.value(forKey: "GL_centroidLocal") as? NSValue {
-                    var v = simd_float3.zero
-                    cached.getValue(&v, size: MemoryLayout<simd_float3>.size)
-                    return v
+                    let v = cached.scnVector3Value
+                    return simd_float3(Float(v.x), Float(v.y), Float(v.z))
                 }
                 var sum = simd_float3.zero
                 var n = 0
@@ -244,11 +288,12 @@ extension FirstPersonEngine {
                     }
                 }
                 let c = (n > 0) ? (sum / Float(n)) : .zero
-                group.setValue(NSValue(bytes: [c], objCType: "{simd_float3=fff}"), forKey: "GL_centroidLocal")
+                let cv = SCNVector3(CGFloat(c.x), CGFloat(c.y), CGFloat(c.z))
+                group.setValue(NSValue(scnVector3: cv), forKey: "GL_centroidLocal")
                 return c
             }()
 
-            // Approximate radius from the largest puff plane in the group (cached)
+            // Approx radius (cached)
             let radiusLocal: Float = {
                 if let cached = group.value(forKey: "GL_radiusLocal") as? NSNumber {
                     return cached.floatValue
@@ -258,13 +303,11 @@ extension FirstPersonEngine {
                     guard let plane = bb.childNodes.first?.geometry as? SCNPlane else { continue }
                     r = max(r, Float(plane.width) * 0.5)
                 }
-                // Make a touch larger to cover overlaps
                 r *= 0.90
                 group.setValue(NSNumber(value: r), forKey: "GL_radiusLocal")
                 return r
             }()
 
-            // World centre of the cluster
             let cw = centroidLocal + group.presentation.simdWorldPosition
 
             // Quick cull to the projector square
@@ -276,7 +319,7 @@ extension FirstPersonEngine {
 
         if out.isEmpty { return [] }
 
-        // Sort by distance to centre and clamp count (keeps cost bounded)
+        // Sort by distance and clamp
         out.sort {
             let a = $0.pos, b = $1.pos
             let da = hypot(a.x - centerXZ.x, a.z - centerXZ.y)
@@ -284,7 +327,7 @@ extension FirstPersonEngine {
             return da < db
         }
 
-        let cap = min(out.count, 128) // safe upper bound for 256×256 @ 5 Hz
+        let cap = min(out.count, 128)
         return Array(out.prefix(cap))
     }
 
