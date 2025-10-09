@@ -26,6 +26,7 @@ struct TerrainChunkData: Sendable {
 }
 
 enum TerrainChunkNode {
+
     static func makeNode(
         originChunk: IVec2,
         cfg: FirstPersonEngine.Config,
@@ -33,19 +34,25 @@ enum TerrainChunkNode {
         recipe: BiomeRecipe
     ) -> SCNNode {
         let data = TerrainMeshBuilder.makeData(
-            originChunkX: originChunk.x, originChunkY: originChunk.y,
-            tilesX: cfg.tilesX, tilesZ: cfg.tilesZ,
-            tileSize: cfg.tileSize, heightScale: cfg.heightScale,
-            noise: noise, recipe: recipe
+            originChunkX: originChunk.x,
+            originChunkY: originChunk.y,
+            tilesX: cfg.tilesX,
+            tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize,
+            heightScale: cfg.heightScale,
+            noise: noise,
+            recipe: recipe
         )
         return node(from: data, cfg: cfg)
     }
 
-    @MainActor static func node(from data: TerrainChunkData) -> SCNNode {
+    @MainActor
+    static func node(from data: TerrainChunkData) -> SCNNode {
         node(from: data, cfg: FirstPersonEngine.Config())
     }
 
-    @MainActor static func node(from data: TerrainChunkData, cfg: FirstPersonEngine.Config) -> SCNNode {
+    @MainActor
+    static func node(from data: TerrainChunkData, cfg: FirstPersonEngine.Config) -> SCNNode {
         let node = SCNNode()
         node.name = "chunk_\(data.originChunkX)_\(data.originChunkY)"
 
@@ -58,24 +65,23 @@ enum TerrainChunkNode {
         let posSrc = SCNGeometrySource(
             data: posData, semantic: .vertex, vectorCount: data.positions.count,
             usesFloatComponents: true, componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<simd_float3>.stride
         )
         let nrmSrc = SCNGeometrySource(
             data: nrmData, semantic: .normal, vectorCount: data.normals.count,
             usesFloatComponents: true, componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0, dataStride: MemoryLayout<simd_float3>.stride
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<simd_float3>.stride
         )
         let uvSrc = SCNGeometrySource(
             data: uvData, semantic: .texcoord, vectorCount: data.uvs.count,
             usesFloatComponents: true, componentsPerVector: 2,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0, dataStride: MemoryLayout<simd_float2>.stride
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<simd_float2>.stride
         )
         let element = SCNGeometryElement(
-            data: idxData, primitiveType: .triangles,
-            primitiveCount: data.indices.count / 3,
+            data: idxData, primitiveType: .triangles, primitiveCount: data.indices.count / 3,
             bytesPerIndex: MemoryLayout<UInt32>.size
         )
         let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
@@ -112,10 +118,16 @@ enum TerrainChunkNode {
         let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
         mat.diffuse.contentsTransform = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
 
+        // Attach cloud-ground shader and register the material for updates
+        GroundShadowShader.applyIfNeeded(to: mat)
+
         geom.materials = [mat]
         node.geometry = geom
+
+        // Terrain only; targeted by cloud-shadow projector
         node.castsShadow = false
         node.categoryBitMask = 0x0000_0400
+
         return node
     }
 }

@@ -5,8 +5,6 @@
 //  Created by . . on 10/8/25.
 //
 
-// Glasslands/Sources/Game3D/GroundShadowShader.swift
-
 import SceneKit
 
 enum GroundShadowShader {
@@ -14,8 +12,9 @@ enum GroundShadowShader {
     // Surface-stage modifier. Projects the sun’s cloud-shadow map onto world XZ.
     static let surface: String = """
     #pragma arguments
-    texture2d gl_shadowTex;
-    float3 gl_shadowParams; // x=centerX, y=centerZ, z=halfSize
+    texture2d<float> gl_shadowTex;
+    sampler gl_shadowTexSampler;
+    float3 gl_shadowParams;    // x=centerX, y=centerZ, z=halfSize
 
     #pragma body
     float cx = gl_shadowParams.x;
@@ -26,10 +25,9 @@ enum GroundShadowShader {
     uv.x = ((_surface.position.x - cx) / (2.0 * hs)) + 0.5;
     uv.y = ((_surface.position.z - cz) / (2.0 * hs)) + 0.5;
 
-    constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float shade = clamp(gl_shadowTex.sample(s, uv).r, 0.0, 1.0);
+    float shade = clamp(gl_shadowTex.sample(gl_shadowTexSampler, uv).r, 0.0, 1.0);
 
-    // Darken colour only; alpha unchanged to avoid colour wash.
+    // Darken colour only; leave alpha as-is.
     _surface.diffuse.rgb *= shade;
     """
 

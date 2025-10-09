@@ -18,7 +18,6 @@ import UIKit
 extension FirstPersonEngine {
 
     // MARK: Sun diffusion (key light + halo)
-
     @MainActor
     func updateSunDiffusion() {
         guard let sunNode = sunLightNode, let sun = sunNode.light else { return }
@@ -43,9 +42,11 @@ extension FirstPersonEngine {
         ensureCloudShadowProjector()
         updateCloudShadowMap()
 
-        if let sunGroup = sunDiscNode,
-           let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
-           let haloMat = halo.geometry?.firstMaterial {
+        if
+            let sunGroup = sunDiscNode,
+            let halo = sunGroup.childNode(withName: "SunHaloHDR", recursively: true),
+            let haloMat = halo.geometry?.firstMaterial
+        {
             let baseHalo = (haloMat.value(forKey: "GL_baseHaloIntensity") as? CGFloat) ?? haloMat.emission.intensity
             if haloMat.value(forKey: "GL_baseHaloIntensity") == nil {
                 haloMat.setValue(baseHalo, forKey: "GL_baseHaloIntensity")
@@ -56,7 +57,6 @@ extension FirstPersonEngine {
     }
 
     // MARK: Cloud-shadow projector (compute → modulated shadow on terrain)
-
     @MainActor
     private func ensureCloudShadowProjector() {
         guard let view = scnView, let device = view.device else { return }
@@ -68,9 +68,10 @@ extension FirstPersonEngine {
 
         // Compute pipeline
         if (sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState) == nil {
-            guard let lib  = try? device.makeDefaultLibrary(bundle: .main),
-                  let fn   = lib.makeFunction(name: "cloudShadowKernel"),
-                  let pipe = try? device.makeComputePipelineState(function: fn)
+            guard
+                let lib = try? device.makeDefaultLibrary(bundle: .main),
+                let fn  = lib.makeFunction(name: "cloudShadowKernel"),
+                let pipe = try? device.makeComputePipelineState(function: fn)
             else { return }
             sunLightNode?.setValue(pipe, forKey: "GL_shadowPipe")
         }
@@ -79,23 +80,28 @@ extension FirstPersonEngine {
         if (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) == nil {
             let W = 256, H = 256
             let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm, width: W, height: H, mipmapped: false)
+                pixelFormat: .bgra8Unorm, width: W, height: H, mipmapped: false
+            )
             desc.usage = [.shaderWrite, .shaderRead]
             desc.storageMode = .shared
             guard let tex = device.makeTexture(descriptor: desc) else { return }
             sunLightNode?.setValue(tex, forKey: "GL_shadowTex")
 
+            // Initialise to white (no shade)
             let white = [UInt8](repeating: 0xFF, count: W * H * 4)
             white.withUnsafeBytes { ptr in
-                tex.replace(region: MTLRegionMake2D(0, 0, W, H),
-                            mipmapLevel: 0, withBytes: ptr.baseAddress!, bytesPerRow: W * 4)
+                tex.replace(
+                    region: MTLRegionMake2D(0, 0, W, H),
+                    mipmapLevel: 0,
+                    withBytes: ptr.baseAddress!, bytesPerRow: W * 4
+                )
             }
         }
 
         // Fallback empty clusters buffer (always bind something at index 2)
         if (sunLightNode?.value(forKey: "GL_emptyClusters") as? MTLBuffer) == nil {
-            let buf = device.makeBuffer(length: MemoryLayout<Cluster>.stride, options: .storageModeShared)!
-            memset(buf.contents(), 0, MemoryLayout<Cluster>.stride)
+            let buf = view.device!.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared)!
+            memset(buf.contents(), 0, MemoryLayout<UInt32>.stride)
             sunLightNode?.setValue(buf, forKey: "GL_emptyClusters")
         }
 
@@ -104,20 +110,18 @@ extension FirstPersonEngine {
             let L = SCNLight()
             L.type = .directional
             L.castsShadow = true
-            L.shadowMode = .modulated         // ← use gobo as the shadow mask
+            L.shadowMode = .modulated         // gobo acts as shadow mask
             L.shadowColor = UIColor(white: 0.0, alpha: 1.0)
-            L.categoryBitMask = 0x0000_0400   // ← terrain only
+            L.categoryBitMask = 0x0000_0400   // terrain only
 
             let N = SCNNode()
             N.name = "GL_CloudShadowProjector"
             N.light = L
             scene.rootNode.addChildNode(N)
-
             sunLightNode?.setValue(N, forKey: "GL_shadowProjector")
         }
 
-        // (Optional) If you previously attached the gobo to the main sun, clear it
-        // to avoid double-darkening from two gobos:
+        // Ensure main sun has no leftover gobo
         if let sun = sunLightNode?.light { sun.gobo?.contents = nil }
     }
 
@@ -133,7 +137,7 @@ extension FirstPersonEngine {
     private struct ShadowUniforms {
         var centerXZ: simd_float2
         var halfSize: Float
-        var pad0: Float = 0 // keep layouts in sync with Metal
+        var pad0: Float = 0
     }
     private struct Cluster {
         var pos: simd_float3
@@ -156,7 +160,7 @@ extension FirstPersonEngine {
             proj.position = origin
             proj.look(at: target, up: scene.rootNode.worldUp, localFront: SCNVector3(0, 0, -1))
 
-            _ = proj.light?.gobo // ensure property exists
+            _ = proj.light?.gobo
             proj.light?.gobo?.contents = out
             proj.light?.gobo?.intensity = 1.0
             proj.light?.gobo?.wrapS = .clamp
@@ -168,7 +172,6 @@ extension FirstPersonEngine {
         // World-anchored domain near camera; snap to grid to avoid swimming
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let camPos = pov.simdWorldPosition
-
         let grid: Float = 256.0
         let anchor = simd_float2(
             round(camPos.x / grid) * grid,
@@ -183,11 +186,11 @@ extension FirstPersonEngine {
 
         // ---- Uniforms
         var u = CloudUniforms(
-            sunDirWorld: simd_float4(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z, 0),
+            sunDirWorld: simd_float4(simd_normalize(sunDirWorld), 0),
             sunTint    : simd_float4(1, 1, 1, 1),
             params0    : simd_float4(Float(tNow), cloudWind.x, cloudWind.y, 400.0),
-            params1    : simd_float4(1400.0, 0.44, 3.6, 0.0),   // topY, coverage, densityMul
-            params2    : simd_float4(0, 0, 0.10, 0.75),         // horizon lift, detailMul
+            params1    : simd_float4(1400.0, 0.44, 3.6, 0.0),  // topY, coverage, densityMul
+            params2    : simd_float4(0, 0, 0.10, 0.75),        // horizon lift, detailMul
             params3    : simd_float4(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
         var su = ShadowUniforms(centerXZ: anchor, halfSize: 560.0)
@@ -231,6 +234,21 @@ extension FirstPersonEngine {
         )
         enc.endEncoding()
         cmd.commit()
+
+        // ---- Feed terrain materials so the surface shader can darken locally
+        let params = NSValue(scnVector3: SCNVector3(anchor.x, anchor.y, su.halfSize))
+        for mat in GroundShadowMaterials.shared.all() {
+            // Bind as SCNMaterialProperty to guarantee SceneKit creates the sampler
+            let prop: SCNMaterialProperty = (mat.value(forKey: "gl_shadowTex") as? SCNMaterialProperty)
+                ?? SCNMaterialProperty(contents: out)
+            prop.contents = out
+            prop.wrapS = .clamp
+            prop.wrapT = .clamp
+            prop.minificationFilter = .linear
+            prop.magnificationFilter = .linear
+            mat.setValue(prop, forKey: "gl_shadowTex")
+            mat.setValue(params, forKey: "gl_shadowParams")
+        }
     }
 
     // Build compact set of billboard clusters (OK if empty w/ volumetrics)
@@ -239,7 +257,6 @@ extension FirstPersonEngine {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return []
         }
-
         let margin: Float = max(80.0, halfSize * 0.12)
         let minRad: Float = 80.0
 
@@ -247,7 +264,7 @@ extension FirstPersonEngine {
         out.reserveCapacity(128)
 
         for group in layer.childNodes {
-            // Centroid cache (safe with SCNVector3)
+            // Centroid cache
             let centroidLocal: simd_float3 = {
                 if let cached = group.value(forKey: "GL_centroidLocal") as? NSValue {
                     let v = cached.scnVector3Value
@@ -281,22 +298,18 @@ extension FirstPersonEngine {
             }()
 
             let cw = centroidLocal + group.presentation.simdWorldPosition
-
             if abs(cw.x - centerXZ.x) > (halfSize + radiusLocal + margin) { continue }
             if abs(cw.z - centerXZ.y) > (halfSize + radiusLocal + margin) { continue }
-
             out.append(Cluster(pos: cw, rad: max(minRad, radiusLocal)))
         }
 
         if out.isEmpty { return [] }
-
         out.sort {
             let a = $0.pos, b = $1.pos
             let da = hypot(a.x - centerXZ.x, a.z - centerXZ.y)
             let db = hypot(b.x - centerXZ.x, b.z - centerXZ.y)
             return da < db
         }
-
         let cap = min(out.count, 128)
         return Array(out.prefix(cap))
     }
@@ -306,10 +319,10 @@ extension FirstPersonEngine {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return (0.0, 0.0)
         }
+
         let pov = (scnView?.pointOfView ?? camNode).presentation
         let cam = pov.simdWorldPosition
         let sunW = simd_normalize(sunDirWorld)
-
         let sunR: Float = degreesToRadians(6.0) * 0.5
         let feather: Float = 0.15 * (.pi / 180.0)
 
@@ -325,15 +338,13 @@ extension FirstPersonEngine {
 
             let dist: Float = simd_length(pw - cam)
             if dist <= 1e-3 { return }
-
             let size: Float = Float(plane.width)
             let puffR: Float = atanf((size * 0.30) / max(1e-3, dist))
+
             let overlap = (puffR + sunR + feather) - dAngle
             if overlap <= 0 { return }
-
             let denom = max(1e-3, puffR + sunR + feather)
             var t = max(0.0, min(1.0, overlap / denom))
-
             let angArea = min(1.0, (puffR * puffR) / (sunR * sunR))
             t *= angArea
 
@@ -345,6 +356,5 @@ extension FirstPersonEngine {
         return ((peak < 0.01) ? 0.0 : peak, min(1.0, union))
     }
 
-    @inline(__always)
-    private func degreesToRadians(_ deg: Float) -> Float { deg * .pi / 180.0 }
+    @inline(__always) private func degreesToRadians(_ deg: Float) -> Float { deg * .pi / 180.0 }
 }
