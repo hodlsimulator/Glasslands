@@ -23,56 +23,106 @@ struct VegetationPlacer3D {
     ) -> [SCNNode] {
         let originTile = IVec2(ci.x * cfg.tilesX, ci.y * cfg.tilesZ)
 
+        // Deterministic per-chunk seed mixed with biome seed
         let ux = UInt64(bitPattern: Int64(ci.x))
         let uy = UInt64(bitPattern: Int64(ci.y))
-        let seed = recipe.seed64 ^ (ux &* 0x9E3779B97F4A7C15) ^ (uy &* 0xBF58476D1CE4E5B9)
+        let seed = recipe.seed64 ^ (ux &* 0x9E37_79B9_7F4A_7C15) ^ (uy &* 0xBF58_476D_1CE4_E5B9)
+
         let rng = GKMersenneTwisterRandomSource(seed: seed)
         var ra = RandomAdaptor(rng)
 
         var nodes: [SCNNode] = []
+        nodes.reserveCapacity(96)
+
+        let palette = AppColours.uiColors(from: recipe.paletteHex)
+
+        // Primary sampling stride (tiles). Lower = denser before probability gate.
         let step = 4
 
+        // Pass 1 — individual trees
         for tz in stride(from: 0, to: cfg.tilesZ, by: step) {
             for tx in stride(from: 0, to: cfg.tilesX, by: step) {
 
                 let tileX = originTile.x + tx
                 let tileZ = originTile.y + tz
 
+                // Normalised fields
                 let h = noise.sampleHeight(Double(tileX), Double(tileZ)) / max(0.0001, recipe.height.amplitude)
                 let m = noise.sampleMoisture(Double(tileX), Double(tileZ)) / max(0.0001, recipe.moisture.amplitude)
                 let slope = noise.slope(Double(tileX), Double(tileZ))
                 let r = noise.riverMask(Double(tileX), Double(tileZ))
 
+                // Hard gates: avoid beaches/water, steep slopes, and river beds
                 if h < 0.34 { continue }
                 if slope > 0.18 { continue }
                 if r > 0.50 { continue }
 
+                // Foresty bias in mid-moist, mid-height grasslands
                 let isForest = (h < 0.66) && (m > 0.52) && (slope < 0.12)
                 let baseChance: Double = isForest ? 0.34 : 0.12
                 if Double.random(in: 0...1, using: &ra) > baseChance { continue }
 
+                // Jitter within the step cell
                 let jx = (rng.nextUniform() - 0.5) * 0.9
                 let jz = (rng.nextUniform() - 0.5) * 0.9
+
                 let wx = (Float(tileX) + Float(jx)) * cfg.tileSize
                 let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
 
-                let palette = AppColours.uiColors(from: recipe.paletteHex)
+                // Build a conifer tree (low-poly, crisp silhouette)
                 let (tree, hitRadius, _) = makeTreeNode(palette: palette, rng: rng)
 
                 tree.position = SCNVector3(wx, wy, wz)
                 tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
 
-                // Important: ensure the **root** casts
+                // Ensure the root and all geometry children cast
                 tree.castsShadow = true
-                
-                // Also force all current/future geometry children to cast
                 tree.enumerateChildNodes { child, _ in child.castsShadow = true }
 
                 applyLOD(to: tree)
                 nodes.append(tree)
             }
         }
+
+        // Pass 2 — occasional groves (small clusters for variety)
+        let groveAttempts = 2
+        for _ in 0..<groveAttempts {
+            let cx = originTile.x + Int.random(in: 0..<cfg.tilesX, using: &ra)
+            let cz = originTile.y + Int.random(in: 0..<cfg.tilesZ, using: &ra)
+
+            let h = noise.sampleHeight(Double(cx), Double(cz)) / max(0.0001, recipe.height.amplitude)
+            let m = noise.sampleMoisture(Double(cx), Double(cz)) / max(0.0001, recipe.moisture.amplitude)
+            let slope = noise.slope(Double(cx), Double(cz))
+            let r = noise.riverMask(Double(cx), Double(cz))
+
+            // Prefer nice spots for clumps
+            guard h >= 0.42, h <= 0.78, m >= 0.48, m <= 0.80, slope < 0.10, r < 0.42 else { continue }
+            guard Double.random(in: 0...1, using: &ra) < 0.40 else { continue }
+
+            let count = Int.random(in: 3...7, using: &ra)
+            let baseWX = Float(cx) * cfg.tileSize
+            let baseWZ = Float(cz) * cfg.tileSize
+
+            for _ in 0..<count {
+                let offR = Float.random(in: 0.0...4.5, using: &ra) * cfg.tileSize
+                let offA = Float.random(in: 0...(2 * .pi), using: &ra)
+                let wx = baseWX + cos(offA) * offR
+                let wz = baseWZ + sin(offA) * offR
+                let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
+
+                let (tree, hitRadius, _) = makeTreeNode(palette: palette, rng: rng)
+                tree.position = SCNVector3(wx, wy, wz)
+                tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
+
+                tree.castsShadow = true
+                tree.enumerateChildNodes { child, _ in child.castsShadow = true }
+
+                applyLOD(to: tree)
+                nodes.append(tree)
+            }
+        }
+
         return nodes
     }
 
@@ -128,7 +178,7 @@ struct VegetationPlacer3D {
         trunkMat.metalness.contents = 0.0
         trunk.materials = [trunkMat]
 
-        // Lower canopy – more segments to clean the silhouette
+        // Lower canopy
         let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
         canopy1.radialSegmentCount = 18
         let leafMat = SCNMaterial()
@@ -153,8 +203,8 @@ struct VegetationPlacer3D {
         trunkNode.castsShadow = true
         node.addChildNode(trunkNode)
 
-        // A slightly larger gap makes sure the trunk's shadow appears first on the ground
-        let gap1: CGFloat = 0.10   // ~10 cm
+        // Slight gap so the trunk’s shadow hits the ground before leaves
+        let gap1: CGFloat = 0.10
         let canopyNode1 = SCNNode(geometry: canopy1)
         canopyNode1.position = SCNVector3(0, trunkH + gap1 + canopyH1 * 0.5, 0)
         canopyNode1.castsShadow = true
