@@ -148,7 +148,7 @@ kernel void cloudShadowKernel(
     const float topY  = uClouds.params1.x;
 
     const float densMulProc = max(0.0f, uClouds.params1.z);
-    const float densMulClus = 2.2f;
+    const float densMulClus = 3.2f;
 
     const int   NL     = 10;
     const float totalH = max(1.0f, (topY - baseY)) / max(1, NL);
