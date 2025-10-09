@@ -50,7 +50,7 @@ final class PerformanceGovernor {
         let ts  = ProcessInfo.processInfo.thermalState
         let maxFPS = v.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
 
-        // Keep rendering continuous for responsiveness; cool via FPS cap only.
+        // Keep continuous rendering; cool via FPS cap only.
         let cap: Int
         if maxFPS >= 120 {
             cap = (ts == .serious || ts == .critical || lpm) ? 30 : 40
@@ -60,12 +60,7 @@ final class PerformanceGovernor {
         v.preferredFramesPerSecond = cap
         v.rendersContinuously = true
 
-        // Do NOT switch cloud modes at runtime — keep pipeline stable.
-
-        // Throttle world streaming a bit under pressure.
-        engine?.chunker?.tasksPerFrame = (ts == .serious || ts == .critical || lpm) ? 1 : 2
-
-        // Shadows: avoid heavy reallocation. Only trim distance and sample count.
+        // Gentle, allocation-free shadow trims.
         if let sun = engine?.sunLightNode?.light {
             switch ts {
             case .serious, .critical:
@@ -80,7 +75,7 @@ final class PerformanceGovernor {
             }
         }
 
-        // Bloom trims are cheap and help a little thermally.
+        // Bloom trims are cheap.
         if let cam = v.pointOfView?.camera {
             switch ts {
             case .serious, .critical:
@@ -99,5 +94,39 @@ final class PerformanceGovernor {
                 cam.bloomBlurRadius = 10
             }
         }
+
+        // Streaming budget per frame.
+        engine?.chunker?.tasksPerFrame = (ts == .serious || ts == .critical || lpm) ? 1 : 2
+
+        // True volumetric clouds: lower raymarch cost via uniforms (no pipeline switches).
+        let U = VolCloudUniformsStore.shared.snapshot()
+
+        let stepMul: Float
+        let quality: Float
+        switch (ts, lpm) {
+        case (.serious, _), (.critical, _):
+            stepMul = 0.62; quality = 0.60
+        case (.fair, true):
+            stepMul = 0.66; quality = 0.68
+        case (.fair, false):
+            stepMul = 0.70; quality = 0.75
+        default:
+            stepMul = 0.75; quality = 0.85
+        }
+
+        VolCloudUniformsStore.shared.configure(
+            baseY: U.params0.w,
+            topY: U.params1.x,
+            coverage: U.params1.y,
+            densityMul: U.params1.z,
+            stepMul: stepMul,
+            horizonLift: U.params2.z,
+            detailMul: U.params2.w,
+            puffScale: U.params3.w,
+            puffStrength: U.params4.x,
+            macroScale: U.params4.z,
+            macroThreshold: U.params4.w
+        )
+        VolCloudUniformsStore.shared.setQuality(quality)
     }
 }

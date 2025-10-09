@@ -32,19 +32,17 @@ public final class VolCloudUniformsStore {
         u = GLCloudUniforms(
             sunDirWorld: SIMD4(0, 1, 0, 0),
             sunTint:     SIMD4(1, 1, 1, 0),
-            params0:     SIMD4(0, 0.60, 0.20, 400),       // time, wind.x, wind.y, baseY
-            params1:     SIMD4(1400, 0.34, 1.10, 0.70),   // topY, coverage, densityMul, stepMul
-            params2:     SIMD4(0.60, 1.40, 0.10, 0.90),   // mieG, powderK, horizonLift, detailMul
-            params3:     SIMD4(0, 0, 0, 0.0048),          // domainOffX, domainOffY, rotate, puffScale
-            params4:     SIMD4(0.62, 0.45, 0.00035, 0.58) // puffStrength, quality, macroScale, macroThreshold
+            params0: SIMD4(0, 0.60, 0.20, 400),   // time, wind.x, wind.y, baseY
+            params1: SIMD4(1400, 0.34, 1.10, 0.75), // topY, coverage, densityMul, stepMul
+            params2: SIMD4(0.60, 1.40, 0.10, 0.90), // mieG, powderK, horizonLift, detailMul
+            params3: SIMD4(0, 0, 0, 0.0048),        // domainOffX, domainOffY, rotate, puffScale
+            params4: SIMD4(0.62, 0.85, 0.00035, 0.58) // puffStrength, quality, macroScale, macroThreshold
         )
     }
 
     public func snapshot() -> GLCloudUniforms {
-        os_unfair_lock_lock(&lock)
-        let out = u
-        os_unfair_lock_unlock(&lock)
-        return out
+        os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }
+        return u
     }
 
     // Fast per-frame update from the render clock.
@@ -59,19 +57,13 @@ public final class VolCloudUniformsStore {
         os_unfair_lock_unlock(&lock)
     }
 
-    // Optional one-shot reconfiguration for style/quality.
+    // One-shot reconfiguration for style/quality.
     public func configure(
-        baseY: Float,
-        topY: Float,
-        coverage: Float,
-        densityMul: Float,
-        stepMul: Float,
-        horizonLift: Float,
-        detailMul: Float,
-        puffScale: Float,
-        puffStrength: Float,
-        macroScale: Float,
-        macroThreshold: Float
+        baseY: Float, topY: Float, coverage: Float,
+        densityMul: Float, stepMul: Float,
+        horizonLift: Float, detailMul: Float,
+        puffScale: Float, puffStrength: Float,
+        macroScale: Float, macroThreshold: Float
     ) {
         os_unfair_lock_lock(&lock)
         u.params0.w = baseY
@@ -85,6 +77,13 @@ public final class VolCloudUniformsStore {
         u.params4.x = max(0, puffStrength)
         u.params4.z = max(1e-6, macroScale)
         u.params4.w = max(0, min(1, macroThreshold))
+        os_unfair_lock_unlock(&lock)
+    }
+
+    // Quality scalar (separate from stepMul so we can tune both).
+    public func setQuality(_ q: Float) {
+        os_unfair_lock_lock(&lock)
+        u.params4.y = max(0.40, min(1.20, q))
         os_unfair_lock_unlock(&lock)
     }
 }

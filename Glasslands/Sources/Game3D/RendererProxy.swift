@@ -8,41 +8,33 @@
 import Foundation
 import SceneKit
 
-/// SceneKit render delegate that coalesces frame updates onto the MainActor.
-/// Prevents an unbounded queue of per-frame Tasks on the main thread.
+/// SceneKit render delegate: coalesces per-frame work and throttles cloud updates.
+/// Avoids piling up MainActor Tasks when the camera turns quickly.
 final class RendererProxy: NSObject, SCNSceneRendererDelegate {
 
     private weak var engineRef: FirstPersonEngine?
 
-    // MainActor state used to coalesce/tick exactly once per frame.
-    @MainActor private var hasWork: Bool = false
-    @MainActor private var latestTime: TimeInterval = 0
+    @MainActor private var lastCloudTick: TimeInterval = 0
+    @MainActor private let minCloudDelta: TimeInterval = 1.0 / 24.0  // 24 Hz cloud uniforms/advection
 
     init(engine: FirstPersonEngine) {
         self.engineRef = engine
         super.init()
     }
 
-    // Called on SceneKit's render queue. Push a single coalesced tick to Main.
+    // Called on SceneKit's render queue.
     nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         Task { @MainActor in
-            latestTime = time
-            if hasWork { return }        // already scheduled → coalesce
-            hasWork = true
-            while true {
-                let t = latestTime
-                guard let engine = self.engineRef else { break }
+            guard let engine = self.engineRef else { return }
 
-                // Main engine tick (UI/scene mutations happen here)
-                engine.stepUpdateMain(at: t)
+            // Game/scene tick (keep this light; heavy work lives off the main thread).
+            engine.stepUpdateMain(at: time)
 
-                // Cloud uniforms/advection etc.
-                engine.tickVolumetricClouds(atRenderTime: t)
-
-                // If no newer request arrived during the tick, we’re done.
-                if t == latestTime { break }
+            // Clouds: update at most 24 Hz; use latest time only.
+            if time - lastCloudTick >= minCloudDelta {
+                lastCloudTick = time
+                engine.tickVolumetricClouds(atRenderTime: time)
             }
-            hasWork = false
         }
     }
 }
