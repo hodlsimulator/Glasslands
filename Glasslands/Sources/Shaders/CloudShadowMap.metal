@@ -4,7 +4,12 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Achromatic gobo for cloud shade; edges fade to 1.0.
+//  Achromatic gobo for cloud shade projected by the directional light.
+//  Now combines two sources:
+//   (A) Real billboard clusters (fast Gaussian volumetrics per cluster)
+//   (B) Procedural vapour (your original fbm field) as a gentle fill
+//
+//  The result is a greyscale texture where 1.0 = no shade, 0.0 = darkest.
 //
 
 #include <metal_stdlib>
@@ -20,8 +25,8 @@ inline float noise3(float3 x){
     f = f * f * (3.0f - 2.0f * f);
     const float3 off = float3(1.0, 57.0, 113.0);
     float n = dot(p, off);
-    float n000 = hash1(n + 0.0), n100 = hash1(n + 1.0);
-    float n010 = hash1(n + 57.0), n110 = hash1(n + 58.0);
+    float n000 = hash1(n + 0.0),   n100 = hash1(n + 1.0);
+    float n010 = hash1(n + 57.0),  n110 = hash1(n + 58.0);
     float n001 = hash1(n + 113.0), n101 = hash1(n + 114.0);
     float n011 = hash1(n + 170.0), n111 = hash1(n + 171.0);
     float nx00 = mix(n000, n100, f.x), nx10 = mix(n010, n110, f.x);
@@ -30,12 +35,12 @@ inline float noise3(float3 x){
     return mix(nxy0, nxy1, f.z);
 }
 
-inline float fbm5(float3 p){
+inline float fbm3(float3 p, int oct, float gain){
     float a = 0.0f, w = 0.5f;
-    for (int i = 0; i < 3; ++i){      // 3 octaves instead of 5
+    for (int i = 0; i < oct; ++i){
         a += noise3(p) * w;
         p = p * 2.02f + 19.19f;
-        w *= 0.5f;
+        w *= gain;
     }
     return a;
 }
@@ -46,6 +51,8 @@ inline float heightProfile(float y, float baseY, float topY){
     float dn = 1.0f - smoothstep(0.68f, 1.00f, h);
     return pow(clamp(up * dn, 0.0f, 1.0f), 0.80f);
 }
+
+// ======= Uniforms (matches Swift) ==========================================
 
 struct CloudUniforms {
     float4 sunDirWorld;
@@ -58,21 +65,30 @@ struct CloudUniforms {
 
 struct ShadowUniforms {
     float2 centerXZ;
-    float halfSize;
-    float pad0;
+    float  halfSize;
+    float  projY;   // plane Y used only for cluster pre-cull heuristics
 };
 
-inline float densityAt(float3 wp, constant CloudUniforms& u){
+// Billboard cluster packed from Swift (world space)
+struct Cluster {
+    float3 pos;   // centre of the cluster in world (x,y,z)
+    float  rad;   // approximate horizontal radius (world units)
+};
+
+// ======= Densities =========================================================
+
+// Procedural vapour — unchanged, just trimmed a tad for speed
+inline float densityProcedural(float3 wp, constant CloudUniforms& u){
     const float time = u.params0.x;
     const float2 wind = float2(u.params0.y, u.params0.z);
     const float baseY = u.params0.w;
-    const float topY = u.params1.x;
-    const float coverage = u.params1.y;
+    const float topY  = u.params1.x;
+    const float coverage  = clamp01(u.params1.y);
     const float detailMul = max(0.0f, u.params2.w);
     const float2 domOff = float2(u.params3.x, u.params3.y);
     const float ang = u.params3.z;
-
     const float ca = cos(ang), sa = sin(ang);
+
     float2 xz = wp.xz + domOff;
     float2 xzr = float2(xz.x*ca - xz.y*sa, xz.x*sa + xz.y*ca);
 
@@ -81,10 +97,10 @@ inline float densityAt(float3 wp, constant CloudUniforms& u){
     float2 advXY = xzr + wind * adv * (time * 0.0035f);
 
     float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00115f;
-    float base = fbm5(P0 * float3(1.0, 0.35, 1.0));
+    float base = fbm3(P0 * float3(1.0, 0.35, 1.0), 3, 0.5f);
 
     float3 P1 = float3(advXY.x, wp.y * 1.8f, advXY.y) * 0.0046f + float3(2.7f, 0.0f, -5.1f);
-    float detail = fbm5(P1);
+    float detail = fbm3(P1, 3, 0.52f);
 
     float edge = base + (detailMul * 0.55f) * (detail - 0.45f);
     float dens = clamp( (edge - (1.0f - coverage)) / max(1e-3f, coverage), 0.0f, 1.0f );
@@ -92,16 +108,59 @@ inline float densityAt(float3 wp, constant CloudUniforms& u){
     return clamp(dens, 0.0f, 1.0f);
 }
 
+// Cluster density — simple anisotropic Gaussian blob per cluster.
+//
+inline float densityClusters(float3 p,
+                             constant Cluster* clusters,
+                             uint nClusters)
+{
+    // Tunables (kept constant inside the loop for speed)
+    const float minRad = 80.0f;     // keep soft and wide so shade reads natural
+    const float kR = 0.42f;         // horizontal sigma = kR * rad
+    const float kY = 0.55f;         // vertical   sigma = kY * rad  (thicker than wide)
+    const float gain = 1.0f;        // per-sample density gain (scaled by step length outside)
+
+    float rho = 0.0f;
+
+    for (uint i = 0; i < nClusters; ++i) {
+        float3 c = clusters[i].pos;
+        float  r = max(minRad, clusters[i].rad);
+
+        float3 d = p - c;
+
+        float sigR = max(12.0f, kR * r);
+        float sigY = max(40.0f, kY * r);
+
+        float hr2 = (d.x*d.x + d.z*d.z) / (sigR*sigR);
+        float vy2 = (d.y*d.y) / (sigY*sigY);
+
+        // Very cheap distance cull; avoids exp() when far
+        if (hr2 + vy2 > 9.0f) { // >3 sigma
+            continue;
+        }
+
+        float g = exp( -0.5f * (hr2 + vy2) );
+        rho += g * gain;
+    }
+
+    return rho;
+}
+
+// ======= Kernel ============================================================
+
 kernel void cloudShadowKernel(
-    texture2d<float, access::write> outShadow        [[texture(0)]],
-    constant CloudUniforms& uClouds                  [[buffer(0)]],
-    constant ShadowUniforms& SU                      [[buffer(1)]],
-    uint2 gid                                        [[thread_position_in_grid]]
+    texture2d<float, access::write> outShadow [[texture(0)]],
+    constant CloudUniforms& uClouds [[buffer(0)]],
+    constant ShadowUniforms& SU [[buffer(1)]],
+    constant Cluster* clusters [[buffer(2)]],
+    constant uint& nClusters [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
 ){
     if (gid.x >= outShadow.get_width() || gid.y >= outShadow.get_height()) return;
 
     const float W = float(outShadow.get_width());
     const float H = float(outShadow.get_height());
+
     float u = (float(gid.x) + 0.5f) / W;
     float v = (float(gid.y) + 0.5f) / H;
 
@@ -109,29 +168,43 @@ kernel void cloudShadowKernel(
     float z = SU.centerXZ.y + (v * 2.0f - 1.0f) * SU.halfSize;
 
     float3 sunW = normalize(uClouds.sunDirWorld.xyz);
+
     const float baseY = uClouds.params0.w;
     const float topY  = uClouds.params1.x;
-    const float densMul = max(0.0f, uClouds.params1.z);
 
-    // Ray-march down the sun axis.
-    const int   NL     = 8;         // was 32
+    const float densMulProc = max(0.0f, uClouds.params1.z); // original field
+    const float densMulClus = 2.2f; // clusters are fewer & stronger → boost a bit
+
+    // March along the sun ray, from cloud top downwards.
+    const int   NL     = 10; // small & cheap; we run at ~5 Hz
     const float totalH = max(1.0f, (topY - baseY)) / max(1, NL);
     const float stepL  = totalH * (abs(sunW.y) > 1e-4f ? (1.0f / abs(sunW.y)) : 1.0f);
 
     float3 p = float3(x, topY, z);
     float3 d = -sunW * stepL;
 
+    // Beer–Lambert extinction
     float tau = 0.0f;
-    for (int i = 0; i < NL && tau < 8.0f; ++i) {
-        float rho = densityAt(p, uClouds);
-        tau += rho * densMul * (stepL * 0.020f);
-        p += d;
+
+    for (int i = 0; i < NL && tau < 8.0f; ++i)
+    {
+        // A) procedural vapour
+        float rhoP = densityProcedural(p, uClouds);
+
+        // B) billboard clusters (real sky)
+        float rhoC = (nClusters > 0) ? densityClusters(p, clusters, nClusters) : 0.0f;
+
+        // Mix: clusters dominate; procedural adds soft background only
+        float rho = rhoC * densMulClus + rhoP * (densMulProc * 0.35f);
+
+        tau += rho * (stepL * 0.020f);
+        p   += d;
     }
 
     float T = exp(-tau);
 
     // Darker, more convincing shade under thick cloud.
-    float shadow = 0.25f + 0.75f * pow(T, 0.90f); // darker floor than 0.35f
+    float shadow = 0.25f + 0.75f * pow(T, 0.90f);
 
     // Fade the outer ~2% to 1.0 so clamping/wrap never tints the world edge.
     float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));
