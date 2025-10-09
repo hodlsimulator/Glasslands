@@ -112,9 +112,6 @@ enum TerrainChunkNode {
         let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
         mat.diffuse.contentsTransform = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
 
-        // >>> Enable ground shadow sampling
-        GroundShadowShader.applyIfNeeded(to: mat)
-
         geom.materials = [mat]
         node.geometry = geom
         node.castsShadow = false

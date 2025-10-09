@@ -61,7 +61,7 @@ struct CloudUniforms {
 struct ShadowUniforms {
     float2 centerXZ;
     float  halfSize;
-    float  pad0;   // keep 16-byte alignment; not used
+    float  pad0;
 };
 
 struct Cluster {
@@ -116,7 +116,7 @@ inline float densityClusters(float3 p, constant Cluster* clusters, uint nCluster
 
         float hr2 = (d.x*d.x + d.z*d.z) / (sigR*sigR);
         float vy2 = (d.y*d.y) / (sigY*sigY);
-        if (hr2 + vy2 > 9.0f) continue; // >3σ
+        if (hr2 + vy2 > 9.0f) continue;
 
         rho += exp(-0.5f * (hr2 + vy2));
     }
