@@ -8,33 +8,23 @@
 import Foundation
 import SceneKit
 
-/// SceneKit render delegate: coalesces per-frame work and throttles cloud updates.
-/// Avoids piling up MainActor Tasks when the camera turns quickly.
+/// SceneKit render delegate: one main tick per frame.
+/// Ground shade is updated inside the engine (throttled there).
 final class RendererProxy: NSObject, SCNSceneRendererDelegate {
 
     private weak var engineRef: FirstPersonEngine?
-
-    @MainActor private var lastCloudTick: TimeInterval = 0
-    @MainActor private let minCloudDelta: TimeInterval = 1.0 / 24.0  // 24 Hz cloud uniforms/advection
 
     init(engine: FirstPersonEngine) {
         self.engineRef = engine
         super.init()
     }
 
-    // Called on SceneKit's render queue.
+    // SceneKit render queue → hop to MainActor for scene work.
     nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         Task { @MainActor in
             guard let engine = self.engineRef else { return }
-
-            // Game/scene tick (keep this light; heavy work lives off the main thread).
             engine.stepUpdateMain(at: time)
-
-            // Clouds: update at most 24 Hz; use latest time only.
-            if time - lastCloudTick >= minCloudDelta {
-                lastCloudTick = time
-                engine.tickVolumetricClouds(atRenderTime: time)
-            }
+            engine.updateSunDiffusion()   // <- was updateSunDiffusionThrottled()
         }
     }
 }

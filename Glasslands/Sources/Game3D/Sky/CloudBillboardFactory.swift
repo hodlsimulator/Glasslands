@@ -14,10 +14,9 @@ import UIKit
 enum CloudBillboardFactory {
 
     @MainActor
-    static func makeNode(
-        from clusters: [CloudClusterSpec],
-        atlas: CloudSpriteTexture.Atlas
-    ) -> SCNNode {
+    static func makeNode(from clusters: [CloudClusterSpec],
+                         atlas: CloudSpriteTexture.Atlas) -> SCNNode {
+
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
         root.castsShadow = false
@@ -28,21 +27,35 @@ enum CloudBillboardFactory {
 
         @inline(__always)
         func materialFor(halfW: CGFloat, halfH: CGFloat) -> SCNMaterial {
-            let key = SizeKey(w: Int(round(halfW / quant)), h: Int(round(halfH / quant)))
+            let key = SizeKey(w: Int(round(halfW / quant)),
+                              h: Int(round(halfH / quant)))
             if let m = materialCache[key] { return m }
+
             let m = CloudImpostorProgram.makeMaterial(halfWidth: halfW, halfHeight: halfH)
-            m.diffuse.contents  = UIColor.white
+            m.diffuse.contents = UIColor.white
             m.multiply.contents = UIColor.white
+            m.isDoubleSided = false
+            m.cullMode = .back
+            m.readsFromDepthBuffer = false
+            m.writesToDepthBuffer = false
+            m.blendMode = .alpha
+
             materialCache[key] = m
             return m
         }
 
-        // Smaller puffs → smaller, fluffier clouds
+        // Smaller puffs → smaller, fluffier clouds (keeps look but reduces fill)
         let GLOBAL_SIZE_SCALE: CGFloat = 0.58
 
         for cl in clusters {
+            // One billboard **per cluster** (instead of per puff)
             let group = SCNNode()
             group.castsShadow = false
+            group.renderingOrder = 9_000
+
+            let bc = SCNBillboardConstraint()
+            bc.freeAxes = .all
+            group.constraints = [bc]
 
             for p in cl.puffs {
                 let size = max(0.01, CGFloat(p.size) * GLOBAL_SIZE_SCALE)
@@ -52,24 +65,17 @@ enum CloudBillboardFactory {
                 plane.firstMaterial = materialFor(halfW: half, halfH: half)
 
                 let sprite = SCNNode(geometry: plane)
-                var ea = sprite.eulerAngles
-                ea.z = Float(p.roll)
-                sprite.eulerAngles = ea
+                sprite.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
+                if p.roll != 0 {
+                    var ea = sprite.eulerAngles
+                    ea.z = Float(p.roll)
+                    sprite.eulerAngles = ea
+                }
                 sprite.castsShadow = false
-                sprite.renderingOrder = 9_000 // draw after the sky
+                sprite.opacity = CGFloat(max(0.0, min(1.0, p.opacity)))
+                sprite.renderingOrder = 9_000
 
-                let bb = SCNNode()
-                bb.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
-
-                let bc = SCNBillboardConstraint()
-                bc.freeAxes = .all
-                bb.constraints = [bc]
-
-                bb.opacity = CGFloat(max(0, min(1, p.opacity)))
-                bb.renderingOrder = 9_000
-                bb.addChildNode(sprite)
-
-                group.addChildNode(bb)
+                group.addChildNode(sprite)
             }
 
             root.addChildNode(group)
