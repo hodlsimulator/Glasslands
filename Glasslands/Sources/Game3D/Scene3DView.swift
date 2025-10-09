@@ -5,9 +5,6 @@
 //  Created by . . on 9/30/25.
 //
 //  UIViewRepresentable wrapper. Input comes from VirtualSticks.
-//  Goal here: cool the game without touching clouds/shaders by pacing frames ourselves.
-//  We stop SceneKit's own render loop and explicitly render at 40/30 fps using a display link.
-//  Touch input stays responsive because the display link runs in .common mode at device max Hz.
 //
 
 import SwiftUI
@@ -27,14 +24,13 @@ struct Scene3DView: UIViewRepresentable {
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
 
-        // IMPORTANT: disable SceneKit's internal render loop; we'll drive it.
+        // Manual pacing: SceneKit draws only when asked.
         view.rendersContinuously = false
         view.isPlaying = false
 
         view.isOpaque = true
         view.backgroundColor = .black
 
-        // Keep your original surface config (unchanged visuals).
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
             metal.wantsExtendedDynamicRangeContent = true
@@ -61,23 +57,20 @@ struct Scene3DView: UIViewRepresentable {
             cam.bloomBlurRadius = 12.0
         }
 
-        // Display link at device max Hz; we will "frame-skip" to achieve 40/30 fps.
         let link = CADisplayLink(target: context.coordinator, selector: #selector(Coordinator.onTick(_:)))
         context.coordinator.link = link
         link.add(to: .main, forMode: .common)
 
-        // Decide our target fps once we have a window/screen.
+        // Decide target FPS once attached to a screen.
         DispatchQueue.main.async {
             let maxHz = view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
             context.coordinator.targetFPS = (maxHz >= 120) ? 40 : 30
             context.coordinator.resetTiming()
         }
-
-        // Initial safety default before window attaches.
+        // Safety default before window exists.
         context.coordinator.targetFPS = 30
         context.coordinator.resetTiming()
 
-        // Pause state
         engine.setPaused(isPaused)
         context.coordinator.paused = isPaused
 
@@ -89,7 +82,6 @@ struct Scene3DView: UIViewRepresentable {
         context.coordinator.engine?.setPaused(isPaused)
         context.coordinator.paused = isPaused
 
-        // If we just gained a window, recompute target fps once.
         if let screenHz = uiView.window?.windowScene?.screen.maximumFramesPerSecond {
             let desired = (screenHz >= 120) ? 40 : 30
             if context.coordinator.targetFPS != desired {
@@ -118,11 +110,10 @@ struct Scene3DView: UIViewRepresentable {
         private var accumulator: CFTimeInterval = 0
         private var interval: CFTimeInterval { 1.0 / CFTimeInterval(max(1, targetFPS)) }
 
-        // Sun diffusion throttle
+        // Ground shade cadence
         private var lastSunUpdate: CFTimeInterval = 0
         private let sunUpdateInterval: CFTimeInterval = 1.0 / 12.0
 
-        // Pause flag mirrors engine pause
         var paused: Bool = false
 
         func resetTiming() {
@@ -135,29 +126,32 @@ struct Scene3DView: UIViewRepresentable {
             guard !paused, let engine, let view else { return }
 
             let ts = link.timestamp
-            if lastTS == 0 { lastTS = ts }  // prime
+            if lastTS == 0 { lastTS = ts }
             let dt = max(0, ts - lastTS)
             lastTS = ts
 
-            accumulator += dt
-            if accumulator < interval {
-                return // skip this vsync; keep input responsive, don't render
+            // Auto-drop when hot (keep visuals, just pace slower).
+            let screenHz = view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
+            let baseCap = (screenHz >= 120) ? 40 : 30
+            let thState = ProcessInfo.processInfo.thermalState
+            let desired = (thState == .serious || thState == .critical) ? 30 : baseCap
+            if desired != targetFPS {
+                targetFPS = desired
+                resetTiming()
             }
 
-            // Consume exactly one frame budget; carry remainder to keep cadence stable.
+            accumulator += dt
+            if accumulator < interval { return }
             accumulator -= interval
 
-            // Drive game + clouds at our paced rate.
             engine.stepUpdateMain(at: ts)
             engine.tickVolumetricClouds(atRenderTime: ts)
 
-            // Keep ground shade alive but cheap.
             if ts - lastSunUpdate >= sunUpdateInterval {
                 engine.updateSunDiffusion()
                 lastSunUpdate = ts
             }
 
-            // Explicit render. SceneKit draws once because rendersContinuously=false.
             view.setNeedsDisplay()
         }
     }
