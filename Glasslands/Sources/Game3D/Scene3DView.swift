@@ -23,26 +23,23 @@ struct Scene3DView: UIViewRepresentable {
         let view = SCNView(frame: .zero)
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
-        view.preferredFramesPerSecond = 60
-        view.rendersContinuously = true
-        view.isPlaying = true
         view.isOpaque = true
-        view.backgroundColor = UIColor.black
+        view.backgroundColor = .black
 
-        if let metal = view.layer as? CAMetalLayer {
-            metal.isOpaque = true
-            metal.wantsExtendedDynamicRangeContent = true
-            metal.colorspace = CGColorSpace(name: CGColorSpace.extendedSRGB)
-            metal.pixelFormat = .bgra10_xr_srgb
-            metal.maximumDrawableCount = 3
-        }
-
+        // Build engine + scene
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
         engine.attach(to: view, recipe: recipe)
 
+        // Keep render loop alive; cool via FPS cap. Do not touch CAMetalLayer here.
+        view.isPlaying = !isPaused
+        view.rendersContinuously = true
+        let mfps = view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
+        view.preferredFramesPerSecond = (mfps >= 120) ? 40 : 30
+
+        // Camera trims (PerformanceGovernor may adjust bloom later)
         if let cam = view.pointOfView?.camera {
-            cam.wantsHDR = true
+            cam.wantsHDR = false
             cam.wantsExposureAdaptation = false
             cam.exposureOffset = -0.25
             cam.averageGray = 0.18
@@ -50,32 +47,34 @@ struct Scene3DView: UIViewRepresentable {
             cam.minimumExposure = -3.0
             cam.maximumExposure = 3.0
             cam.bloomThreshold = 1.15
-            cam.bloomIntensity = 1.25
-            cam.bloomBlurRadius = 12.0
+            cam.bloomIntensity = 0.90
+            cam.bloomBlurRadius = 10.0
         }
 
-        let link = CADisplayLink(target: context.coordinator, selector: #selector(Coordinator.onTick(_:)))
-        if #available(iOS 15.0, *) {
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
-        } else {
-            link.preferredFramesPerSecond = 60
-        }
-        context.coordinator.link = link
-        link.add(to: .main, forMode: .default)
+        // Drive updates via SceneKit render loop
+        let proxy = RendererProxy(engine: engine)
+        view.delegate = proxy
+        context.coordinator.proxy = proxy
 
-        engine.setPaused(isPaused)
-        DispatchQueue.main.async { onReady(engine) }
+        // Thermal/power governance
+        PerformanceGovernor.shared.attach(view: view, engine: engine)
+
+        DispatchQueue.main.async {
+            PerformanceGovernor.shared.applyPolicy()
+            onReady(engine)
+        }
+
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
-        context.coordinator.engine?.setPaused(isPaused)
-        context.coordinator.link?.isPaused = isPaused
+        uiView.isPlaying = !isPaused
+        PerformanceGovernor.shared.applyPolicy()
     }
 
     static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
-        coordinator.link?.invalidate()
-        coordinator.link = nil
+        uiView.delegate = nil
+        coordinator.proxy = nil
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -83,13 +82,6 @@ struct Scene3DView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         var engine: FirstPersonEngine?
-        var link: CADisplayLink?
-
-        @objc func onTick(_ link: CADisplayLink) {
-            let t = link.timestamp
-            engine?.stepUpdateMain(at: t)
-            engine?.tickVolumetricClouds(atRenderTime: t)
-            engine?.updateSunDiffusion()  // ← NEW: drive sunlight/shadow every frame
-        }
+        var proxy: RendererProxy?
     }
 }

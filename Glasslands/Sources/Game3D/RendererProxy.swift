@@ -9,30 +9,30 @@ import Foundation
 import SceneKit
 
 /// Receives SceneKit callbacks on the render thread, then schedules the real
-/// update on the MainActor without touching main-isolated state here.
+/// update on the MainActor. Sun diffusion (cloud shadow/gobo) is *disabled*
+/// keeps the render loop responsive while we debug the stall.
 final class RendererProxy: NSObject, SCNSceneRendererDelegate {
 
-    // We avoid storing/reading a @MainActor object here.
-    // Instead we store a @Sendable tick closure built on the main thread that hops to MainActor.
-    private let tick: @Sendable (TimeInterval) -> Void
+    private weak var engineRef: FirstPersonEngine?
 
     init(engine: FirstPersonEngine) {
-        // Build the closure on main, capturing the engine weakly and hopping to MainActor inside.
-        self.tick = { [weak engine] t in
-            Task { @MainActor in
-                engine?.stepUpdateMain(at: t)
-                // Keep volumetrics driven by a stable render-time clock.
-                engine?.tickVolumetricClouds(atRenderTime: t)
-                // NEW: drive sun diffusion (light + shadows + halo) from cloud occlusion every frame.
-                engine?.updateSunDiffusion()
-            }
-        }
+        self.engineRef = engine
         super.init()
     }
 
-    // Non-isolated so SceneKit can call this from its render queue without assertions.
-    // No main-isolated state is touched directly here.
+    // SceneKit may call this from its render queue; hop to MainActor for engine work.
     nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        tick(time)
+        Task { @MainActor in
+            guard let engine = self.engineRef else { return }
+
+            // Main engine tick
+            engine.stepUpdateMain(at: time)
+
+            // Drive cloud uniforms/advection (cheap)
+            engine.tickVolumetricClouds(atRenderTime: time)
+
+            // NOTE: sun diffusion (cloud shadow/gobo) intentionally disabled to stop hangs
+            // engine.updateSunDiffusion()
+        }
     }
 }
