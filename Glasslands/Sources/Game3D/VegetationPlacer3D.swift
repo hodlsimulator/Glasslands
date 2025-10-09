@@ -4,13 +4,14 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  Places trees with per-tree variation.
-//  Trees now cast reliable shadows: castsShadow set on root and every geometry child.
+//  Places *3D* trees using the TreeLibrary3D prototypes (no sprites).
+//  Reduced density, cheap shadows, shared geometry, and LOD cull.
 //
 
 import SceneKit
 import GameplayKit
 import UIKit
+import simd
 
 struct VegetationPlacer3D {
 
@@ -23,21 +24,22 @@ struct VegetationPlacer3D {
     ) -> [SCNNode] {
         let originTile = IVec2(ci.x * cfg.tilesX, ci.y * cfg.tilesZ)
 
-        // Deterministic per-chunk seed mixed with biome seed
+        // Deterministic per-chunk seed mixed with the biome seed
         let ux = UInt64(bitPattern: Int64(ci.x))
         let uy = UInt64(bitPattern: Int64(ci.y))
         let seed = recipe.seed64 ^ (ux &* 0x9E37_79B9_7F4A_7C15) ^ (uy &* 0xBF58_476D_1CE4_E5B9)
 
-        let rng = GKMersenneTwisterRandomSource(seed: seed)
-        var ra = RandomAdaptor(rng)
+        let src = GKMersenneTwisterRandomSource(seed: seed)
+        var rng = RandomAdaptor(src)
 
         var nodes: [SCNNode] = []
-        nodes.reserveCapacity(96)
+        nodes.reserveCapacity(64)
 
         let palette = AppColours.uiColors(from: recipe.paletteHex)
+        TreeLibrary3D.ensureWarm(palette: palette)
 
-        // Primary sampling stride (tiles). Lower = denser before probability gate.
-        let step = 4
+        // Primary sampling stride (tiles). Higher = fewer candidates.
+        let step = 6
 
         // Pass 1 — individual trees
         for tz in stride(from: 0, to: cfg.tilesZ, by: step) {
@@ -54,192 +56,63 @@ struct VegetationPlacer3D {
 
                 // Hard gates: avoid beaches/water, steep slopes, and river beds
                 if h < 0.34 { continue }
-                if slope > 0.18 { continue }
+                if slope > 0.16 { continue }
                 if r > 0.50 { continue }
 
-                // Foresty bias in mid-moist, mid-height grasslands
+                // Forest bias in mid-moist, mid-height regions (lowered base chance)
                 let isForest = (h < 0.66) && (m > 0.52) && (slope < 0.12)
-                let baseChance: Double = isForest ? 0.34 : 0.12
-                if Double.random(in: 0...1, using: &ra) > baseChance { continue }
+                let baseChance: Double = isForest ? 0.22 : 0.08
+                if Double.random(in: 0...1, using: &rng) > baseChance { continue }
 
-                // Jitter within the step cell
-                let jx = (rng.nextUniform() - 0.5) * 0.9
-                let jz = (rng.nextUniform() - 0.5) * 0.9
+                // Jitter within the sampling cell
+                let jx = Float.random(in: -0.45...0.45, using: &rng)
+                let jz = Float.random(in: -0.45...0.45, using: &rng)
 
-                let wx = (Float(tileX) + Float(jx)) * cfg.tileSize
-                let wz = (Float(tileZ) + Float(jz)) * cfg.tileSize
+                let wx = (Float(tileX) + jx) * cfg.tileSize
+                let wz = (Float(tileZ) + jz) * cfg.tileSize
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
 
-                // Build a conifer tree (low-poly, crisp silhouette)
-                let (tree, hitRadius, _) = makeTreeNode(palette: palette, rng: rng)
-
+                let (tree, hitR) = TreeLibrary3D.instance(using: &rng)
                 tree.position = SCNVector3(wx, wy, wz)
-                tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
+                tree.setValue(CGFloat(hitR), forKey: "hitRadius")
 
-                // Ensure the root and all geometry children cast
-                tree.castsShadow = true
-                tree.enumerateChildNodes { child, _ in child.castsShadow = true }
-
-                applyLOD(to: tree)
                 nodes.append(tree)
             }
         }
 
-        // Pass 2 — occasional groves (small clusters for variety)
-        let groveAttempts = 2
+        // Pass 2 — small groves for variety (also reduced)
+        let groveAttempts = 1
         for _ in 0..<groveAttempts {
-            let cx = originTile.x + Int.random(in: 0..<cfg.tilesX, using: &ra)
-            let cz = originTile.y + Int.random(in: 0..<cfg.tilesZ, using: &ra)
+            let cx = originTile.x + Int.random(in: 0..<cfg.tilesX, using: &rng)
+            let cz = originTile.y + Int.random(in: 0..<cfg.tilesZ, using: &rng)
 
             let h = noise.sampleHeight(Double(cx), Double(cz)) / max(0.0001, recipe.height.amplitude)
             let m = noise.sampleMoisture(Double(cx), Double(cz)) / max(0.0001, recipe.moisture.amplitude)
             let slope = noise.slope(Double(cx), Double(cz))
             let r = noise.riverMask(Double(cx), Double(cz))
 
-            // Prefer nice spots for clumps
             guard h >= 0.42, h <= 0.78, m >= 0.48, m <= 0.80, slope < 0.10, r < 0.42 else { continue }
-            guard Double.random(in: 0...1, using: &ra) < 0.40 else { continue }
+            guard Double.random(in: 0...1, using: &rng) < 0.35 else { continue }
 
-            let count = Int.random(in: 3...7, using: &ra)
+            let count = Int.random(in: 3...4, using: &rng)
             let baseWX = Float(cx) * cfg.tileSize
             let baseWZ = Float(cz) * cfg.tileSize
 
             for _ in 0..<count {
-                let offR = Float.random(in: 0.0...4.5, using: &ra) * cfg.tileSize
-                let offA = Float.random(in: 0...(2 * .pi), using: &ra)
+                let offR = Float.random(in: 0.0...3.5, using: &rng) * cfg.tileSize
+                let offA = Float.random(in: 0...(2 * .pi), using: &rng)
                 let wx = baseWX + cos(offA) * offR
                 let wz = baseWZ + sin(offA) * offR
                 let wy = TerrainMath.heightWorld(x: wx, z: wz, cfg: cfg, noise: noise)
 
-                let (tree, hitRadius, _) = makeTreeNode(palette: palette, rng: rng)
+                let (tree, hitR) = TreeLibrary3D.instance(using: &rng)
                 tree.position = SCNVector3(wx, wy, wz)
-                tree.setValue(CGFloat(hitRadius), forKey: "hitRadius")
+                tree.setValue(CGFloat(hitR), forKey: "hitRadius")
 
-                tree.castsShadow = true
-                tree.enumerateChildNodes { child, _ in child.castsShadow = true }
-
-                applyLOD(to: tree)
                 nodes.append(tree)
             }
         }
 
         return nodes
-    }
-
-    // MARK: - Varied low-poly conifer with crisp, two-tier silhouette
-    private static func makeTreeNode(
-        palette: [UIColor],
-        rng: GKMersenneTwisterRandomSource
-    ) -> (SCNNode, Float, CGFloat) {
-
-        var r = RandomAdaptor(rng)
-
-        let tall = rng.nextUniform() > 0.35
-        let trunkH: CGFloat = tall ? CGFloat.random(in: 1.00...1.55, using: &r)
-                                   : CGFloat.random(in: 0.75...1.15, using: &r)
-        let trunkR: CGFloat = tall ? CGFloat.random(in: 0.06...0.10, using: &r)
-                                   : CGFloat.random(in: 0.05...0.08, using: &r)
-
-        let canopyH1: CGFloat = tall ? CGFloat.random(in: 1.50...2.10, using: &r)
-                                     : CGFloat.random(in: 1.10...1.60, using: &r)
-        let canopyR1: CGFloat = tall ? CGFloat.random(in: 0.55...0.80, using: &r)
-                                     : CGFloat.random(in: 0.45...0.70, using: &r)
-        let canopyTopR1: CGFloat = CGFloat.random(in: 0.02...0.05, using: &r)  // sharper tip
-
-        let twoStage = rng.nextUniform() > 0.55
-        let canopyH2: CGFloat = twoStage ? canopyH1 * CGFloat.random(in: 0.55...0.75, using: &r) : 0
-        let canopyR2: CGFloat = twoStage ? canopyR1 * CGFloat.random(in: 0.75...0.95, using: &r) : 0
-        let canopyTopR2: CGFloat = twoStage ? canopyTopR1 * CGFloat.random(in: 0.35...0.60, using: &r) : 0
-
-        let barkBase = palette.indices.contains(4) ? palette[4] : .brown
-        let leafBase = palette.indices.contains(2) ? palette[2] : .systemGreen
-
-        func adjust(_ c: UIColor,
-                    dH: ClosedRange<CGFloat>,
-                    dS: ClosedRange<CGFloat>,
-                    dB: ClosedRange<CGFloat>) -> UIColor {
-            var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
-            c.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-            h = (h + CGFloat.random(in: dH, using: &r)).truncatingRemainder(dividingBy: 1); if h < 0 { h += 1 }
-            s = max(0, min(1, s + CGFloat.random(in: dS, using: &r)))
-            b = max(0, min(1, b + CGFloat.random(in: dB, using: &r)))
-            return UIColor(hue: h, saturation: s, brightness: b, alpha: a)
-        }
-
-        let bark = adjust(barkBase, dH: -0.02...0.02, dS: -0.08...0.08, dB: -0.05...0.05)
-        let leaf = adjust(leafBase, dH: -0.03...0.03, dS: -0.10...0.10, dB: -0.06...0.06)
-
-        // Trunk
-        let trunk = SCNCylinder(radius: trunkR, height: trunkH)
-        let trunkMat = SCNMaterial()
-        trunkMat.lightingModel = .physicallyBased
-        trunkMat.diffuse.contents = bark
-        trunkMat.roughness.contents = 0.95
-        trunkMat.metalness.contents = 0.0
-        trunk.materials = [trunkMat]
-
-        // Lower canopy
-        let canopy1 = SCNCone(topRadius: canopyTopR1, bottomRadius: canopyR1, height: canopyH1)
-        canopy1.radialSegmentCount = 18
-        let leafMat = SCNMaterial()
-        leafMat.lightingModel = .physicallyBased
-        leafMat.diffuse.contents = leaf
-        leafMat.roughness.contents = 0.95
-        leafMat.metalness.contents = 0.0
-        canopy1.materials = [leafMat]
-
-        // Optional upper canopy
-        let canopy2Geom: SCNGeometry? = twoStage ? {
-            let g = SCNCone(topRadius: canopyTopR2, bottomRadius: canopyR2, height: canopyH2)
-            g.radialSegmentCount = 16
-            g.materials = [leafMat]
-            return g
-        }() : nil
-
-        let node = SCNNode()
-
-        let trunkNode = SCNNode(geometry: trunk)
-        trunkNode.position = SCNVector3(0, trunkH / 2.0, 0)
-        trunkNode.castsShadow = true
-        node.addChildNode(trunkNode)
-
-        // Slight gap so the trunk’s shadow hits the ground before leaves
-        let gap1: CGFloat = 0.10
-        let canopyNode1 = SCNNode(geometry: canopy1)
-        canopyNode1.position = SCNVector3(0, trunkH + gap1 + canopyH1 * 0.5, 0)
-        canopyNode1.castsShadow = true
-        node.addChildNode(canopyNode1)
-
-        if let g2 = canopy2Geom {
-            let gap2: CGFloat = max(0.05, min(0.10, canopyH2 * 0.08))
-            let cn2 = SCNNode(geometry: g2)
-            cn2.position = SCNVector3(0, trunkH + gap1 + canopyH1 + gap2 + canopyH2 * 0.5, 0)
-            cn2.castsShadow = true
-            node.addChildNode(cn2)
-        }
-
-        node.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &r)
-        node.eulerAngles.z = Float.random(in: -0.04...0.04, using: &r)
-
-        let treeHeight = trunkH + gap1 + canopyH1 + (canopy2Geom == nil ? 0 : 0.0) + canopyH2
-        let hitRadius = Float(max(canopyR1 * 0.65, trunkR * 1.6))
-
-        node.categoryBitMask = 0x00000002
-        node.castsShadow = true
-        node.enumerateChildNodes { c, _ in
-            c.categoryBitMask |= 0x00000002
-            c.castsShadow = true
-        }
-
-        return (node, hitRadius, treeHeight)
-    }
-
-    private static func applyLOD(to tree: SCNNode) {
-        let far: CGFloat = 120
-        for child in tree.childNodes {
-            if let g = child.geometry {
-                g.levelsOfDetail = [SCNLevelOfDetail(geometry: nil, worldSpaceDistance: far)]
-            }
-        }
     }
 }
