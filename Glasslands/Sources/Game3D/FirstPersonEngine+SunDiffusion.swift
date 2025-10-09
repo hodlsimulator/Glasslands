@@ -15,7 +15,7 @@ import UIKit
 
 extension FirstPersonEngine {
 
-    // MARK: Sun diffusion (key light + gobo control)
+    // MARK: Sun diffusion (key light + terrain-only cloud shade)
 
     @MainActor
     func updateSunDiffusion() {
@@ -37,7 +37,8 @@ extension FirstPersonEngine {
         sun.shadowSampleCount = max(1, Int(round(6 + D * 8))) // 6…14
         sun.shadowColor = UIColor(white: 0.0, alpha: 0.60)
 
-        ensureCloudShadowProjector()
+        // Terrain-only cloud shade path (no gobo → no whole-world wash).
+        ensureCloudShadowResources()
         updateCloudShadowMap()
 
         if
@@ -54,18 +55,18 @@ extension FirstPersonEngine {
         }
     }
 
-    // MARK: Cloud-shadow projector (compute → light gobo)
+    // MARK: Cloud-shadow resources (compute → shared SCNMaterialProperty)
 
     @MainActor
-    private func ensureCloudShadowProjector() {
+    private func ensureCloudShadowResources() {
         guard let view = scnView, let device = view.device, let sun = sunLightNode?.light else { return }
 
-        // Queue
+        // Compute queue
         if (sunLightNode?.value(forKey: "GL_shadowQ") as? MTLCommandQueue) == nil {
             sunLightNode?.setValue(device.makeCommandQueue(), forKey: "GL_shadowQ")
         }
 
-        // Pipeline
+        // Compute pipeline
         if (sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState) == nil {
             guard
                 let lib  = try? device.makeDefaultLibrary(bundle: .main),
@@ -75,7 +76,7 @@ extension FirstPersonEngine {
             sunLightNode?.setValue(pipe, forKey: "GL_shadowPipe")
         }
 
-        // Texture (single persistent texture; fill white once so first frame is neutral)
+        // Shadow texture (persistent)
         if (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) == nil {
             let W = 256, H = 256
             let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -87,6 +88,7 @@ extension FirstPersonEngine {
             guard let tex = device.makeTexture(descriptor: desc) else { return }
             sunLightNode?.setValue(tex, forKey: "GL_shadowTex")
 
+            // Fill white so the first frame is neutral.
             let white = [UInt8](repeating: 0xFF, count: W * H * 4)
             white.withUnsafeBytes { ptr in
                 tex.replace(
@@ -96,36 +98,37 @@ extension FirstPersonEngine {
                     bytesPerRow: W * 4
                 )
             }
+
+            // Shared SCNMaterialProperty bound to this texture for all ground materials.
+            let prop = SCNMaterialProperty(contents: tex)
+            prop.minificationFilter = .linear
+            prop.magnificationFilter = .linear
+            prop.mipFilter = .linear
+            sunLightNode?.setValue(prop, forKey: "GL_shadowTexProp")
         }
 
-        // Ensure a gobo exists and point it at the texture.
-        _ = sun.gobo // lazily creates the property object if needed
-        if let tex = (sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture) {
-            sun.gobo?.contents = tex
-        }
-        sun.gobo?.intensity = 1.0
-        sun.gobo?.wrapS = .clamp
-        sun.gobo?.wrapT = .clamp
-        sun.gobo?.minificationFilter = .linear
-        sun.gobo?.magnificationFilter = .linear
+        // Make sure the light’s gobo never contributes (terrain-only path).
+        _ = sun.gobo
+        sun.gobo?.intensity = 0.0
     }
+
+    // MARK: Map update + uniform push (cheap)
 
     @MainActor
     private func updateCloudShadowMap() {
         guard
             let pipe = sunLightNode?.value(forKey: "GL_shadowPipe") as? MTLComputePipelineState,
             let q    = sunLightNode?.value(forKey: "GL_shadowQ")    as? MTLCommandQueue,
-            let out  = sunLightNode?.value(forKey: "GL_shadowTex")  as? MTLTexture,
-            let sun  = sunLightNode?.light
+            let out  = sunLightNode?.value(forKey: "GL_shadowTex")  as? MTLTexture
         else { return }
 
-        // Keep the gobo active even on throttled frames.
-        sun.gobo?.intensity = 1.0
-
-        // Throttle to ~5 Hz (clouds are slow); keeps cost negligible.
+        // Throttle to ~5 Hz; clouds are slow and this keeps it cheap.
         let tNow = CACurrentMediaTime()
         let tPrev = (sunLightNode?.value(forKey: "GL_shadowT") as? CFTimeInterval) ?? 0
-        if tNow - tPrev < 0.20 { return }
+        if tNow - tPrev < 0.20 {
+            pushShadowUniformsWithoutCompute()
+            return
+        }
         sunLightNode?.setValue(tNow, forKey: "GL_shadowT")
 
         // World-anchored domain near the camera; snapped to avoid texture swimming.
@@ -137,9 +140,7 @@ extension FirstPersonEngine {
             round(camPos.z / grid) * grid
         )
 
-        // Match the light's orthographic projector to the map's half-size.
         let halfSize: Float = 560.0
-        sun.orthographicScale = CGFloat(halfSize)
 
         // ---- Uniforms (must match CloudShadowMap.metal) ----
         struct CloudUniforms {
@@ -160,8 +161,8 @@ extension FirstPersonEngine {
             sunDirWorld: simd_float4(sunDirWorld.x, sunDirWorld.y, sunDirWorld.z, 0),
             sunTint:     simd_float4(1, 1, 1, 1),
             params0:     simd_float4(Float(tNow), cloudWind.x, cloudWind.y, 400.0),
-            // Slightly stronger density for clearer ground shade:
-            params1:     simd_float4(1400.0, 0.44, 3.6, 0.0),
+            // Stronger for obvious ground shade
+            params1:     simd_float4(1400.0, 0.44, 4.2, 0.0),
             params2:     simd_float4(0, 0, 0.10, 0.75),
             params3:     simd_float4(cloudDomainOffset.x, cloudDomainOffset.y, 0.0, 0.0)
         )
@@ -192,12 +193,48 @@ extension FirstPersonEngine {
         enc.endEncoding()
         cmd.commit()
 
-        // Nothing else to bind per material — the light projects the map scene-wide.
+        // Push to all registered ground materials.
+        pushShadowUniforms(anchor: anchor, halfSize: halfSize, texture: out)
     }
 
-    // MARK: - Helpers
+    @MainActor
+    private func pushShadowUniformsWithoutCompute() {
+        guard let out = sunLightNode?.value(forKey: "GL_shadowTex") as? MTLTexture else { return }
+        let pov = (scnView?.pointOfView ?? camNode).presentation
+        let camPos = pov.simdWorldPosition
+        let grid: Float = 256.0
+        let anchor = simd_float2(
+            round(camPos.x / grid) * grid,
+            round(camPos.z / grid) * grid
+        )
+        let halfSize: Float = 560.0
+        pushShadowUniforms(anchor: anchor, halfSize: halfSize, texture: out)
+    }
 
-    // Billboard-cover estimator used for sun halo / penumbra feel.
+    @MainActor
+    private func pushShadowUniforms(anchor: simd_float2, halfSize: Float, texture: MTLTexture) {
+        let prop = (sunLightNode?.value(forKey: "GL_shadowTexProp") as? SCNMaterialProperty)
+            ?? {
+                let p = SCNMaterialProperty(contents: texture)
+                p.minificationFilter = .linear
+                p.magnificationFilter = .linear
+                p.mipFilter = .linear
+                sunLightNode?.setValue(p, forKey: "GL_shadowTexProp")
+                return p
+            }()
+
+        prop.contents = texture // keep same object, update underlying texture
+        let params = SCNVector3(anchor.x, anchor.y, halfSize)
+
+        for m in GroundShadowMaterials.shared.all() {
+            // Only terrain materials have the modifier; safe to set unconditionally.
+            m.setValue(prop,   forKey: "gl_shadowTex")
+            m.setValue(params, forKey: "gl_shadowParams")
+        }
+    }
+
+    // MARK: - Helpers (unchanged)
+
     private func measureSunCover() -> (peak: Float, union: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return (0.0, 0.0)

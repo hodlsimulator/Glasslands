@@ -7,12 +7,6 @@
 //  Uses prebuilt wrap-aware mipmapped MTLTextures to eliminate tiling seam lines.
 //
 
-//  TerrainChunkNode.swift
-//  Glasslands
-//
-//  Uses prebuilt wrap-aware mipmapped MTLTextures to eliminate tiling seam lines.
-//
-
 import SceneKit
 import simd
 import UIKit
@@ -104,7 +98,7 @@ enum TerrainChunkNode {
         let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
         mat.diffuse.contents = albedoMTL
 
-        // Subtle darkening so sun highlights don’t blow out.
+        // Darken a touch so shade reads strongly.
         let groundStops: CGFloat = -2.0
         mat.diffuse.intensity = pow(2.0, groundStops)
 
@@ -120,6 +114,9 @@ enum TerrainChunkNode {
         let repeatsY = CGFloat(data.tilesZ) * repeatsPerTile
         let scaleT = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
         mat.diffuse.contentsTransform = scaleT
+
+        // Attach cloud-shadow surface shader (terrain-only).
+        GroundShadowShader.apply(to: mat)
 
         geom.materials = [mat]
         node.geometry = geom
