@@ -9,32 +9,29 @@
 
 #include <metal_stdlib>
 using namespace metal;
+#include <simd/simd.h>
 #include <SceneKit/scn_metal>
 
-struct VSIn {
-    float3 position [[attribute(SCNVertexSemanticPosition)]];
-};
 
-struct VSOut {
-    float4 position [[position]];
-    float2 ndcXY;
-};
+// Binder-free impostor shader (no scene-side uCloudsGL)
+struct VSIn { float3 position [[attribute(SCNVertexSemanticPosition)]]; };
+struct VSOut { float4 position [[position]]; float2 ndcXY; };
 
 vertex VSOut cloud_impostor_vertex(
     VSIn vin [[stage_in]],
     constant SCNSceneBuffer& frame [[buffer(0)]],
-    constant float4x4& uModel       [[buffer(1)]]
-){
+    constant float4x4& uModel [[buffer(1)]])
+{
     VSOut o;
     float4 world = uModel * float4(vin.position, 1.0);
     float4 view  = frame.viewTransform * world;
     float4 clip  = frame.projectionTransform * view;
     o.position = clip;
-    o.ndcXY    = clip.xy / max(1e-6, clip.w);
+    o.ndcXY   = clip.xy / max(1e-6, clip.w);
     return o;
 }
 
-// ---- helpers (small, fast) ----
+// ---- helpers (small, fast)
 inline float h1(float n){ return fract(sin(n) * 43758.5453123f); }
 inline float h12(float2 p){ return fract(sin(dot(p, float2(127.1,311.7))) * 43758.5453123f); }
 
@@ -56,7 +53,8 @@ inline float noise3(float3 x) {
 inline float fbm2(float3 p){
     float a = 0.0, w = 0.5;
     a += noise3(p) * w;
-    p = p * 2.02 + 19.19; w *= 0.5;
+    p = p * 2.02 + 19.19;
+    w *= 0.5;
     a += noise3(p) * w;
     return a;
 }
@@ -64,8 +62,7 @@ inline float fbm2(float3 p){
 inline float worley2(float2 x){
     float2 i = floor(x), f = x - i;
     float d = 1e9;
-    for (int y=-1; y<=1; ++y)
-    for (int xk=-1; xk<=1; ++xk){
+    for (int y=-1; y<=1; ++y) for (int xk=-1; xk<=1; ++xk){
         float2 g = float2(xk,y);
         float2 o = float2(h12(i+g), h12(i+g+19.7));
         float2 r = g + o - f;
@@ -76,10 +73,9 @@ inline float worley2(float2 x){
 
 inline float puffFBM2(float2 x){
     float a = 0.0, w = 0.6, s = 1.0;
-    float v = 1.0 - clamp(worley2(x*s), 0.0, 1.0);
-    a += v*w; s *= 2.03; w *= 0.55;
-    v = 1.0 - clamp(worley2(x*s), 0.0, 1.0);
-    a += v*w;
+    float v = 1.0 - clamp(worley2(x*s), 0.0, 1.0); a += v*w;
+    s *= 2.03; w *= 0.55;
+    v = 1.0 - clamp(worley2(x*s), 0.0, 1.0); a += v*w;
     return clamp(a, 0.0, 1.0);
 }
 
@@ -90,12 +86,12 @@ inline float hProfile(float y, float b, float t){
     return pow(clamp(up*dn, 0.0, 1.0), 0.80);
 }
 
-// Binder-free constants (tuned)
+// ---- tuned constants (cooler)
 constant float kBaseY          = 400.0;
 constant float kTopY           = 1400.0;
 constant float kCoverage       = 0.44;
 constant float kDensityMul     = 1.10;
-constant float kStepMul        = 0.80;     // 0.35..1.25
+constant float kStepMul        = 0.60;   // ↓ from 0.80
 constant float kDetailMul      = 0.90;
 constant float kHorizonLift    = 0.10;
 constant float kPuffScale      = 0.0046;
@@ -109,29 +105,26 @@ inline float densityAtAnchored(float3 wp, float2 anchorXZ)
 {
     float2 xzRel = (wp.xz - anchorXZ) + kDomainOffset;
     float ca = cos(kDomainRotate), sa = sin(kDomainRotate);
-    float2 xzr = float2(xzRel.x*ca - xzRel.y*sa,
-                        xzRel.x*sa + xzRel.y*ca);
+    float2 xzr = float2(xzRel.x*ca - xzRel.y*sa, xzRel.x*sa + xzRel.y*ca);
 
     float3 P0 = float3(xzr.x, wp.y, xzr.y) * 0.00110;
     float base = fbm2(P0 * float3(1.0, 0.35, 1.0));
-
     float yy = wp.y * 0.002 + 5.37;
     float puffs = puffFBM2(xzr * max(1e-4, kPuffScale) + float2(yy, -yy*0.7));
-
     float3 P1 = float3(xzr.x, wp.y*1.6, xzr.y) * 0.0040 + float3(2.7,0.0,-5.1);
     float erode = fbm2(P1);
 
     float shape = base + kPuffStrength*(puffs - 0.5) - (1.0 - erode) * (0.30 * kDetailMul);
+
     float coverInv = 1.0 - kCoverage;
     float thLo = clamp(coverInv - 0.20, 0.0, 1.0);
     float thHi = clamp(coverInv + 0.28, 0.0, 1.2);
-    float t    = smoothstep(thLo, thHi, shape);
-
+    float t = smoothstep(thLo, thHi, shape);
     float dens = pow(clamp(t, 0.0, 1.0), 0.85);
+
     float macro = 1.0 - clamp(worley2(xzr * max(1e-6, kMacroScale)), 0.0, 1.0);
     float macroMask = smoothstep(kMacroThreshold - 0.10, kMacroThreshold + 0.10, macro);
     dens *= macroMask;
-
     dens *= hProfile(wp.y + kHorizonLift*120.0, kBaseY, kTopY);
     return dens;
 }
@@ -139,9 +132,9 @@ inline float densityAtAnchored(float3 wp, float2 anchorXZ)
 fragment half4 cloud_impostor_fragment(
     VSOut in [[stage_in]],
     constant SCNSceneBuffer& frame [[buffer(0)]],
-    constant float4x4& uModel       [[buffer(1)]],
-    constant float2& uHalfSize      [[buffer(2)]]
-){
+    constant float4x4& uModel [[buffer(1)]],
+    constant float2&   uHalfSize [[buffer(2)]])
+{
     // Camera → world ray
     float4 camW4 = frame.inverseViewTransform * float4(0,0,0,1);
     float3 camPos = camW4.xyz / max(1e-6, camW4.w);
@@ -152,9 +145,9 @@ fragment half4 cloud_impostor_fragment(
     float3 V    = normalize((frame.inverseViewTransform * float4(Vvs, 0)).xyz);
 
     // Plane basis
-    float3 ux   = normalize(uModel[0].xyz);
-    float3 vy   = normalize(uModel[1].xyz);
-    float3 nrm  = normalize(cross(ux, vy));
+    float3 ux = normalize(uModel[0].xyz);
+    float3 vy = normalize(uModel[1].xyz);
+    float3 nrm = normalize(cross(ux, vy));
     float3 origin = (uModel * float4(0,0,0,1)).xyz;
     float2 anchorXZ = origin.xz;
 
@@ -174,25 +167,28 @@ fragment half4 cloud_impostor_fragment(
     float Lm   = tExt - tEnt;
     if (Lm <= 1e-5) discard_fragment();
 
-    float distLOD  = clamp(Lm / 2500.0, 0.0, 1.2);
-    int   baseSteps = int(round(mix(8.0, 16.0, 1.0 - distLOD*0.7)));
-    int   numSteps  = clamp(int(round(float(baseSteps) * kStepMul)), 6, 20);
+    // Distance LOD → fewer steps when long path; cooler defaults overall
+    float distLOD   = clamp(Lm / 2500.0, 0.0, 1.2);
+    int   baseSteps = int(round(mix(6.0, 12.0, 1.0 - distLOD*0.7))); // ↓
+    int   numSteps  = clamp(int(round(float(baseSteps) * kStepMul)), 5, 14); // ↓
     float dt        = Lm / float(numSteps);
 
+    // Per-pixel jitter to break banding
     float j = fract(sin(dot(in.ndcXY, float2(12.9898, 78.233))) * 43758.5453);
     float t = tEnt + (0.25 + 0.5*j) * dt;
 
     half T = half(1.0);
-    const half rhoGate = half(0.0025);
-    for (int i=0; i < numSteps && T > half(0.004); ++i)
-    {
+    const half rhoGate = half(0.0030); // slightly higher gate = more skipping
+
+    for (int i=0; i < numSteps && T > half(0.004); ++i) {
         float3 sp = camPos + V * t;
 
-        float3 d = sp - origin;
+        // Elliptical soft edge to cheaply trim work near billboard borders
+        float3 d  = sp - origin;
         float lpX = dot(d, ux);
         float lpY = dot(d, vy);
-        float er = length(float2(lpX/worldHalfX, lpY/worldHalfY));
-        float edgeMask = smoothstep(1.0, 0.95, 1.0 - er);
+        float er  = length(float2(lpX/worldHalfX, lpY/worldHalfY));
+        float edgeMask = smoothstep(1.0, 0.94, 1.0 - er);
 
         half rho = half(densityAtAnchored(sp, anchorXZ) * edgeMask);
         if (rho < rhoGate) { t += dt; continue; }
@@ -200,10 +196,11 @@ fragment half4 cloud_impostor_fragment(
         half sigma = half(kDensityMul * 0.032);
         half aStep = half(1.0) - half(exp(-float(rho) * float(sigma) * dt));
         T *= (half(1.0) - aStep);
+
         t += dt;
     }
 
     half alpha = half(clamp(1.0 - float(T), 0.0, 1.0));
-    half3 rgb  = half3(1.0) * alpha;
+    half3 rgb  = half3(1.0) * alpha; // premultiplied WHITE
     return half4(rgb, alpha);
 }

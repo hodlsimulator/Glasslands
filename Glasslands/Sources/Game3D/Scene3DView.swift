@@ -30,6 +30,8 @@ struct Scene3DView: UIViewRepresentable {
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
         engine.attach(to: view, recipe: recipe)
+        
+        engine.applyCoolerSurfaceDefaults()
 
         // Keep render loop alive; cool via FPS cap. Do not touch CAMetalLayer here.
         view.isPlaying = !isPaused
