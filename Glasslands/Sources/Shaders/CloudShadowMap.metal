@@ -159,7 +159,7 @@ kernel void cloudShadowKernel(
     float shadow = 0.25f + 0.75f * pow(T, 0.90f);
 
     float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));
-    float fade = smoothstep(0.00f, 0.02f, edge);
+    float fade = smoothstep(0.00f, 0.12f, edge);  // wider soft edge → no square
     shadow = mix(1.0f, shadow, fade);
 
     outShadow.write(float4(shadow, shadow, shadow, 1.0), gid);

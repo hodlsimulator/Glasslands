@@ -61,6 +61,13 @@ extension FirstPersonEngine {
         yawNode.addChildNode(pitchNode)
         scene.rootNode.addChildNode(yawNode)
         scnView?.pointOfView = camNode
+        
+        // Keep the camera rig out of all light/shadow interaction.
+        let playerCategory = 0x0000_0800
+        [yawNode, pitchNode, camNode].forEach { n in
+            n.castsShadow = false
+            n.categoryBitMask = playerCategory
+        }
 
         addSafetyGround(at: yawNode.simdPosition)
 
