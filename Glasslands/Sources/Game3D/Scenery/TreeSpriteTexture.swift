@@ -4,107 +4,106 @@
 //
 //  Created by . . on 10/9/25.
 //
-//  Procedural tree texture (PNG with alpha). Used only as a fallback.
+//  Lightweight helpers to load and prepare canopy sprites for 3D trees.
+//  Uses Assets.xcassets tree images when available; otherwise falls back
+//  to a procedural leaf-blob image. Crops out the lower trunk portion of
+//  the 2D sprite so the 3D cylinder trunk isn’t duplicated.
 //
 
 import UIKit
-import CoreGraphics
+import GameplayKit
 
 enum TreeSpriteTexture {
-    @MainActor
-    static func make(
-        size: CGSize = CGSize(width: 320, height: 480),
-        leaf: UIColor,
-        trunk: UIColor,
-        seed: UInt32
-    ) -> UIImage {
-        let W = max(64, Int(size.width))
-        let H = max(96, Int(size.height))
+    enum Kind { case broadleaf, conifer }
+
+    static func canopyImage(for kind: Kind,
+                            palette: [UIColor],
+                            rng: inout RandomAdaptor) -> UIImage
+    {
+        let broadleafNames = [
+            "glasslands_tree_broadleaf_A",
+            "glasslands_tree_broadleaf_B",
+            "glasslands_tree_acacia_A",
+        ]
+        let coniferNames = [
+            "glasslands_tree_conifer_A",
+            "glasslands_tree_conifer_B",
+            "glasslands_tree_winter_A",
+        ]
+        let names = (kind == .broadleaf) ? broadleafNames : coniferNames
+        let name  = names[Int.random(in: 0..<names.count, using: &rng)]
+
+        // Robust lookup from the main bundle (asset catalog-backed).
+        let loaded: UIImage? =
+            UIImage(named: name, in: .main, compatibleWith: nil)
+            ?? UIImage(named: name)
+
+        if let img = loaded {
+            // Remove the bottom slice so the 3D cylinder trunk isn’t duplicated.
+            // Broadleaf assets include a sizeable 2D trunk; conifers don’t.
+            let keepTop: CGFloat = (kind == .broadleaf) ? 0.70 : 0.98
+            return cropTopPortion(of: img, keepTopFraction: keepTop)
+        }
+
+        // Procedural fallback – colour comes from the palette.
+        let leafBase = palette.indices.contains(2) ? palette[2] :
+                       UIColor(red: 0.28, green: 0.60, blue: 0.34, alpha: 1)
+        return proceduralCanopyBlob(diameter: 384, tint: leafBase, rng: &rng)
+    }
+
+    private static func proceduralCanopyBlob(diameter: Int,
+                                             tint: UIColor,
+                                             rng: inout RandomAdaptor) -> UIImage
+    {
+        let d = max(32, diameter)
+        let size = CGSize(width: d, height: d)
+        let r = min(size.width, size.height) * 0.5
 
         let fmt = UIGraphicsImageRendererFormat.default()
         fmt.opaque = false
         fmt.scale = 1
 
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: W, height: H), format: fmt)
+        let renderer = UIGraphicsImageRenderer(size: size, format: fmt)
         return renderer.image { ctx in
             let cg = ctx.cgContext
-            cg.setBlendMode(.normal)
-
-            var s = seed == 0 ? 1 : Int(seed)
-            @inline(__always) func frand() -> CGFloat {
-                s = 1664525 &* s &+ 1013904223
-                return CGFloat((s >> 8) & 0x00FF_FFFF) * (1.0 / 16_777_216.0)
-            }
-
-            let crown = CGRect(
-                x: CGFloat(W) * 0.15,
-                y: CGFloat(H) * 0.06,
-                width: CGFloat(W) * 0.70,
-                height: CGFloat(H) * 0.62
-            )
-
-            var lr: CGFloat = 0, lg: CGFloat = 0, lb: CGFloat = 0, la: CGFloat = 1
-            leaf.getRed(&lr, green: &lg, blue: &lb, alpha: &la)
-            let darken = 0.84 + 0.10 * frand()
-            let topTint = UIColor(red: lr, green: lg, blue: lb, alpha: 1)
-            let baseTint = UIColor(red: lr * darken, green: lg * darken, blue: lb * darken, alpha: 1)
             let cs = CGColorSpaceCreateDeviceRGB()
-            let grad = CGGradient(colorsSpace: cs, colors: [topTint.cgColor, baseTint.cgColor] as CFArray, locations: [0, 1])!
 
-            cg.saveGState()
-            let crownClip = UIBezierPath(roundedRect: crown, cornerRadius: crown.width * 0.48)
-            cg.addPath(crownClip.cgPath)
-            cg.clip()
-            cg.drawLinearGradient(
-                grad,
-                start: CGPoint(x: crown.midX, y: crown.minY),
-                end: CGPoint(x: crown.midX, y: crown.maxY),
-                options: []
-            )
-            cg.restoreGState()
+            var tR: CGFloat = 1, tG: CGFloat = 1, tB: CGFloat = 1, tA: CGFloat = 1
+            tint.getRed(&tR, green: &tG, blue: &tB, alpha: &tA)
 
-            @inline(__always) func adjust(_ c: UIColor, dH: CGFloat, dS: CGFloat, dB: CGFloat) -> UIColor {
-                var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
-                c.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-                var hh = (h + dH).truncatingRemainder(dividingBy: 1); if hh < 0 { hh += 1 }
-                return UIColor(hue: hh, saturation: max(0, min(1, s + dS)), brightness: max(0, min(1, b + dB)), alpha: a)
+            let inner = CGColor(colorSpace: cs, components: [tR * 0.95, tG * 0.95, tB * 0.95, 1.0])!
+            let outer = CGColor(colorSpace: cs, components: [tR * 0.80, tG * 0.80, tB * 0.80, 0.0])!
+            let grad = CGGradient(colorsSpace: cs, colors: [inner, outer] as CFArray, locations: [0.0, 1.0])!
+            cg.drawRadialGradient(grad,
+                                  startCenter: CGPoint(x: r, y: r),
+                                  startRadius: 0,
+                                  endCenter: CGPoint(x: r, y: r),
+                                  endRadius: r,
+                                  options: [])
+
+            let discCount = Int.random(in: 28...42, using: &rng)
+            for _ in 0..<discCount {
+                let rr = CGFloat.random(in: r*0.08...r*0.22, using: &rng)
+                let a  = CGFloat.random(in: 0...(2 * .pi), using: &rng)
+                let d  = CGFloat.random(in: 0...(r * 0.55), using: &rng)
+                let cx = r + cos(a) * d
+                let cy = r + sin(a) * d
+                let shade = CGFloat.random(in: 0.85...1.10, using: &rng)
+                cg.setFillColor(UIColor(red: tR*shade, green: tG*shade, blue: tB*shade, alpha: 0.25).cgColor)
+                cg.fillEllipse(in: CGRect(x: cx - rr, y: cy - rr, width: rr * 2, height: rr * 2))
             }
-
-            let blobs = 12 + Int(frand() * 10.0)
-            for _ in 0..<blobs {
-                let cx = crown.minX + frand() * crown.width
-                let cy = crown.minY + frand() * crown.height
-                let r  = crown.width * (0.07 + 0.11 * frand())
-                let rect = CGRect(x: cx - r, y: cy - r, width: 2*r, height: 2*r)
-                let alpha: CGFloat = 0.60 + 0.30 * frand()
-                let tint = adjust(topTint,
-                                  dH: (frand() - 0.5) * 0.05,
-                                  dS: (frand() - 0.5) * 0.07,
-                                  dB: (frand() - 0.5) * 0.07)
-                cg.setFillColor(tint.withAlphaComponent(alpha).cgColor)
-                cg.fillEllipse(in: rect)
-            }
-
-            // Trunk
-            let tW = max(6.0, CGFloat(W) * 0.08)
-            let tH = CGFloat(H) * 0.22
-            let tRect = CGRect(
-                x: CGFloat(W) * 0.5 - tW * 0.5,
-                y: crown.maxY - tH * 0.08,
-                width: tW,
-                height: tH
-            )
-            cg.setFillColor(trunk.cgColor)
-            let trunkPath = UIBezierPath(roundedRect: tRect, cornerRadius: tW * 0.22).cgPath
-            cg.addPath(trunkPath)
-            cg.fillPath()
-
-            // Alpha-safe 2-px transparent frame to avoid clamp/mip artefacts
-            cg.setBlendMode(.clear)
-            cg.fill(CGRect(x: 0, y: 0, width: CGFloat(W), height: 2))
-            cg.fill(CGRect(x: 0, y: CGFloat(H) - 2, width: CGFloat(W), height: 2))
-            cg.fill(CGRect(x: 0, y: 0, width: 2, height: CGFloat(H)))
-            cg.fill(CGRect(x: CGFloat(W) - 2, y: 0, width: 2, height: CGFloat(H)))
         }
+    }
+
+    private static func cropTopPortion(of image: UIImage, keepTopFraction: CGFloat) -> UIImage {
+        let frac = max(0.1, min(1.0, keepTopFraction))
+        let scale = image.scale
+        let fullW = Int(image.size.width  * scale)
+        let fullH = Int(image.size.height * scale)
+        let keepH = Int(CGFloat(fullH) * frac)
+
+        let rect = CGRect(x: 0, y: 0, width: fullW, height: keepH)
+        guard let cg = image.cgImage?.cropping(to: rect) else { return image }
+        return UIImage(cgImage: cg, scale: scale, orientation: .up)
     }
 }

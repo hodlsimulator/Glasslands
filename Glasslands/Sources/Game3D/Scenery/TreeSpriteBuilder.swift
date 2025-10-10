@@ -4,8 +4,9 @@
 //
 //  Created by . . on 10/9/25.
 //
-//  Cross-plane tree sprite that billboards on Y and casts shadows.
-//  Uses images from Assets.xcassets; falls back to a procedural PNG if needed.
+//  Builds a layered cross-plane canopy with correct alpha handling and a simple
+//  3D trunk. No billboarding needed: multiple intersecting planes look like a tree
+//  from any angle. Materials are set to avoid white fringes and to cast shadows.
 //
 
 import SceneKit
@@ -14,78 +15,122 @@ import GameplayKit
 
 enum TreeSpriteBuilder {
 
-    // Asset names added in your Assets.xcassets
-    private static let assetNames = [
-        "glasslands_tree_broadleaf_A",
-        "glasslands_tree_broadleaf_B",
-        "glasslands_tree_conifer_A",
-        "glasslands_tree_conifer_B",
-        "glasslands_tree_acacia_A",
-        "glasslands_tree_winter_A"
-    ]
+    // Alpha-cutout canopy material: no white fringes, no Z fighting with itself/trunk.
+    @MainActor
+    static func canopyMaterial(image: UIImage, tint: UIColor?) -> SCNMaterial {
+        let mat = SCNMaterial()
+        mat.lightingModel = .lambert
+        mat.isDoubleSided = true
+        mat.blendMode = .alpha
+        mat.transparencyMode = .aOne
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = true
+
+        // Texture setup (mip & clamp reduce haloing at edges)
+        mat.diffuse.contents = image
+        mat.diffuse.mipFilter = .linear
+        mat.diffuse.minificationFilter = .linear
+        mat.diffuse.magnificationFilter = .linear
+        mat.diffuse.wrapS = .clamp
+        mat.diffuse.wrapT = .clamp
+
+        if let tint { mat.multiply.contents = tint }
+        return mat
+    }
 
     @MainActor
-    static func makeTreeNode(
-        palette: [UIColor],
-        rng: inout RandomAdaptor
-    ) -> (SCNNode, CGFloat) {
+    static func barkMaterial(colour: UIColor) -> SCNMaterial {
+        let m = SCNMaterial()
+        m.lightingModel = .lambert
+        m.diffuse.contents = colour
+        m.metalness.contents = 0.0
+        m.roughness.contents = 1.0
+        m.isDoubleSided = false
+        return m
+    }
 
-        // Pick an image from Assets; if ever nil, fall back to a procedural PNG
-        let chosen = assetNames.randomElement(using: &rng) ?? assetNames[0]
-        let img: UIImage = UIImage(named: chosen) ?? {
-            let leaf = palette.indices.contains(2) ? palette[2] : UIColor(red: 0.32, green: 0.62, blue: 0.34, alpha: 1.0)
-            let trunk = UIColor(red: 0.55, green: 0.42, blue: 0.34, alpha: 1.0)
-            let seed = UInt32.random(in: 1...UInt32.max, using: &rng)
-            return TreeSpriteTexture.make(size: CGSize(width: 320, height: 480), leaf: leaf, trunk: trunk, seed: seed)
-        }()
+    // Layered cross-planes for a volumetric canopy.
+    @MainActor
+    static func makeCrossCanopy(image: UIImage,
+                                height: CGFloat,
+                                rng: inout RandomAdaptor,
+                                tint: UIColor?) -> (node: SCNNode, hitR: CGFloat)
+    {
+        let aspect = image.size.width > 0 ? (image.size.width / max(1, image.size.height)) : 0.75
+        let width  = height * CGFloat(aspect)
+        let mat    = canopyMaterial(image: image, tint: tint)
+        let planes = Int.random(in: 2...3, using: &rng)
 
-        // World size in metres (tileSize is ~16). Height varies; width preserves image aspect.
-        let height: CGFloat = CGFloat.random(in: 8.0...14.0, using: &rng)
-        let aspect = max(0.2, img.size.width / max(img.size.height, 1))
-        let width: CGFloat = max(0.5, height * aspect)
-
-        func planeNode() -> SCNNode {
-            let plane = SCNPlane(width: width, height: height)
-            let m = SCNMaterial()
-            m.lightingModel = .physicallyBased
-            m.diffuse.contents = img
-            m.transparent.contents = img     // alpha cut-out
-            m.transparencyMode = .aOne
-            m.isDoubleSided = true
-            m.metalness.contents = 0.0
-            m.roughness.contents = 1.0
-            plane.firstMaterial = m
-            let n = SCNNode(geometry: plane)
-            n.castsShadow = true
-            return n
+        let canopy = SCNNode()
+        for i in 0..<planes {
+            let p = SCNPlane(width: width, height: height)
+            p.cornerRadius = height * 0.02
+            p.materials = [mat]
+            let n = SCNNode(geometry: p)
+            let step = (planes == 2) ? (.pi / 2.0) : (2.0 * .pi / 3.0)
+            n.eulerAngles.y = Float(step) * Float(i)
+            let s = CGFloat.random(in: 0.92...1.06, using: &rng)
+            n.scale = SCNVector3(s, s, 1)
+            // Render after trunk so it isn’t hidden by depth ordering.
+            n.renderingOrder = 10
+            canopy.addChildNode(n)
         }
 
+        canopy.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &rng)
+        let hitR = max(0.5, width * 0.55)
+        return (canopy, hitR)
+    }
+
+    @MainActor
+    static func makeTrunk(height: CGFloat,
+                          radius: CGFloat,
+                          colour: UIColor) -> SCNNode
+    {
+        let cyl = SCNCylinder(radius: radius, height: height)
+        cyl.radialSegmentCount = 12
+        cyl.heightSegmentCount = 1
+        cyl.materials = [barkMaterial(colour: colour)]
+
+        let n = SCNNode(geometry: cyl)
+        n.position = SCNVector3(0, height * 0.5, 0)
+        n.castsShadow = true
+        return n
+    }
+
+    // Assemble trunk + canopy.
+    @MainActor
+    static func assembleTree(trunkHeight: CGFloat,
+                             trunkRadius: CGFloat,
+                             trunkColour: UIColor,
+                             canopyImage: UIImage,
+                             canopyHeight: CGFloat,
+                             rng: inout RandomAdaptor,
+                             tint: UIColor?) -> (node: SCNNode, hitR: CGFloat)
+    {
         let root = SCNNode()
-        root.name = "TreeSprite"
 
-        // Two crossed planes for volume + Y billboarding
-        let a = planeNode()
-        let b = planeNode()
-        b.eulerAngles = SCNVector3(0, .pi * 0.5, 0)
+        let trunk = makeTrunk(height: trunkHeight, radius: trunkRadius, colour: trunkColour)
+        root.addChildNode(trunk)
 
-        root.addChildNode(a)
-        root.addChildNode(b)
+        let primary = makeCrossCanopy(image: canopyImage, height: canopyHeight, rng: &rng, tint: tint)
+        let canopyY = trunkHeight + (canopyHeight * 0.5)
+        primary.node.position = SCNVector3(0, canopyY, 0)
+        root.addChildNode(primary.node)
 
-        let bb = SCNBillboardConstraint()
-        bb.freeAxes = .Y
-        root.constraints = [bb]
+        var hitR = max(primary.hitR, trunkRadius * 1.6)
 
-        // Mild natural variation
-        root.eulerAngles = SCNVector3(0, Float.random(in: -0.25...0.25, using: &rng), 0)
+        if Bool.random(using: &rng) {
+            let s = CGFloat.random(in: 0.70...0.88, using: &rng)
+            let (sec, _) = makeCrossCanopy(image: canopyImage, height: canopyHeight * s, rng: &rng, tint: tint)
+            sec.position = SCNVector3(0, canopyY + canopyHeight * CGFloat.random(in: -0.10...0.10, using: &rng), 0)
+            root.addChildNode(sec)
+            hitR = max(hitR, primary.hitR * 0.9)
+        }
 
+        root.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &rng)
+        root.eulerAngles.z = Float.random(in: -0.04...0.04, using: &rng)
         root.castsShadow = true
-        root.categoryBitMask = 0x0000_0401
 
-        // Cull far LOD to save fill-rate
-        SceneryCommon.applyLOD(to: root, far: 320)
-
-        // Collision radius used by the obstacle map
-        let hitRadius = max(0.20, width * 0.32)
-        return (root, hitRadius)
+        return (root, hitR)
     }
 }
