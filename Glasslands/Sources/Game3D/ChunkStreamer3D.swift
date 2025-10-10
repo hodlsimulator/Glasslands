@@ -12,8 +12,6 @@
 @preconcurrency import GameplayKit
 import simd
 
-private struct UnsafeSendable<T>: @unchecked Sendable { let value: T }
-
 @MainActor
 final class ChunkStreamer3D {
     private let cfg: FirstPersonEngine.Config
@@ -33,7 +31,7 @@ final class ChunkStreamer3D {
     private let obstacleSink: (IVec2, [SCNNode]) -> Void
     private let onChunkRemoved: (IVec2) -> Void
 
-    var tasksPerFrame: Int = 1
+    var tasksPerFrame: Int = 3   // was 1
 
     init(
         cfg: FirstPersonEngine.Config,
@@ -92,9 +90,8 @@ final class ChunkStreamer3D {
 
         let ci = chunkIndex(forWorldX: center.x, z: center.z)
 
+        // Target set for this frame.
         var keep = Set<IVec2>()
-        let unloadRadius = cfg.preloadRadius + 1
-        var keepWithMargin = Set<IVec2>()
         var toStage: [IVec2] = []
 
         for dy in -cfg.preloadRadius...cfg.preloadRadius {
@@ -107,12 +104,16 @@ final class ChunkStreamer3D {
             }
         }
 
+        // Keep old chunks around longer so movement doesn’t expose voids.
+        let unloadRadius = cfg.preloadRadius + 3
+        var keepWithMargin = Set<IVec2>()
         for dy in -unloadRadius...unloadRadius {
             for dx in -unloadRadius...unloadRadius {
                 keepWithMargin.insert(IVec2(ci.x + dx, ci.y + dy))
             }
         }
 
+        // Unload anything well outside the ring.
         for (k, n) in loaded where !keepWithMargin.contains(k) {
             n.removeAllActions()
             n.removeFromParentNode()
@@ -120,49 +121,78 @@ final class ChunkStreamer3D {
             onChunkRemoved(k)
         }
 
-        desired = keep
+        // Prioritise closest first.
+        toStage.sort { priority(of: $0, around: ci) < priority(of: $1, around: ci) }
 
-        if !toStage.isEmpty {
-            toStage.sort { priority(of: $0, around: ci) < priority(of: $1, around: ci) }
-            let slice = toStage.prefix(max(1, tasksPerFrame))
-            for k in slice {
-                queued.append(k)
-                pending.insert(k)
-                enqueueBuild(k)
-            }
-            if slice.count < toStage.count {
-                queued.append(contentsOf: toStage.dropFirst(slice.count))
+        // Launch new builds up to the per-frame budget.
+        var launched = 0
+        while launched < tasksPerFrame, let k = toStage.first {
+            toStage.removeFirst()
+            queued.append(k)
+            pending.insert(k)
+            enqueueBuild(k)
+            launched += 1
+        }
+
+        // Top-up from the backlog in the same frame if there’s budget left.
+        if launched < tasksPerFrame, !queued.isEmpty {
+            var i = 0
+            while launched < tasksPerFrame, i < queued.count {
+                let k = queued[i]
+                if keep.contains(k), loaded[k] == nil, !pending.contains(k) {
+                    pending.insert(k)
+                    enqueueBuild(k)
+                    queued.remove(at: i)
+                    launched += 1
+                } else {
+                    i += 1
+                }
             }
         }
 
+        // Prune satisfied/stale backlog entries.
         if !queued.isEmpty {
-            queued.removeAll { !keep.contains($0) || loaded[$0] != nil || pending.contains($0) }
+            queued.removeAll { loaded[$0] != nil || !keepWithMargin.contains($0) }
         }
+
+        desired = keep // diagnostic only
     }
 
     // MARK: - Private
 
     private func enqueueBuild(_ k: IVec2) {
         let ox = k.x, oy = k.y
-        Task { [weak self] in
-            guard let self = self else { return }
 
-            let data = await self.builder.build(originChunkX: ox, originChunkY: oy)
-
-            guard let root = self.root else { self.pending.remove(k); return }
+        Task(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
 
             let key = IVec2(ox, oy)
-            guard self.desired.contains(key) else { self.pending.remove(key); return }
+            // Ensure pending is always cleared.
+            defer { self.pending.remove(key) }
 
+            // Background mesh build (actor).
+            let data = await self.builder.build(originChunkX: ox, originChunkY: oy)
+
+            // Scene went away.
+            guard let root = self.root else { return }
+
+            // Build nodes for this chunk.
             let terrainNode = TerrainChunkNode.node(from: data)
             let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
-            let veg = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let veg     = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
             let scenery = SceneryPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
 
+            // Prewarm GPU resources.
             await self.prepareAsync([terrainNode] + beacons + veg + scenery)
 
-            guard self.desired.contains(key) else { self.pending.remove(key); return }
+            // If something else attached this key while building, replace it atomically.
+            if let existing = self.loaded.removeValue(forKey: key) {
+                existing.removeAllActions()
+                existing.removeFromParentNode()
+                self.onChunkRemoved(key)
+            }
 
+            // Always attach finished work; culling will clean up later if out of range.
             root.addChildNode(terrainNode)
             beacons.forEach { terrainNode.addChildNode($0) }
             veg.forEach     { terrainNode.addChildNode($0) }
@@ -171,7 +201,6 @@ final class ChunkStreamer3D {
             self.loaded[key] = terrainNode
             self.beaconSink(beacons)
             self.obstacleSink(key, veg + beacons + scenery)
-            self.pending.remove(key)
         }
     }
 
@@ -189,17 +218,15 @@ final class ChunkStreamer3D {
         return dx &* dx &+ dy &* dy
     }
 
+    @MainActor
     private func prepareAsync(_ objects: [Any]) async {
-            let rBox = UnsafeSendable(value: self.renderer)
-            let oBox = UnsafeSendable(value: objects)
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    rBox.value.prepare(oBox.value) { _ in
-                        cont.resume()
-                    }
-                }
+        guard !objects.isEmpty else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            renderer.prepare(objects) { _ in
+                cont.resume()
             }
         }
+    }
     
     @MainActor
     func warmupInitial(at center: simd_float3, radius: Int = 1) {

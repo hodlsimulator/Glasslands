@@ -89,7 +89,7 @@ extension FirstPersonEngine {
             }
         )
 
-        chunker.warmupInitial(at: yawNode.simdPosition, radius: 0)
+        chunker.warmupInitial(at: yawNode.simdPosition, radius: 1)   // was 0
         score = 0
         DispatchQueue.main.async { [score, onScore] in onScore(score) }
     }
