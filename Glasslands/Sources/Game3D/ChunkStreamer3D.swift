@@ -163,42 +163,54 @@ final class ChunkStreamer3D {
     private func enqueueBuild(_ k: IVec2) {
         let ox = k.x, oy = k.y
 
+        // Inherit @MainActor from the class (DO NOT use Task.detached here).
         Task(priority: .userInitiated) { [weak self] in
             guard let self else { return }
 
             let key = IVec2(ox, oy)
-            // Ensure pending is always cleared.
             defer { self.pending.remove(key) }
 
-            // Background mesh build (actor).
+            // Mesh generation happens off-main inside the builder actor.
             let data = await self.builder.build(originChunkX: ox, originChunkY: oy)
 
-            // Scene went away.
+            // Scene may have gone away.
             guard let root = self.root else { return }
 
-            // Build nodes for this chunk.
+            // Create terrain on main.
             let terrainNode = TerrainChunkNode.node(from: data)
-            let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
-            let veg     = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
-            let scenery = SceneryPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
 
-            // Prewarm GPU resources.
-            await self.prepareAsync([terrainNode] + beacons + veg + scenery)
+            // Pre-warm ONLY terrain to avoid long main-thread stalls.
+            await self.prepareAsync([terrainNode])
 
-            // If something else attached this key while building, replace it atomically.
+            // Replace any existing node atomically.
             if let existing = self.loaded.removeValue(forKey: key) {
                 existing.removeAllActions()
                 existing.removeFromParentNode()
                 self.onChunkRemoved(key)
             }
 
-            // Always attach finished work; culling will clean up later if out of range.
+            // Attach terrain first so there’s never a visible hole.
             root.addChildNode(terrainNode)
-            beacons.forEach { terrainNode.addChildNode($0) }
-            veg.forEach     { terrainNode.addChildNode($0) }
-            scenery.forEach { terrainNode.addChildNode($0) }
-
             self.loaded[key] = terrainNode
+
+            // Decorations on main; small yields keep UI fluid.
+            let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let veg     = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let scenery = SceneryPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+
+            for (i, n) in beacons.enumerated() {
+                terrainNode.addChildNode(n)
+                if i & 0x0F == 0 { await Task.yield() }
+            }
+            for (i, n) in veg.enumerated() {
+                terrainNode.addChildNode(n)
+                if i & 0x0F == 0 { await Task.yield() }
+            }
+            for (i, n) in scenery.enumerated() {
+                terrainNode.addChildNode(n)
+                if i & 0x0F == 0 { await Task.yield() }
+            }
+
             self.beaconSink(beacons)
             self.obstacleSink(key, veg + beacons + scenery)
         }
