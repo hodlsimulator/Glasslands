@@ -4,9 +4,7 @@
 //
 //  Created by . . on 10/9/25.
 //
-//  Orchestrates building/caching of real 3D trees using:
-//  • BarkMeshBuilder (opaque trunk + jagged upward branches, flattened)
-//  • LeafCardMesh    (alpha-test leaf cards; merged into one geometry)
+//  Orchestrates real 3D trees (bark tubes + alpha-test leaf cards).
 //  Draw calls per tree: 2 (bark, leaves). Leaves hidden at far LOD.
 //
 
@@ -19,11 +17,27 @@ enum TreeBuilder3D {
 
     enum Species: CaseIterable { case broadleaf, conifer }
 
-    // Small prototype pool to avoid rebuilding geometry for every placement.
     private static var poolBroadleaf: [SCNNode] = []
     private static var poolConifer:   [SCNNode] = []
 
-    /// Build or clone a prototype tree. API is unchanged for the rest of the project.
+    /// Optional: call once at scene start to avoid any rotation hitch.
+    @MainActor
+    static func prewarm(palette: [UIColor], countPerSpecies: Int = 4) {
+        var rng = RandomAdaptor(GKMersenneTwisterRandomSource(seed: 12345))
+        for _ in 0..<countPerSpecies {
+            let b = buildOnce(species: .broadleaf,
+                              barkCol: palette.indices.contains(4) ? palette[4] : UIColor.brown,
+                              leafCol: palette.indices.contains(2) ? palette[2] : UIColor.green,
+                              rng: &rng).node
+            poolBroadleaf.append(b)
+            let c = buildOnce(species: .conifer,
+                              barkCol: palette.indices.contains(4) ? palette[4] : UIColor.brown,
+                              leafCol: palette.indices.contains(2) ? palette[2] : UIColor.green,
+                              rng: &rng).node
+            poolConifer.append(c)
+        }
+    }
+
     @MainActor
     static func makePrototype(
         palette: [UIColor],
@@ -33,7 +47,6 @@ enum TreeBuilder3D {
 
         let species: Species = speciesHint ?? (Bool.random(using: &rng) ? .broadleaf : .conifer)
 
-        // Colour jitter (tiny variation so clones don’t look identical).
         func jitter(_ base: UIColor,
                     dH: ClosedRange<CGFloat>,
                     dS: ClosedRange<CGFloat>,
@@ -53,24 +66,19 @@ enum TreeBuilder3D {
         let barkCol  = jitter(barkBase, dH: -0.010...0.010, dS: -0.05...0.05, dB: -0.05...0.05)
         let leafCol  = jitter(leafBase, dH: -0.020...0.020, dS: -0.08...0.08, dB: -0.06...0.06)
 
-        // Reuse: return a clone from the pool when available.
         if let clone = cloneFromPool(species: species) {
-            tintMaterials(on: clone, bark: barkCol, leaf: leafCol)
+            tintMaterials(on: clone, bark: barkCol)
             return (clone, estimatedHitRadius(for: clone))
         }
 
-        // Otherwise, build a few variants now and keep them in the pool (reduces lag).
-        let buildCount = 4
-        for _ in 0..<buildCount {
-            let built = buildOnce(species: species, barkCol: barkCol, leafCol: leafCol, rng: &rng)
-            addToPool(species: species, node: built.node)
-        }
-        // Return a fresh clone
-        let out = cloneFromPool(species: species) ?? buildOnce(species: species, barkCol: barkCol, leafCol: leafCol, rng: &rng).node
+        // Build a few and pool them, then clone
+        let built = buildOnce(species: species, barkCol: barkCol, leafCol: leafCol, rng: &rng)
+        addToPool(species: species, node: built.node)
+        let out = cloneFromPool(species: species) ?? built.node.clone()
         return (out, estimatedHitRadius(for: out))
     }
 
-    // MARK: - Build one tree
+    // MARK: - Build
 
     @MainActor
     private static func buildOnce(
@@ -87,7 +95,6 @@ enum TreeBuilder3D {
             }
         }()
 
-        // Species params (upward, jagged)
         let trunkH: CGFloat
         let trunkR: CGFloat
         let primaryCount: Int
@@ -105,7 +112,7 @@ enum TreeBuilder3D {
             secondaryPerPrimary  = 2...3
             branchTilt           = (.pi/180*18)...(.pi/180*34)
             crownRatio           = 0.60...0.80
-            leafCount            = Int(CGFloat.random(in: 140...200, using: &rng))   // tuned for perf
+            leafCount            = Int(CGFloat.random(in: 140...200, using: &rng))
             leafSize             = 0.16...0.26
         case .conifer:
             trunkH               = totalH * CGFloat.random(in: 0.30...0.38, using: &rng)
@@ -119,7 +126,6 @@ enum TreeBuilder3D {
         }
 
         let barkMat = TreeMaterials.barkMaterial(colour: barkCol)
-
         let bark = BarkMeshBuilder.build(
             species: species,
             totalHeight: totalH,
@@ -141,7 +147,7 @@ enum TreeBuilder3D {
             sizeRange: SIMD2<Float>(Float(leafSize.lowerBound), Float(leafSize.upperBound)),
             rng: &rngCopy
         )
-        let leavesMat = TreeMaterials.leafMaterial(texture: leafTex)
+        let leavesMat = TreeMaterials.leafMaterial(texture: leafTex, alphaCutoff: 0.30)
         leavesGeom.materials = [leavesMat]
         let leavesNode = SCNNode(geometry: leavesGeom)
         leavesNode.name = "TreeLeaves"
@@ -160,7 +166,7 @@ enum TreeBuilder3D {
         return (root, estimatedHitRadius(for: root))
     }
 
-    // MARK: - Pool
+    // MARK: - Pool helpers
 
     @MainActor
     private static func addToPool(species: Species, node: SCNNode) {
@@ -172,15 +178,15 @@ enum TreeBuilder3D {
 
     @MainActor
     private static func cloneFromPool(species: Species) -> SCNNode? {
-        var src: SCNNode?
-        switch species {
-        case .broadleaf: if let n = poolBroadleaf.randomElement() { src = n }
-        case .conifer:   if let n = poolConifer.randomElement()   { src = n }
-        }
+        let src: SCNNode? = {
+            switch species {
+            case .broadleaf: return poolBroadleaf.randomElement()
+            case .conifer:   return poolConifer.randomElement()
+            }
+        }()
         guard let base = src else { return nil }
         let clone = base.clone()
         clone.castsShadow = true
-        // Tiny scale variance for variety (geometry/materials shared; cheap)
         let s = Float.random(in: 0.94...1.06)
         clone.scale = SCNVector3(s, s, s)
         clone.eulerAngles.y += Float.random(in: 0...(2 * .pi))
@@ -188,18 +194,11 @@ enum TreeBuilder3D {
     }
 
     @MainActor
-    private static func tintMaterials(on node: SCNNode, bark: UIColor, leaf: UIColor) {
+    private static func tintMaterials(on node: SCNNode, bark: UIColor) {
         node.enumerateChildNodes { n, _ in
             if let g = n.geometry {
-                for m in g.materials {
-                    if m.shaderModifiers == nil {
-                        m.diffuse.contents = bark
-                    } else {
-                        // leaf material
-                        if let img = m.diffuse.contents as? UIImage {
-                            m.diffuse.contents = img // keep existing
-                        }
-                    }
+                for m in g.materials where m.shaderModifiers == nil {
+                    m.diffuse.contents = bark
                 }
             }
         }
