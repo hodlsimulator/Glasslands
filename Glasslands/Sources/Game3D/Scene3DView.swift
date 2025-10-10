@@ -27,7 +27,6 @@ struct Scene3DView: UIViewRepresentable {
         view.isJitteringEnabled = false
         view.isOpaque = true
         view.backgroundColor = .black
-
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
             metal.wantsExtendedDynamicRangeContent = true
@@ -40,10 +39,9 @@ struct Scene3DView: UIViewRepresentable {
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
         context.coordinator.view = view
-
         engine.attach(to: view, recipe: recipe)
 
-        // Camera HDR/exposure
+        // Camera HDR / exposure
         if let cam = view.pointOfView?.camera {
             cam.wantsHDR = true
             cam.wantsExposureAdaptation = false
@@ -57,33 +55,34 @@ struct Scene3DView: UIViewRepresentable {
             cam.bloomBlurRadius = 12.0
         }
 
-        // Single render loop via SceneKit delegate.
+        // Single render loop via SceneKit delegate
         let proxy = RendererProxy(engine: engine)
         view.delegate = proxy
         context.coordinator.delegateProxy = proxy
-
         view.rendersContinuously = true
         view.isPlaying = !isPaused
         engine.setPaused(isPaused)
 
-        // Pick an initial fps cap; refine once we have a window.
+        // Pick an initial fps cap; refine once a window exists
         view.preferredFramesPerSecond = 30
         DispatchQueue.main.async { [weak view] in
             guard let v = view else { return }
             v.preferredFramesPerSecond = desiredFPS(for: v)
         }
-
         DispatchQueue.main.async {
             onReady(engine)
         }
 
-        // Observe thermal changes to gently drop to 30fps when hot.
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.onThermalChanged),
-            name: ProcessInfo.thermalStateDidChangeNotification,
-            object: nil
-        )
+        // Thermal changes delivered explicitly on the main queue.
+        context.coordinator.thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak coord = context.coordinator] _ in
+            Task { @MainActor in
+                coord?.handleThermalChanged()
+            }
+        }
 
         return view
     }
@@ -92,7 +91,7 @@ struct Scene3DView: UIViewRepresentable {
         context.coordinator.engine?.setPaused(isPaused)
         uiView.isPlaying = !isPaused
 
-        // Re-evaluate the desired cap on rotation / window changes.
+        // Re-evaluate the desired cap on rotation / window changes
         let newFPS = desiredFPS(for: uiView)
         if uiView.preferredFramesPerSecond != newFPS {
             uiView.preferredFramesPerSecond = newFPS
@@ -100,11 +99,10 @@ struct Scene3DView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
-        NotificationCenter.default.removeObserver(
-            coordinator,
-            name: ProcessInfo.thermalStateDidChangeNotification,
-            object: nil
-        )
+        if let token = coordinator.thermalObserver {
+            NotificationCenter.default.removeObserver(token)
+            coordinator.thermalObserver = nil
+        }
         uiView.isPlaying = false
         uiView.delegate = nil
         coordinator.delegateProxy = nil
@@ -127,8 +125,10 @@ struct Scene3DView: UIViewRepresentable {
         var engine: FirstPersonEngine?
         weak var view: SCNView?
         var delegateProxy: RendererProxy?
+        var thermalObserver: NSObjectProtocol?
 
-        @objc func onThermalChanged() {
+        // Runs on the main queue via the block-based observer.
+        func handleThermalChanged() {
             guard let v = view else { return }
             let newFPS = (v.window?.windowScene?.screen.maximumFramesPerSecond ?? 60) >= 120 ? 40 : 30
             let thermal = ProcessInfo.processInfo.thermalState

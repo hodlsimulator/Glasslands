@@ -12,6 +12,8 @@
 @preconcurrency import GameplayKit
 import simd
 
+private struct UnsafeSendable<T>: @unchecked Sendable { let value: T }
+
 @MainActor
 final class ChunkStreamer3D {
     private let cfg: FirstPersonEngine.Config
@@ -31,7 +33,7 @@ final class ChunkStreamer3D {
     private let obstacleSink: (IVec2, [SCNNode]) -> Void
     private let onChunkRemoved: (IVec2) -> Void
 
-    var tasksPerFrame: Int = 2
+    var tasksPerFrame: Int = 1
 
     init(
         cfg: FirstPersonEngine.Config,
@@ -188,10 +190,16 @@ final class ChunkStreamer3D {
     }
 
     private func prepareAsync(_ objects: [Any]) async {
-        await withCheckedContinuation { cont in
-            renderer.prepare(objects) { _ in cont.resume() }
+            let rBox = UnsafeSendable(value: self.renderer)
+            let oBox = UnsafeSendable(value: objects)
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    rBox.value.prepare(oBox.value) { _ in
+                        cont.resume()
+                    }
+                }
+            }
         }
-    }
     
     @MainActor
     func warmupInitial(at center: simd_float3, radius: Int = 1) {
