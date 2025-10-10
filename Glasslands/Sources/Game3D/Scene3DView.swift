@@ -4,7 +4,7 @@
 //
 //  Created by . . on 9/30/25.
 //
-//  UIViewRepresentable wrapper. Input comes from VirtualSticks.
+//  UIViewRepresentable wrapper. Uses a single SceneKit-driven render loop via RendererProxy.
 //
 
 import SwiftUI
@@ -21,13 +21,10 @@ struct Scene3DView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
+
+        // Visual setup
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
-
-        // Manual pacing: SceneKit draws only when asked.
-        view.rendersContinuously = false
-        view.isPlaying = false
-
         view.isOpaque = true
         view.backgroundColor = .black
 
@@ -39,11 +36,14 @@ struct Scene3DView: UIViewRepresentable {
             metal.maximumDrawableCount = 3
         }
 
+        // Engine
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
         context.coordinator.view = view
+
         engine.attach(to: view, recipe: recipe)
 
+        // Camera HDR/exposure
         if let cam = view.pointOfView?.camera {
             cam.wantsHDR = true
             cam.wantsExposureAdaptation = false
@@ -57,102 +57,82 @@ struct Scene3DView: UIViewRepresentable {
             cam.bloomBlurRadius = 12.0
         }
 
-        let link = CADisplayLink(target: context.coordinator, selector: #selector(Coordinator.onTick(_:)))
-        context.coordinator.link = link
-        link.add(to: .main, forMode: .common)
+        // Single render loop via SceneKit delegate.
+        let proxy = RendererProxy(engine: engine)
+        view.delegate = proxy
+        context.coordinator.delegateProxy = proxy
 
-        // Decide target FPS once attached to a screen.
-        DispatchQueue.main.async {
-            let maxHz = view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
-            context.coordinator.targetFPS = (maxHz >= 120) ? 40 : 30
-            context.coordinator.resetTiming()
-        }
-        // Safety default before window exists.
-        context.coordinator.targetFPS = 30
-        context.coordinator.resetTiming()
-
+        view.rendersContinuously = true
+        view.isPlaying = !isPaused
         engine.setPaused(isPaused)
-        context.coordinator.paused = isPaused
 
-        DispatchQueue.main.async { onReady(engine) }
+        // Pick an initial fps cap; refine once we have a window.
+        view.preferredFramesPerSecond = 30
+        DispatchQueue.main.async { [weak view] in
+            guard let v = view else { return }
+            v.preferredFramesPerSecond = desiredFPS(for: v)
+        }
+
+        DispatchQueue.main.async {
+            onReady(engine)
+        }
+
+        // Observe thermal changes to gently drop to 30fps when hot.
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.onThermalChanged),
+            name: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil
+        )
+
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         context.coordinator.engine?.setPaused(isPaused)
-        context.coordinator.paused = isPaused
+        uiView.isPlaying = !isPaused
 
-        if let screenHz = uiView.window?.windowScene?.screen.maximumFramesPerSecond {
-            let desired = (screenHz >= 120) ? 40 : 30
-            if context.coordinator.targetFPS != desired {
-                context.coordinator.targetFPS = desired
-                context.coordinator.resetTiming()
-            }
+        // Re-evaluate the desired cap on rotation / window changes.
+        let newFPS = desiredFPS(for: uiView)
+        if uiView.preferredFramesPerSecond != newFPS {
+            uiView.preferredFramesPerSecond = newFPS
         }
     }
 
     static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
-        coordinator.link?.invalidate()
-        coordinator.link = nil
+        NotificationCenter.default.removeObserver(
+            coordinator,
+            name: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil
+        )
+        uiView.isPlaying = false
+        uiView.delegate = nil
+        coordinator.delegateProxy = nil
+        coordinator.engine = nil
+        coordinator.view = nil
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     @MainActor
+    private func desiredFPS(for view: SCNView) -> Int {
+        let screenHz = view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
+        let baseCap = (screenHz >= 120) ? 40 : 30
+        let thermal = ProcessInfo.processInfo.thermalState
+        return (thermal == .serious || thermal == .critical) ? 30 : baseCap
+    }
+
+    @MainActor
     final class Coordinator: NSObject {
         var engine: FirstPersonEngine?
         weak var view: SCNView?
-        var link: CADisplayLink?
+        var delegateProxy: RendererProxy?
 
-        // Frame pacing
-        var targetFPS: Int = 30
-        private var lastTS: CFTimeInterval = 0
-        private var accumulator: CFTimeInterval = 0
-        private var interval: CFTimeInterval { 1.0 / CFTimeInterval(max(1, targetFPS)) }
-
-        // Ground shade cadence
-        private var lastSunUpdate: CFTimeInterval = 0
-        private let sunUpdateInterval: CFTimeInterval = 1.0 / 12.0
-
-        var paused: Bool = false
-
-        func resetTiming() {
-            lastTS = 0
-            accumulator = 0
-            lastSunUpdate = 0
-        }
-
-        @objc func onTick(_ link: CADisplayLink) {
-            guard !paused, let engine, let view else { return }
-
-            let ts = link.timestamp
-            if lastTS == 0 { lastTS = ts }
-            let dt = max(0, ts - lastTS)
-            lastTS = ts
-
-            // Auto-drop when hot (keep visuals, just pace slower).
-            let screenHz = view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
-            let baseCap = (screenHz >= 120) ? 40 : 30
-            let thState = ProcessInfo.processInfo.thermalState
-            let desired = (thState == .serious || thState == .critical) ? 30 : baseCap
-            if desired != targetFPS {
-                targetFPS = desired
-                resetTiming()
-            }
-
-            accumulator += dt
-            if accumulator < interval { return }
-            accumulator -= interval
-
-            engine.stepUpdateMain(at: ts)
-            engine.tickVolumetricClouds(atRenderTime: ts)
-
-            if ts - lastSunUpdate >= sunUpdateInterval {
-                engine.updateSunDiffusion()
-                lastSunUpdate = ts
-            }
-
-            view.setNeedsDisplay()
+        @objc func onThermalChanged() {
+            guard let v = view else { return }
+            let newFPS = (v.window?.windowScene?.screen.maximumFramesPerSecond ?? 60) >= 120 ? 40 : 30
+            let thermal = ProcessInfo.processInfo.thermalState
+            v.preferredFramesPerSecond = (thermal == .serious || thermal == .critical) ? 30 : newFPS
         }
     }
 }

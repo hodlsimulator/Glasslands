@@ -115,9 +115,6 @@ final class FirstPersonEngine: NSObject {
         view.scene = scene
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
-        view.preferredFramesPerSecond = 60
-        view.rendersContinuously = true
-        view.isPlaying = true
         view.isOpaque = true
 
         if let metal = view.layer as? CAMetalLayer {
@@ -134,10 +131,8 @@ final class FirstPersonEngine: NSObject {
         buildSky()
         apply(recipe: recipe, force: true)
 
-        // No dome.
+        // No dome; start with billboard layer then enable volumetric impostors.
         removeVolumetricDomeIfPresent()
-
-        // Build the banded billboard layer, then enable the vapour impostors on it.
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
             clusterCount: 140,
