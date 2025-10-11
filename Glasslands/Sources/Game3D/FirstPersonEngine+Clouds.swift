@@ -101,7 +101,7 @@ extension FirstPersonEngine {
         advectAllCloudBillboards(dt: dt)
     }
 
-    // MARK: - Billboard advection (renderer thread)
+    // MARK: - Billboard advection (no FOV hiding)
     private func advectAllCloudBillboards(dt: Float) {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
 
@@ -118,51 +118,34 @@ extension FirstPersonEngine {
         let Rmax: Float = cloudRMax
         let Rref: Float = max(1, Rmin + 0.85 * (Rmax - Rmin))
         let vSpinRef: Float = cloudSpinRate * Rref
-
         let wRef: Float = 0.6324555
         let windMul = simd_clamp(wLen / max(1e-5, wRef), 0.12, 0.90)
         let advectionGain: Float = 0.35
         let baseSpeedUnits: Float = vSpinRef * windMul * advectionGain
-
         let span: Float = max(1e-5, Rmax - Rmin)
         let wrapLen: Float = (2 * Rmax) + 0.20 * span
         let wrapCap: Float = Rmax + 0.10 * span
 
-        var groups: [SCNNode] = []
-        var orphans: [SCNNode] = []
-        for child in layer.childNodes {
-            var hasPuffs = false
-            for bb in child.childNodes {
-                if let cs = bb.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
-                    hasPuffs = true; break
-                }
-            }
-            if hasPuffs {
-                groups.append(child)
-            } else if let cs = child.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) {
-                orphans.append(child)
-            }
-        }
-
-        if !groups.isEmpty {
-            for g in groups {
-                advectCluster(group: g, dir: wDir, baseV: baseSpeedUnits, dt: dt,
-                              Rmin: Rmin, Rmax: Rmax, span: span, wrapCap: wrapCap, wrapLen: wrapLen,
-                              calmSpin: (wLen < 1e-4))
-            }
-        } else {
-            layer.enumerateChildNodes { node, _ in
-                guard let cs = node.constraints, cs.contains(where: { $0 is SCNBillboardConstraint }) else { return }
+        // Move every billboarded node; do not toggle isHidden here.
+        layer.enumerateChildNodes { node, _ in
+            let hasBillboard = (node.constraints?.contains { $0 is SCNBillboardConstraint } ?? false)
+            if hasBillboard {
                 let d = wDir * (baseSpeedUnits * dt)
                 node.simdPosition.x += d.x
                 node.simdPosition.z += d.y
-            }
-        }
 
-        for n in orphans {
-            let d = wDir * (baseSpeedUnits * dt)
-            n.simdPosition.x += d.x
-            n.simdPosition.z += d.y
+                // Wrap within ring
+                var p = node.simdPosition
+                let L = simd_length(simd_float2(p.x, p.z))
+                if L > wrapCap {
+                    let k = (L - Rmin).remainder(dividingBy: wrapLen)
+                    let L2 = Rmin + k
+                    let dir = simd_normalize(simd_float2(p.x, p.z))
+                    p.x = dir.x * L2
+                    p.z = dir.y * L2
+                    node.simdPosition = p
+                }
+            }
         }
     }
 

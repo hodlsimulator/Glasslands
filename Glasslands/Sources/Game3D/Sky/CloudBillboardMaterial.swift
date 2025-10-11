@@ -82,7 +82,7 @@ enum CloudBillboardMaterial {
     const half refineMul = half(0.45);  // local refinement
     const int  refineMax = 2;
 
-    for (int i = 0; i < numSteps && T > half(0.004); ++i) {
+    for (int i = 0; i < numSteps && T > half(0.008); ++i) {
         float3 sp = P0_world + N * t; // sample point in world
 
         // === densityAt(sp) — all inline ===
@@ -295,7 +295,7 @@ enum CloudBillboardMaterial {
 
         // Short refinement
         half td = half(dt) * refineMul;
-        for (int k=0; k<refineMax && T > half(0.004); ++k) {
+        for (int k=0; k < refineMax && T > half(0.008); ++k) {
             float3 sp2 = sp + N * (float(td) * float(k));
             // reuse the main density path in a very cheap way (one octave only)
             float2 xzq  = sp2.xz + u_domainOff;
