@@ -13,7 +13,8 @@ import UIKit
 enum CloudImpostorMaterial {
     @MainActor
     static func make(halfW: CGFloat, halfH: CGFloat) -> SCNMaterial {
-        CloudImpostorProgram.makeMaterial(halfWidth: max(0.001, halfW),
-                                          halfHeight: max(0.001, halfH))
+        // Use the original Metal-backed material. Half sizes are not needed here:
+        // the engine pushes correct uniforms later.
+        CloudBillboardMaterial.makeCurrent()
     }
 }

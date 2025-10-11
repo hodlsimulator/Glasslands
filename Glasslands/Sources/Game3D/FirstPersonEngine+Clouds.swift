@@ -18,37 +18,23 @@ extension FirstPersonEngine {
     // MARK: - Volumetric cloud impostors (shader-modifier path)
     @MainActor
     func enableVolumetricCloudImpostors(_ on: Bool) {
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
-            return
-        }
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
 
         layer.enumerateChildNodes { node, _ in
             guard let g = node.geometry else { return }
 
             if on {
-                // Determine half-size in world units so shader can keep UVs aspect-correct
-                let (hx, hy): (CGFloat, CGFloat) = {
-                    if let p = g as? SCNPlane {
-                        return (max(0.001, p.width * 0.5), max(0.001, p.height * 0.5))
-                    } else {
-                        let bb = g.boundingBox
-                        let w = CGFloat(max(0.001, (bb.max.x - bb.min.x) * 0.5))
-                        let h = CGFloat(max(0.001, (bb.max.y - bb.min.y) * 0.5))
-                        return (w, h)
-                    }
-                }()
+                // Swap to the original volumetric material (Metal path).
+                let mat = CloudBillboardMaterial.makeCurrent()
 
-                let m = CloudImpostorProgram.makeMaterial(halfWidth: hx, halfHeight: hy)
-
-                // Preserve any sprite tint/transparency if present so look stays consistent.
+                // Preserve any tint/transparency already on the puff.
                 if let old = g.firstMaterial {
-                    m.multiply.contents = old.multiply.contents
-                    m.transparency = old.transparency
+                    mat.multiply.contents = old.multiply.contents
+                    mat.transparency = old.transparency
                 }
-
-                g.firstMaterial = m
+                g.firstMaterial = mat
             } else {
-                // Back to plain billboards
+                // Back to plain (no shader modifiers/programs).
                 for m in g.materials {
                     m.shaderModifiers = nil
                     m.program = nil
@@ -56,8 +42,7 @@ extension FirstPersonEngine {
             }
         }
 
-        // **Important**: the billboard layer is created asynchronously.
-        // After swapping materials in, push the sun direction + tuned params now.
+        // Push sun/uniforms as before.
         if on { applyCloudSunUniforms() }
     }
 
