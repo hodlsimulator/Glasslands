@@ -31,7 +31,7 @@ final class ChunkStreamer3D {
     private let obstacleSink: (IVec2, [SCNNode]) -> Void
     private let onChunkRemoved: (IVec2) -> Void
 
-    var tasksPerFrame: Int = 3   // was 1
+    var tasksPerFrame: Int = 1   // was 3
 
     init(
         cfg: FirstPersonEngine.Config,
