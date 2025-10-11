@@ -132,6 +132,35 @@ extension FirstPersonEngine {
                 }
             }
         }
+        sortCloudPuffsBackToFront()
+    }
+    
+    @MainActor
+    private func sortCloudPuffsBackToFront() {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+        let cam = (scnView?.pointOfView ?? camNode)
+        let camPos = cam.presentation.simdWorldPosition
+
+        var puffs: [SCNNode] = []
+        layer.enumerateChildNodes { node, _ in
+            if node.geometry is SCNPlane { puffs.append(node) }
+        }
+
+        // Farther first → lower renderingOrder = drawn earlier. Nearer last → on top.
+        puffs.sort { a, b in
+            let da = simd_length(a.presentation.simdWorldPosition - camPos)
+            let db = simd_length(b.presentation.simdWorldPosition - camPos)
+            return da > db
+        }
+        for (i, n) in puffs.enumerated() {
+            n.renderingOrder = i
+            if let m = n.geometry?.firstMaterial {
+                m.blendMode = .alpha
+                m.writesToDepthBuffer = false
+                m.readsFromDepthBuffer = true
+                m.isDoubleSided = true
+            }
+        }
     }
 
     private func advectCluster(group: SCNNode,
