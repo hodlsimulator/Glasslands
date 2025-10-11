@@ -4,17 +4,15 @@
 //
 //  Created by . . on 10/4/25.
 //
-//  Builds the cloud billboard layer using a two-pass approach per puff:
-//  1) Depth-mask pass: exact silhouette, writes DEPTH only (no colour).
-//  2) Volumetric pass: your existing impostor shader, reads depth.
-//  Keeps quality and .all billboarding, but removes full-screen cloud stalls.
+//  Builds the cloud billboard layer using volumetric impostor materials.
+//  Each cluster is a single billboarded group; individual puffs are plain nodes.
+//  This eliminates hundreds of per-puff SCNBillboardConstraints while keeping the look.
 //
 
 import SceneKit
 import UIKit
 
 enum CloudBillboardFactory {
-
     @MainActor
     static func makeNode(
         from clusters: [CloudClusterSpec],
@@ -24,47 +22,81 @@ enum CloudBillboardFactory {
         root.name = "CumulusBillboardLayer"
         root.castsShadow = false
 
+        struct SizeKey: Hashable { let w: Int; let h: Int }
+        var materialCache: [SizeKey: SCNMaterial] = [:]
+        let quant: CGFloat = 0.05
+
+        @inline(__always)
+        func materialFor(halfW: CGFloat, halfH: CGFloat) -> SCNMaterial {
+            let key = SizeKey(w: Int(round(halfW / quant)), h: Int(round(halfH / quant)))
+            if let m = materialCache[key] { return m }
+
+            let m = CloudImpostorProgram.makeMaterial(halfWidth: halfW, halfHeight: halfH)
+            m.isDoubleSided = false
+            m.cullMode = SCNCullMode.back
+            m.blendMode = SCNBlendMode.alpha
+            m.readsFromDepthBuffer = true
+            m.writesToDepthBuffer = false
+            m.lightingModel = SCNMaterial.LightingModel.constant
+            m.diffuse.contents = UIColor.white
+            m.multiply.contents = UIColor.white
+            materialCache[key] = m
+            return m
+        }
+
+        // Global scale kept identical to your earlier build.
         let GLOBAL_SIZE_SCALE: CGFloat = 0.58
 
         for cl in clusters {
+            // Cluster centroid so children can be positioned relatively.
+            var ax: Float = 0, ay: Float = 0, az: Float = 0
+            if !cl.puffs.isEmpty {
+                for p in cl.puffs { ax += p.pos.x; ay += p.pos.y; az += p.pos.z }
+                let inv = 1.0 / Float(cl.puffs.count)
+                ax *= inv; ay *= inv; az *= inv
+            }
+            let anchor = SCNVector3(ax, ay, az)
+
+            // One billboard per cluster (original behaviour).
+            let group = SCNNode()
+            group.castsShadow = false
+            group.position = anchor
+            let bc = SCNBillboardConstraint()
+            bc.freeAxes = .all
+            group.constraints = [bc]
+
+            // Build sprites under the group.
             for p in cl.puffs {
                 let size = max(0.01, CGFloat(p.size) * GLOBAL_SIZE_SCALE)
+                let half = max(0.001, size * 0.5)
 
                 let plane = SCNPlane(width: size, height: size)
-                let mat = CloudBillboardMaterial.makeCurrent()
-                mat.blendMode = .alpha
-                mat.readsFromDepthBuffer = false
-                mat.writesToDepthBuffer = false
-                mat.isDoubleSided = true
-                plane.firstMaterial = mat
+                plane.firstMaterial = materialFor(halfW: half, halfH: half)
 
-                // Pad the bounds so frustum culling never drops an edge-on sprite
-                let pad = Float(size) * 0.75
-                plane.boundingBox = (
-                    min: SCNVector3(-pad, -pad, -pad),
-                    max: SCNVector3( pad,  pad,  pad)
-                )
+                let sprite = SCNNode(geometry: plane)
+                sprite.castsShadow = false
+                sprite.opacity = CGFloat(max(0, min(1, p.opacity)))
 
-                let node = SCNNode(geometry: plane)
-                node.name = "CloudPuff"
-                node.castsShadow = false
-                node.opacity = CGFloat(max(0, min(1, p.opacity)))
-                node.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
+                // Relative offset from the group’s anchor.
+                sprite.position = SCNVector3(p.pos.x - ax, p.pos.y - ay, p.pos.z - az)
 
-                // NOTE: no SCNBillboardConstraint — we’ll face the camera manually each frame
-                var ea = node.eulerAngles
-                ea.z = Float(p.roll) // keep in-plane roll from spec
-                node.eulerAngles = ea
+                // Roll within the billboarded plane.
+                var ea = sprite.eulerAngles
+                ea.z = Float(p.roll)
+                sprite.eulerAngles = ea
 
                 if let t = p.tint {
-                    node.geometry?.firstMaterial?.multiply.contents =
+                    sprite.geometry?.firstMaterial?.multiply.contents =
                         UIColor(red: CGFloat(t.x), green: CGFloat(t.y), blue: CGFloat(t.z), alpha: 1.0)
                 }
 
-                node.renderingOrder = 0
-                root.addChildNode(node)
+                // Let SceneKit sort transparents naturally; no forced renderingOrder.
+                group.addChildNode(sprite)
             }
+
+            root.addChildNode(group)
         }
+
         return root
     }
 }
