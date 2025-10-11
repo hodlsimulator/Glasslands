@@ -101,6 +101,7 @@ extension FirstPersonEngine {
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
+        // iOS 26: get the actual screen from this view’s window
         let screenBounds = scnView?.window?.windowScene?.screen.bounds ?? (scnView?.bounds ?? .zero)
         let isLandscape = screenBounds.width > screenBounds.height
 
@@ -109,14 +110,14 @@ extension FirstPersonEngine {
         sun.intensity = 1500
         sun.color = UIColor.white
 
-        // Shadows tuned for mobile; much lighter in landscape.
+        // Shadows tuned for mobile; lighter in landscape.
         sun.castsShadow = true
         sun.shadowMode = .deferred
         sun.shadowMapSize = CGSize(
-            width:  isLandscape ? 1536 : 2048,
-            height: isLandscape ? 1536 : 2048
+            width:  isLandscape ? 1280 : 2048,
+            height: isLandscape ? 1280 : 2048
         )
-        sun.shadowSampleCount       = isLandscape ? 2 : 4
+        sun.shadowSampleCount       = isLandscape ? 1 : 3   // ← place it here
         sun.shadowRadius            = 1.2
         sun.shadowColor             = UIColor(white: 0.0, alpha: 0.70)
         sun.shadowBias              = 0.004
@@ -157,7 +158,6 @@ extension FirstPersonEngine {
         self.sunLightNode = sunNode
         self.vegSunLightNode = nil
 
-        // Same sun direction as before
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
     }
 

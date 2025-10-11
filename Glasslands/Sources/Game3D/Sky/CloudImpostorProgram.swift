@@ -138,7 +138,7 @@ enum CloudImpostorProgram {
 
         float sMask = macroMask2D(uvE*0.90, shapeScale, shapeLo, shapeHi, shapePow, shapeSeed);
         float edgeMask = interior * sMask;
-        if (edgeMask < 0.01) { discard_fragment(); }
+        if (edgeMask < 0.015) { discard_fragment(); }   // trivial early-out; no visible change
 
         // Parameters
         float Lm = clamp(thickness, 0.50, 8.0);
