@@ -132,7 +132,9 @@ extension FirstPersonEngine {
                 }
             }
         }
+        orientCloudPuffsToCamera()
         sortCloudPuffsBackToFront()
+        sortCloudPuffsByViewDepth()
     }
     
     @MainActor
@@ -160,6 +162,60 @@ extension FirstPersonEngine {
                 m.readsFromDepthBuffer = true
                 m.isDoubleSided = true
             }
+        }
+    }
+
+    @MainActor
+    private func sortCloudPuffsByViewDepth() {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+        let cam = (scnView?.pointOfView ?? camNode)
+        let invView = simd_inverse(cam.presentation.simdWorldTransform)
+
+        var nodes: [(SCNNode, Float)] = []
+        layer.enumerateChildNodes { n, _ in
+            guard n.geometry is SCNPlane else { return }
+            n.isHidden = false // ensure nothing is left hidden by any previous code
+            let wp = n.presentation.simdWorldPosition
+            let v  = invView * simd_float4(wp.x, wp.y, wp.z, 1)
+            // Camera looks down -Z in view space → larger (-v.z) means farther away.
+            let depth = -v.z
+            nodes.append((n, depth))
+        }
+
+        // Far → near (back-to-front): far first gets lower renderingOrder.
+        nodes.sort { $0.1 > $1.1 }
+        for (i, pair) in nodes.enumerated() {
+            let n = pair.0
+            n.renderingOrder = i
+            if let m = n.geometry?.firstMaterial {
+                // Re-assert safe flags in case materials were swapped elsewhere.
+                m.blendMode = .alpha
+                m.readsFromDepthBuffer = false
+                m.writesToDepthBuffer = false
+                m.isDoubleSided = true
+            }
+        }
+    }
+    
+    @MainActor
+    private func orientCloudPuffsToCamera() {
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+        let cam = (scnView?.pointOfView ?? camNode)
+
+        let camPos = cam.presentation.simdWorldPosition
+        layer.enumerateChildNodes { n, _ in
+            guard n.geometry is SCNPlane else { return }
+
+            let wp = n.presentation.simdWorldPosition
+            let dx = camPos.x - wp.x
+            let dz = camPos.z - wp.z
+            let yaw = atan2f(dx, dz)     // camera looks toward +Z → yaw around Y
+
+            // Keep existing roll (z) but overwrite yaw; no pitch for a classic billboard
+            var ea = n.eulerAngles
+            let roll = ea.z
+            ea = SCNVector3(0, yaw, roll)
+            n.eulerAngles = ea
         }
     }
 

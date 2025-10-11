@@ -24,25 +24,22 @@ enum CloudBillboardFactory {
         root.name = "CumulusBillboardLayer"
         root.castsShadow = false
 
-        // Matches your current sizing.
         let GLOBAL_SIZE_SCALE: CGFloat = 0.58
 
         for cl in clusters {
             for p in cl.puffs {
                 let size = max(0.01, CGFloat(p.size) * GLOBAL_SIZE_SCALE)
 
-                // Plane + volumetric material (Metal path via CloudBillboardMaterial).
                 let plane = SCNPlane(width: size, height: size)
                 let mat = CloudBillboardMaterial.makeCurrent()
-                // Safe flags for transparent billboards
                 mat.blendMode = .alpha
+                mat.readsFromDepthBuffer = false
                 mat.writesToDepthBuffer = false
-                mat.readsFromDepthBuffer = true
-                mat.isDoubleSided = true          // avoid 1-frame backface cull during fast turns
+                mat.isDoubleSided = true
                 plane.firstMaterial = mat
 
-                // ---- Critical: expand the AABB so SceneKit never culls a puff edge-on
-                let pad = Float(size) * 0.65
+                // Pad the bounds so frustum culling never drops an edge-on sprite
+                let pad = Float(size) * 0.75
                 plane.boundingBox = (
                     min: SCNVector3(-pad, -pad, -pad),
                     max: SCNVector3( pad,  pad,  pad)
@@ -54,13 +51,9 @@ enum CloudBillboardFactory {
                 node.opacity = CGFloat(max(0, min(1, p.opacity)))
                 node.position = SCNVector3(p.pos.x, p.pos.y, p.pos.z)
 
-                // Per-puff billboard for the original look.
-                let bb = SCNBillboardConstraint()
-                bb.freeAxes = .all
-                node.constraints = [bb]
-
+                // NOTE: no SCNBillboardConstraint — we’ll face the camera manually each frame
                 var ea = node.eulerAngles
-                ea.z = Float(p.roll)               // roll in the billboard plane
+                ea.z = Float(p.roll) // keep in-plane roll from spec
                 node.eulerAngles = ea
 
                 if let t = p.tint {
@@ -68,6 +61,7 @@ enum CloudBillboardFactory {
                         UIColor(red: CGFloat(t.x), green: CGFloat(t.y), blue: CGFloat(t.z), alpha: 1.0)
                 }
 
+                node.renderingOrder = 0
                 root.addChildNode(node)
             }
         }
