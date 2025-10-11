@@ -185,7 +185,7 @@ enum CloudImpostorProgram {
         }
 
         float alpha = clamp(1.0 - T, 0.0, 1.0);
-        _output.color = float4(Cw, alpha); // non-premultiplied colour with alpha
+        _output.color = float4(Cw, Cw, Cw, alpha); // non-premultiplied colour with alpha
         """
 
         let m = SCNMaterial()
