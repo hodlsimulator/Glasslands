@@ -87,7 +87,6 @@ enum TreeBuilder3D {
         leafCol: UIColor,
         rng: inout RandomAdaptor
     ) -> (node: SCNNode, hitR: CGFloat) {
-
         let totalH: CGFloat = {
             switch species {
             case .broadleaf: return CGFloat.random(in: 8.5...13.5, using: &rng)
@@ -106,23 +105,23 @@ enum TreeBuilder3D {
 
         switch species {
         case .broadleaf:
-            trunkH               = totalH * CGFloat.random(in: 0.44...0.52, using: &rng)
-            trunkR               = totalH * CGFloat.random(in: 0.024...0.032, using: &rng)
-            primaryCount         = Int.random(in: 5...7, using: &rng)
-            secondaryPerPrimary  = 2...3
-            branchTilt           = (.pi/180*18)...(.pi/180*34)
-            crownRatio           = 0.60...0.80
-            leafCount            = Int(CGFloat.random(in: 140...200, using: &rng))
-            leafSize             = 0.16...0.26
+            trunkH = totalH * CGFloat.random(in: 0.44...0.52, using: &rng)
+            trunkR = totalH * CGFloat.random(in: 0.024...0.032, using: &rng)
+            primaryCount = Int.random(in: 5...7, using: &rng)
+            secondaryPerPrimary = 2...3
+            branchTilt = (.pi/180*18)...(.pi/180*34)
+            crownRatio = 0.60...0.80
+            leafCount = Int(CGFloat.random(in: 140...200, using: &rng))
+            leafSize = 0.16...0.26
         case .conifer:
-            trunkH               = totalH * CGFloat.random(in: 0.30...0.38, using: &rng)
-            trunkR               = totalH * CGFloat.random(in: 0.020...0.028, using: &rng)
-            primaryCount         = Int.random(in: 6...8, using: &rng)
-            secondaryPerPrimary  = 1...2
-            branchTilt           = (.pi/180*10)...(.pi/180*22)
-            crownRatio           = 0.68...0.92
-            leafCount            = Int(CGFloat.random(in: 180...260, using: &rng))
-            leafSize             = 0.12...0.20
+            trunkH = totalH * CGFloat.random(in: 0.30...0.38, using: &rng)
+            trunkR = totalH * CGFloat.random(in: 0.020...0.028, using: &rng)
+            primaryCount = Int.random(in: 6...8, using: &rng)
+            secondaryPerPrimary = 1...2
+            branchTilt = (.pi/180*10)...(.pi/180*22)
+            crownRatio = 0.68...0.92
+            leafCount = Int(CGFloat.random(in: 180...260, using: &rng))
+            leafSize = 0.12...0.20
         }
 
         let barkMat = TreeMaterials.barkMaterial(colour: barkCol)
@@ -149,18 +148,23 @@ enum TreeBuilder3D {
         )
         let leavesMat = TreeMaterials.leafMaterial(texture: leafTex, alphaCutoff: 0.30)
         leavesGeom.materials = [leavesMat]
+        // Far LOD kills leaves entirely.
+        leavesGeom.levelsOfDetail = [SCNLevelOfDetail(geometry: nil, worldSpaceDistance: 160)]
+
         let leavesNode = SCNNode(geometry: leavesGeom)
         leavesNode.name = "TreeLeaves"
-        leavesNode.castsShadow = true
-        leavesGeom.levelsOfDetail = [SCNLevelOfDetail(geometry: nil, worldSpaceDistance: 180)]
+        // Critical perf win: do NOT cast shadows from thousands of alpha-tested leaves.
+        leavesNode.castsShadow = false
 
         let root = SCNNode()
         root.name = "Tree3D"
         root.addChildNode(bark.node)
         root.addChildNode(leavesNode)
-
         root.eulerAngles.y = Float.random(in: 0...(2 * .pi), using: &rng)
         root.eulerAngles.z = Float.random(in: -0.03...0.03, using: &rng)
+
+        // Only the solid bark casts shadows.
+        bark.node.castsShadow = true
         root.castsShadow = true
 
         return (root, estimatedHitRadius(for: root))

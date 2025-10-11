@@ -69,13 +69,17 @@ struct BeaconPlacer3D {
         return out
     }
 
+    private static var cachedBeaconGeom: SCNGeometry?
+
     private static func beaconGeometry() -> SCNGeometry {
+        if let g = cachedBeaconGeom { return g }
         let cyl = SCNCapsule(capRadius: 0.18, height: 0.46)
         let m = SCNMaterial()
         m.emission.contents = UIColor.white.withAlphaComponent(0.85)
-        m.diffuse.contents  = UIColor.white.withAlphaComponent(0.2)
+        m.diffuse.contents  = UIColor.white.withAlphaComponent(0.20)
         m.lightingModel = .physicallyBased
         cyl.materials = [m]
+        cachedBeaconGeom = cyl
         return cyl
     }
 }

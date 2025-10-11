@@ -101,26 +101,29 @@ extension FirstPersonEngine {
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
 
+        let screenBounds = scnView?.window?.windowScene?.screen.bounds ?? (scnView?.bounds ?? .zero)
+        let isLandscape = screenBounds.width > screenBounds.height
+
         let sun = SCNLight()
         sun.type = .directional
         sun.intensity = 1500
         sun.color = UIColor.white
 
-        // Shadows tuned for crisp outline + firm ground contact
+        // Shadows tuned for mobile; much lighter in landscape.
         sun.castsShadow = true
         sun.shadowMode = .deferred
-        sun.shadowMapSize = CGSize(width: 3072, height: 3072)
-        sun.shadowSampleCount = 8
-        sun.shadowRadius = 1.4
-        sun.shadowColor = UIColor(white: 0.0, alpha: 0.70)
-
-        // Key: very low bias to eliminate the "halo" around the trunk base
-        sun.shadowBias = 0.004
-
+        sun.shadowMapSize = CGSize(
+            width:  isLandscape ? 1536 : 2048,
+            height: isLandscape ? 1536 : 2048
+        )
+        sun.shadowSampleCount       = isLandscape ? 2 : 4
+        sun.shadowRadius            = 1.2
+        sun.shadowColor             = UIColor(white: 0.0, alpha: 0.70)
+        sun.shadowBias              = 0.004
         sun.automaticallyAdjustsShadowProjection = false
-        sun.orthographicScale = 440
-        sun.maximumShadowDistance = 720
-        sun.shadowCascadeCount = 4
+        sun.orthographicScale       = isLandscape ? 360 : 440
+        sun.maximumShadowDistance   = isLandscape ? 420 : 720
+        sun.shadowCascadeCount      = isLandscape ? 2 : 3
         sun.shadowCascadeSplittingFactor = 0.72
 
         // Terrain (0x400) + vegetation (0x2) + default (0x1)
