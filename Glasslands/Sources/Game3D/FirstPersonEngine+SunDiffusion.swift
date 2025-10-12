@@ -298,6 +298,11 @@ extension FirstPersonEngine {
         guard let view = scnView else { return }
         let S = SunDiffusionState.shared
         S.ensureGPU(view: view)
+        
+        // If the billboard layer is hidden by zenith-cull, skip the shadow encode this frame.
+        if let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true), layer.isHidden {
+            return
+        }
 
         // Giant, cross-faded ground-shadow tile centred near the player.
         let pos = yawNode.presentation.simdWorldPosition

@@ -183,6 +183,9 @@ final class FirstPersonEngine: NSObject {
 
         // Camera rig
         updateRig()
+        
+        // Cull billboard clouds near zenith to avoid GPU stalls when the sky fills the screen.
+        updateZenithCull()
 
         // Movement
         let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
