@@ -65,9 +65,7 @@ enum CloudBillboardFactory {
             let group = SCNNode()
             group.castsShadow = false
             group.position = anchor
-            let bc = SCNBillboardConstraint()
-            bc.freeAxes = .all
-            group.constraints = [bc]
+            // No SCNBillboardConstraint: orientation is set manually each frame (see FirstPersonEngine+Clouds).
 
             // Build sprites under the group.
             for p in cl.puffs {
