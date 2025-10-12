@@ -7,12 +7,12 @@
 //  Builds the cloud billboard layer using volumetric impostor materials.
 //  Each cluster is a single billboarded group; individual puffs are plain nodes.
 //  This eliminates hundreds of per-puff SCNBillboardConstraints while keeping the look.
-//
 
 import SceneKit
 import UIKit
 
 enum CloudBillboardFactory {
+
     @MainActor
     static func makeNode(
         from clusters: [CloudClusterSpec],
@@ -24,6 +24,8 @@ enum CloudBillboardFactory {
 
         struct SizeKey: Hashable { let w: Int; let h: Int }
         var materialCache: [SizeKey: SCNMaterial] = [:]
+
+        // Quantise half-sizes a bit so we reuse materials aggressively.
         let quant: CGFloat = 0.05
 
         @inline(__always)
@@ -32,23 +34,25 @@ enum CloudBillboardFactory {
             if let m = materialCache[key] { return m }
 
             let m = CloudImpostorProgram.makeMaterial(halfWidth: halfW, halfHeight: halfH)
+
+            // Keep blending (for soft vapour), but avoid extra work.
             m.isDoubleSided = false
-            m.cullMode = SCNCullMode.back
-            m.blendMode = SCNBlendMode.alpha
+            m.cullMode = .back
+            m.blendMode = .alpha
             m.readsFromDepthBuffer = true
-            m.writesToDepthBuffer = false
-            m.lightingModel = SCNMaterial.LightingModel.constant
+            m.writesToDepthBuffer = false       // keep transparent sorting correct
+            m.lightingModel = .constant
             m.diffuse.contents = UIColor.white
             m.multiply.contents = UIColor.white
             materialCache[key] = m
             return m
         }
 
-        // Global scale kept identical to your earlier build.
+        // Global scale keeps puffs visually identical to previous builds.
         let GLOBAL_SIZE_SCALE: CGFloat = 0.58
 
         for cl in clusters {
-            // Cluster centroid so children can be positioned relatively.
+            // Compute a stable anchor so puffs can be positioned relatively.
             var ax: Float = 0, ay: Float = 0, az: Float = 0
             if !cl.puffs.isEmpty {
                 for p in cl.puffs { ax += p.pos.x; ay += p.pos.y; az += p.pos.z }
@@ -57,7 +61,7 @@ enum CloudBillboardFactory {
             }
             let anchor = SCNVector3(ax, ay, az)
 
-            // One billboard per cluster (original behaviour).
+            // Cluster group: single billboard constraint (replaces per-puff constraints).
             let group = SCNNode()
             group.castsShadow = false
             group.position = anchor
@@ -85,12 +89,13 @@ enum CloudBillboardFactory {
                 ea.z = Float(p.roll)
                 sprite.eulerAngles = ea
 
+                // Optional subtle tint (kept as multiply to preserve premultiplied look).
                 if let t = p.tint {
                     sprite.geometry?.firstMaterial?.multiply.contents =
                         UIColor(red: CGFloat(t.x), green: CGFloat(t.y), blue: CGFloat(t.z), alpha: 1.0)
                 }
 
-                // Let SceneKit sort transparents naturally; no forced renderingOrder.
+                // Let SceneKit choose ordering; do not force renderingOrder here.
                 group.addChildNode(sprite)
             }
 
