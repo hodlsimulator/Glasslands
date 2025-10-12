@@ -77,7 +77,6 @@ extension FirstPersonEngine {
     }
 
     // MARK: - Per-frame uniforms + impostor advection (renderer thread → MainActor)
-
     func tickVolumetricClouds(atRenderTime t: TimeInterval) {
         // Keep the sky anchor co-located with the player so large radii remain stable.
         if skyAnchor.parent == scene.rootNode {
@@ -114,8 +113,18 @@ extension FirstPersonEngine {
         let dt: Float = 1.0 / 60.0
         advectAllCloudBillboards(dt: dt)
 
-        // NEW: Orient all cluster groups toward the camera without SCNBillboardConstraint.
+        // Manual billboard facing (fixed orientation)
         orientAllCloudGroupsTowardCamera()
+
+        // NEW: apply zenith guard with gentle hysteresis (depth read off near straight-up only).
+        // This leverages the helper defined in FirstPersonEngine+ZenithCull.swift.
+        // The 'hide' path now triggers only extremely close to 90° to preserve visuals.
+        updateZenithCull(
+            depthOffEnter: 1.05, // ~60°
+            depthOffExit:  0.95, // ~54°
+            hideEnterRad:  1.50, // ~86° (very rare)
+            hideExitRad:   1.44  // ~82.5°
+        )
     }
 
     // MARK: - Billboard advection (renderer thread → MainActor)
@@ -264,7 +273,6 @@ extension FirstPersonEngine {
     }
 
     // MARK: - NEW: robust manual billboard orientation (no SCNBillboardConstraint)
-
     @MainActor
     private func orientAllCloudGroupsTowardCamera() {
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
@@ -279,7 +287,8 @@ extension FirstPersonEngine {
             if let cs = g.constraints, !cs.isEmpty { g.constraints = [] }
 
             let gp = g.presentation.simdWorldPosition
-            var forward = camPos - gp
+
+            var forward = camPos - gp // object -> camera
             let len2 = simd_length_squared(forward)
             if len2 < 1e-12 || !forward.x.isFinite || !forward.y.isFinite || !forward.z.isFinite {
                 continue
@@ -295,10 +304,11 @@ extension FirstPersonEngine {
                 right = simd_normalize(right)
             }
 
+            // Orthonormal up so that right × up = forward
             let up = simd_normalize(simd_cross(forward, right))
 
-            // Build orientation. Column-major basis: [right, up, -forward]
-            let basis = simd_float3x3(columns: (right, up, -forward))
+            // Column-major basis: [right, up, forward]  ← (was -forward causing culled faces)
+            let basis = simd_float3x3(columns: (right, up, forward))
             let q = simd_quaternion(basis)
             g.simdOrientation = q
         }
