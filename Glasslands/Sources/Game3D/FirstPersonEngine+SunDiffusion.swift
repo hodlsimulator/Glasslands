@@ -87,41 +87,47 @@ private final class SunDiffusionState {
                 queue = d.makeCommandQueue()
                 lib   = d.makeDefaultLibrary()
 
-                // Build an empty cluster buffer now
                 var zero = ClusterRec(pos: .init(0, 0, 0), rad: 0)
-                emptyClusterBuf = d.makeBuffer(bytes: &zero, length: MemoryLayout<ClusterRec>.stride, options: [])
+                emptyClusterBuf = d.makeBuffer(bytes: &zero,
+                                               length: MemoryLayout<ClusterRec>.stride,
+                                               options: [])
             }
         }
 
-        // (Re)allocate textures if needed (unchanged)
+        // (Re)create textures if needed
         if texA == nil || texA?.width != texSize {
-            texA = makeShadowTex(device); texB = makeShadowTex(device)
+            texA = makeShadowTex(device)
+            texB = makeShadowTex(device)
+
             propA.wrapS = .clamp; propA.wrapT = .clamp
             propB.wrapS = .clamp; propB.wrapT = .clamp
             propA.minificationFilter = .linear; propA.magnificationFilter = .linear
             propB.minificationFilter = .linear; propB.magnificationFilter = .linear
+
             needsEncodeA = true; needsEncodeB = true
             blend = 1.0
         }
 
-        // Kick off pipeline compilation once, asynchronously.
+        // Build compute pipeline asynchronously once, without capturing main-actor state in a Sendable closure.
         if pipe == nil, compilingPipe == false, let d = device, let lib, let fn = lib.makeFunction(name: "cloudShadowKernel") {
             compilingPipe = true
             if #available(iOS 14.0, macOS 11.0, *) {
                 d.makeComputePipelineState(function: fn, options: []) { [weak self] state, _, _ in
-                    Task { @MainActor in
+                    // hop back to main to publish
+                    DispatchQueue.main.async {
                         self?.pipe = state
                         self?.compilingPipe = false
                     }
                 }
             } else {
-                // Fallback: synchronous compile off-main, then hop back.
+                // Fallback: compile off-main, then publish on main
+                let dev = d
+                let fun = fn
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    guard let self, let device = self.device else { return }
-                    let state = try? device.makeComputePipelineState(function: fn)
+                    let state = try? dev.makeComputePipelineState(function: fun)
                     DispatchQueue.main.async {
-                        self.pipe = state
-                        self.compilingPipe = false
+                        self?.pipe = state
+                        self?.compilingPipe = false
                     }
                 }
             }
@@ -149,9 +155,12 @@ private final class SunDiffusionState {
     // Encodes a single map; completion flips the in-flight flag back on the main actor.
     private func encodeMap(
         to tex: MTLTexture?,
-        centre: SIMD2<Float>, half: Float,
+        centre: simd_float2,
+        half: Float,
         uniforms u: CloudUniforms,
-        clusters: UnsafeRawPointer?, clusterBytes: Int, nClusters: Int
+        clusters: UnsafeRawPointer?,
+        clusterBytes: Int,
+        nClusters: Int
     ) {
         guard let queue, let pipe, let device, let tex else {
             encodeInFlight = false
@@ -166,37 +175,41 @@ private final class SunDiffusionState {
         enc.setComputePipelineState(pipe)
         enc.setTexture(tex, index: 0)
 
-        // uClouds
         var U = u
-        let ubuf = device.makeBuffer(bytes: &U, length: MemoryLayout<CloudUniforms>.stride, options: [])
+        let ubuf = device.makeBuffer(bytes: &U,
+                                     length: MemoryLayout<CloudUniforms>.stride,
+                                     options: [])
         enc.setBuffer(ubuf, offset: 0, index: 0)
 
-        // Shadow uniforms
         var SU = ShadowUniforms(centerXZ: centre, halfSize: max(1, half))
-        let sbuf = device.makeBuffer(bytes: &SU, length: MemoryLayout<ShadowUniforms>.stride, options: [])
+        let sbuf = device.makeBuffer(bytes: &SU,
+                                     length: MemoryLayout<ShadowUniforms>.stride,
+                                     options: [])
         enc.setBuffer(sbuf, offset: 0, index: 1)
 
-        // Clusters (always bind something)
         if let clusters, clusterBytes > 0, nClusters > 0 {
             let cbuf = device.makeBuffer(bytes: clusters, length: clusterBytes, options: [])
             enc.setBuffer(cbuf, offset: 0, index: 2)
         } else {
             enc.setBuffer(emptyClusterBuf, offset: 0, index: 2)
         }
+
         var n = UInt32(max(0, nClusters))
-        let nbuf = device.makeBuffer(bytes: &n, length: MemoryLayout<UInt32>.stride, options: [])
+        let nbuf = device.makeBuffer(bytes: &n,
+                                     length: MemoryLayout<UInt32>.stride,
+                                     options: [])
         enc.setBuffer(nbuf, offset: 0, index: 3)
 
         let tg = MTLSize(width: 16, height: 16, depth: 1)
-        let ng = MTLSize(width: (tex.width + 15) / 16, height: (tex.height + 15) / 16, depth: 1)
+        let ng = MTLSize(width: (tex.width  + 15) / 16,
+                         height: (tex.height + 15) / 16,
+                         depth: 1)
         enc.dispatchThreadgroups(ng, threadsPerThreadgroup: tg)
         enc.endEncoding()
 
         cmd.addCompletedHandler { [weak self] _ in
-            // Hop to MainActor before mutating state.
-            Task { @MainActor in
-                self?.encodeInFlight = false
-            }
+            // publish on the main actor without capturing main-actor state in a sendable context
+            DispatchQueue.main.async { self?.encodeInFlight = false }
         }
         cmd.commit()
     }
@@ -311,5 +324,13 @@ extension FirstPersonEngine {
         // Encode if needed, then bind maps/params to materials.
         S.encodeIfNeeded(uniforms: U, clusters: clusters)
         S.bindToMaterials()
+    }
+}
+
+@MainActor
+extension FirstPersonEngine {
+    func prewarmSunDiffusion() {
+        guard let v = scnView else { return }
+        SunDiffusionState.shared.ensureGPU(view: v)
     }
 }
