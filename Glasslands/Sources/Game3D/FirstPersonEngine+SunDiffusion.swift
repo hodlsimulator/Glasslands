@@ -59,8 +59,8 @@ private final class SunDiffusionState {
     fileprivate var encodeInFlight = false
 
     // Blend & recenter bookkeeping
-    private var centreA = SIMD2<Float>(repeating: 0)
-    private var centreB = SIMD2<Float>(repeating: 0)
+    private var centreA = simd_float2(repeating: 0)
+    private var centreB = simd_float2(repeating: 0)
     private var halfA: Float = 1
     private var halfB: Float = 1
     private var blend: Float = 1.0

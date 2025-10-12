@@ -188,7 +188,7 @@ extension FirstPersonEngine {
     }
     
     @MainActor
-    private func prewarmSkyAndSun() {
+    func prewarmSkyAndSun() {
         // Kick the async compute pipeline compile now.
         prewarmSunDiffusion()
 
