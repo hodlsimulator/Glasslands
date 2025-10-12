@@ -40,6 +40,7 @@ struct Scene3DView: UIViewRepresentable {
         context.coordinator.engine = engine
         context.coordinator.view = view
         engine.attach(to: view, recipe: recipe)
+        engine.prewarmSunDiffusion()
 
         // Camera HDR / exposure
         if let cam = view.pointOfView?.camera {

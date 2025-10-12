@@ -223,6 +223,7 @@ extension FirstPersonEngine {
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         applyCloudSunUniforms()
         prewarmSunDiffusion()
+        prewarmSkyAndSun()
     }
 
     // MARK: - Safety ground

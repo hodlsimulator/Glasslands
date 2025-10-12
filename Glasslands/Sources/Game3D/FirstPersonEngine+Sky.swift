@@ -186,4 +186,16 @@ extension FirstPersonEngine {
             )
         }
     }
+    
+    @MainActor
+    private func prewarmSkyAndSun() {
+        // Kick the async compute pipeline compile now.
+        prewarmSunDiffusion()
+
+        // Offscreen-prepare the cloud layer’s shader-modifier materials once
+        if let v = scnView,
+           let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
+            v.prepare([layer]) { _ in /* no-op; just prewarm */ }
+        }
+    }
 }
