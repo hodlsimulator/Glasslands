@@ -6,8 +6,7 @@
 //
 //  Volumetric billboard impostor with true 3D vapour.
 //  Front-to-back single-scattering (view ray), sun-only lighting.
-//  Non-premultiplied colour (.aOne) so lit vapour stays white.
-//  Depth READS enabled so terrain occludes clouds at the horizon.
+//  Non-premultiplied colour (.aOne). Depth READS enabled.
 //
 
 import SceneKit
@@ -63,7 +62,6 @@ enum CloudImpostorProgram {
             return mix(nxy0,nxy1,f.z);
         }
 
-        // Billowy 3D FBM + tiny domain warp → cauliflower micro-structure
         inline float fbm3_billow(float3 p){
             float a=0.0, w=0.55;
             float3 q=p + (noise3(p*0.33+float3(2.1,-1.7,0.9))*2.0-1.0)*0.35;
@@ -81,7 +79,6 @@ enum CloudImpostorProgram {
             return (1.0-g2)/(4.0*3.14159265*denom);
         }
 
-        // Macro silhouette noise (take params so it compiles in declarations block)
         inline float macroMask2D(float2 uv, float shapeScale_, float shapeLo_, float shapeHi_, float shapePow_, float shapeSeed_){
             float sA = noise3(float3(uv*shapeScale_ + float2(shapeSeed_*0.13, shapeSeed_*0.29), 0.0));
             float sB = noise3(float3(uv*(shapeScale_*1.93) + float2(-shapeSeed_*0.51, shapeSeed_*0.07), 1.7));
@@ -95,7 +92,6 @@ enum CloudImpostorProgram {
         inline float sampleD3(float2 uvE, float z, float baseScale, float edgeMask, float coreFloorK){
             float3 p = float3(uvE * (baseScale*360.0), z * (baseScale*420.0));
 
-            // soft internal blobs to form a lumpy core
             float3 s0=float3( 0.00,  0.00,  0.00);
             float3 s1=float3( 0.38, -0.18,  0.22);
             float3 s2=float3(-0.34,  0.26, -0.28);
@@ -148,8 +144,6 @@ enum CloudImpostorProgram {
         // 5 fixed samples through the slab (midpoint rule)
         const int N = 5;
         float zt[5] = { -0.40, -0.20, 0.0, 0.20, 0.40 };
-        float dS[5];
-        for (int i=0;i<N;++i){ dS[i]=sampleD3(uvE, zt[i], baseScale, edgeMask, coreFloorK); }
 
         // Local light visibility: two probes up-sun (cheap soft shadow)
         float3 sView = normalize(sunDirView);
@@ -172,12 +166,13 @@ enum CloudImpostorProgram {
 
         float S = clamp(baseWhite * lightGain * phase * Lvis, 0.0, 8.0);
 
-        for (int i=0;i<N;++i){
-            float rho = max(0.0, 0.12*dS[i] + densBias);
+        // NOTE: sample density inside the loop so we don't waste work after early-out
+        for (int i=0;i<N && T>0.008; ++i){          // ← early-out threshold raised
+            float d   = sampleD3(uvE, zt[i], baseScale, edgeMask, coreFloorK);
+            float rho = max(0.0, 0.12*d + densBias);
             float aStep = 1.0 - exp(-sigmaS * rho * dt);
             Cw += T * S * aStep;
             T  *= (1.0 - aStep);
-            if (T < 1e-3) break;
         }
 
         float alpha = clamp(1.0 - T, 0.0, 1.0);
@@ -189,15 +184,15 @@ enum CloudImpostorProgram {
         """
 
         let m = SCNMaterial()
-        m.lightingModel = .constant
+        m.lightingModel = SCNMaterial.LightingModel.constant
         m.isDoubleSided = false
-        m.cullMode = .back
+        m.cullMode = SCNCullMode.back
 
-        // IMPORTANT: let terrain occlude clouds at horizon
+        // terrain occludes clouds at horizon
         m.readsFromDepthBuffer = true
         m.writesToDepthBuffer = false
 
-        m.blendMode = .alpha
+        m.blendMode = SCNBlendMode.alpha
         m.transparencyMode = .aOne
         m.shaderModifiers = [.fragment: frag]
 

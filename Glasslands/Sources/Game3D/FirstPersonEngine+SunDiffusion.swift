@@ -77,6 +77,8 @@ private final class SunDiffusionState {
     private let texSize = 512
     private let recenterFrac: Float = 0.45
     private let blendTime: CFTimeInterval = 0.35
+    
+    private var compilingPipe = false
 
     func ensureGPU(view: SCNView) {
         if device == nil {
@@ -84,24 +86,45 @@ private final class SunDiffusionState {
             if let d = device {
                 queue = d.makeCommandQueue()
                 lib   = d.makeDefaultLibrary()
-                if let f = lib?.makeFunction(name: "cloudShadowKernel") {
-                    pipe = try? d.makeComputePipelineState(function: f)
-                }
+
+                // Build an empty cluster buffer now
                 var zero = ClusterRec(pos: .init(0, 0, 0), rad: 0)
-                emptyClusterBuf = d.makeBuffer(bytes: &zero,
-                                               length: MemoryLayout<ClusterRec>.stride,
-                                               options: [])
+                emptyClusterBuf = d.makeBuffer(bytes: &zero, length: MemoryLayout<ClusterRec>.stride, options: [])
             }
         }
+
+        // (Re)allocate textures if needed (unchanged)
         if texA == nil || texA?.width != texSize {
-            texA = makeShadowTex(device)
-            texB = makeShadowTex(device)
+            texA = makeShadowTex(device); texB = makeShadowTex(device)
             propA.wrapS = .clamp; propA.wrapT = .clamp
             propB.wrapS = .clamp; propB.wrapT = .clamp
             propA.minificationFilter = .linear; propA.magnificationFilter = .linear
             propB.minificationFilter = .linear; propB.magnificationFilter = .linear
             needsEncodeA = true; needsEncodeB = true
             blend = 1.0
+        }
+
+        // Kick off pipeline compilation once, asynchronously.
+        if pipe == nil, compilingPipe == false, let d = device, let lib, let fn = lib.makeFunction(name: "cloudShadowKernel") {
+            compilingPipe = true
+            if #available(iOS 14.0, macOS 11.0, *) {
+                d.makeComputePipelineState(function: fn, options: []) { [weak self] state, _, _ in
+                    Task { @MainActor in
+                        self?.pipe = state
+                        self?.compilingPipe = false
+                    }
+                }
+            } else {
+                // Fallback: synchronous compile off-main, then hop back.
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    guard let self, let device = self.device else { return }
+                    let state = try? device.makeComputePipelineState(function: fn)
+                    DispatchQueue.main.async {
+                        self.pipe = state
+                        self.compilingPipe = false
+                    }
+                }
+            }
         }
     }
 

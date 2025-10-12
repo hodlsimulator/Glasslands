@@ -222,6 +222,7 @@ extension FirstPersonEngine {
 
         applySunDirection(azimuthDeg: 40, elevationDeg: 65)
         applyCloudSunUniforms()
+        prewarmSunDiffusion()
     }
 
     // MARK: - Safety ground
@@ -248,5 +249,11 @@ extension FirstPersonEngine {
 
         scene.rootNode.childNodes.filter { $0.name == "SafetyGround" }.forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(node)
+    }
+        
+    @MainActor
+    func prewarmSunDiffusion() {
+        guard let view = scnView else { return }
+        SunDiffusionState.shared.ensureGPU(view: view)  // starts async compile
     }
 }
