@@ -119,9 +119,10 @@ final class FirstPersonEngine: NSObject {
 
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
-            metal.wantsExtendedDynamicRangeContent = true
-            metal.colorspace = CGColorSpace(name: CGColorSpace.extendedSRGB)
-            metal.pixelFormat = .bgra10_xr_srgb
+            // Turn off EDR: cheaper color attachment on iOS GPUs.
+            metal.wantsExtendedDynamicRangeContent = false
+            metal.colorspace = CGColorSpaceCreateDeviceRGB()
+            metal.pixelFormat = .bgra8Unorm_srgb
             metal.maximumDrawableCount = 3
         }
 
@@ -135,7 +136,7 @@ final class FirstPersonEngine: NSObject {
         removeVolumetricDomeIfPresent()
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
-            clusterCount: 140,
+            clusterCount: 56,
             seed: cloudSeed
         ) { [weak self] root in
             guard let self else { return }
