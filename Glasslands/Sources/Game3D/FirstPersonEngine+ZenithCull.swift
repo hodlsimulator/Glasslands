@@ -40,30 +40,39 @@ extension FirstPersonEngine {
 
         // If there is no geometry yet, nothing to toggle.
         var anyMaterial: SCNMaterial?
-        if let g = layer.childNodes.first?.geometry { anyMaterial = g.firstMaterial }
+        if let g = layer.childNodes.first?.geometry {
+            anyMaterial = g.firstMaterial
+        }
         if anyMaterial == nil {
             var found: SCNMaterial?
             layer.enumerateChildNodes { n, stop in
-                if let m = n.geometry?.firstMaterial { found = m; stop.pointee = true }
+                if let m = n.geometry?.firstMaterial {
+                    found = m
+                    stop.pointee = true
+                }
             }
-            if found == nil { return }
-            anyMaterial = found
+            guard let fm = found else { return }
+            anyMaterial = fm
         }
 
         // 1) Hide/show the whole layer very near the zenith (with hysteresis).
         let isLookingUp = pitch > 0
         let wasHidden = layer.isHidden
         if wasHidden {
-            if !isLookingUp || pitch < hideExitRad { layer.isHidden = false }
+            if !isLookingUp || pitch < hideExitRad {
+                layer.isHidden = false
+            }
         } else {
-            if isLookingUp && pitch > hideEnterRad { layer.isHidden = true }
+            if isLookingUp && pitch > hideEnterRad {
+                layer.isHidden = true
+            }
         }
 
         // If hidden, skip depth gating.
         if layer.isHidden { return }
 
         // 2) Depth-read gating (independent hysteresis, gentler thresholds).
-        //    Read current state from an existing material to avoid extra storage.
+        // Read current state from an existing material to avoid extra storage.
         let readsNow: Bool = (anyMaterial?.readsFromDepthBuffer ?? true)
 
         let wantDepthOff = isLookingUp && pitch > depthOffEnter

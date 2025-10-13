@@ -5,6 +5,7 @@
 //  Created by . . on 9/30/25.
 //
 //  UIViewRepresentable wrapper. Uses a single SceneKit-driven render loop via RendererProxy.
+//  Engine is created here and returned via onReady.
 //
 
 import SwiftUI
@@ -27,11 +28,13 @@ struct Scene3DView: UIViewRepresentable {
         view.isJitteringEnabled = false
         view.isOpaque = true
         view.backgroundColor = .black
+
+        // Main surface: keep EDR OFF and use 8-bit sRGB (cheaper & stabler for big translucent passes)
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
-            metal.wantsExtendedDynamicRangeContent = true
-            metal.colorspace = CGColorSpace(name: CGColorSpace.extendedSRGB)
-            metal.pixelFormat = .bgra10_xr_srgb
+            metal.wantsExtendedDynamicRangeContent = false
+            metal.colorspace = CGColorSpaceCreateDeviceRGB()
+            metal.pixelFormat = .bgra8Unorm_srgb
             metal.maximumDrawableCount = 3
         }
 
@@ -39,6 +42,7 @@ struct Scene3DView: UIViewRepresentable {
         let engine = FirstPersonEngine(onScore: onScore)
         context.coordinator.engine = engine
         context.coordinator.view = view
+
         engine.attach(to: view, recipe: recipe)
         engine.prewarmSunDiffusion()
 
@@ -56,34 +60,19 @@ struct Scene3DView: UIViewRepresentable {
             cam.bloomBlurRadius = 12.0
         }
 
-        // Single render loop via SceneKit delegate
+        // Single render loop via SceneKit delegate (proxy hops to MainActor)
         let proxy = RendererProxy(engine: engine)
         view.delegate = proxy
         context.coordinator.delegateProxy = proxy
+
         view.rendersContinuously = true
         view.isPlaying = !isPaused
-        engine.setPaused(isPaused)
 
-        // Pick an initial fps cap; refine once a window exists
-        view.preferredFramesPerSecond = 30
-        DispatchQueue.main.async { [weak view] in
-            guard let v = view else { return }
-            v.preferredFramesPerSecond = desiredFPS(for: v)
-        }
-        DispatchQueue.main.async {
-            onReady(engine)
-        }
+        // Hard-cap at 60 FPS for stability on iOS
+        view.preferredFramesPerSecond = 60
 
-        // Thermal changes delivered explicitly on the main queue.
-        context.coordinator.thermalObserver = NotificationCenter.default.addObserver(
-            forName: ProcessInfo.thermalStateDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak coord = context.coordinator] _ in
-            Task { @MainActor in
-                coord?.handleThermalChanged()
-            }
-        }
+        // Tell host that the engine is ready
+        DispatchQueue.main.async { onReady(engine) }
 
         return view
     }
@@ -91,19 +80,13 @@ struct Scene3DView: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {
         context.coordinator.engine?.setPaused(isPaused)
         uiView.isPlaying = !isPaused
-
-        // Re-evaluate the desired cap on rotation / window changes
-        let newFPS = desiredFPS(for: uiView)
-        if uiView.preferredFramesPerSecond != newFPS {
-            uiView.preferredFramesPerSecond = newFPS
+        // Reassert 60 FPS if anything external changed it
+        if uiView.preferredFramesPerSecond != 60 {
+            uiView.preferredFramesPerSecond = 60
         }
     }
 
     static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
-        if let token = coordinator.thermalObserver {
-            NotificationCenter.default.removeObserver(token)
-            coordinator.thermalObserver = nil
-        }
         uiView.isPlaying = false
         uiView.delegate = nil
         coordinator.delegateProxy = nil
@@ -114,26 +97,9 @@ struct Scene3DView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     @MainActor
-    private func desiredFPS(for view: SCNView) -> Int {
-        let screenHz = view.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
-        let baseCap = (screenHz >= 120) ? 40 : 30
-        let thermal = ProcessInfo.processInfo.thermalState
-        return (thermal == .serious || thermal == .critical) ? 30 : baseCap
-    }
-
-    @MainActor
     final class Coordinator: NSObject {
         var engine: FirstPersonEngine?
         weak var view: SCNView?
         var delegateProxy: RendererProxy?
-        var thermalObserver: NSObjectProtocol?
-
-        // Runs on the main queue via the block-based observer.
-        func handleThermalChanged() {
-            guard let v = view else { return }
-            let newFPS = (v.window?.windowScene?.screen.maximumFramesPerSecond ?? 60) >= 120 ? 40 : 30
-            let thermal = ProcessInfo.processInfo.thermalState
-            v.preferredFramesPerSecond = (thermal == .serious || thermal == .critical) ? 30 : newFPS
-        }
     }
 }

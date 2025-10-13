@@ -4,7 +4,6 @@
 //
 //  Created by . . on 9/29/25.
 //
-//  Glasslands/Sources/App/ContentView.swift
 //  Slim SwiftUI host that wires HUD + 3D view + virtual sticks.
 //
 
@@ -29,11 +28,14 @@ final class GameViewModel: ObservableObject {
 }
 
 struct ContentView: View {
+
     @StateObject private var vm = GameViewModel()
     @State private var engine: FirstPersonEngine?
     @State private var lastSnapshot: UIImage?
 
-    private func applySeed() { engine?.apply(recipe: vm.recipe()) }
+    private func applySeed() {
+        engine?.apply(recipe: vm.recipe())
+    }
 
     var body: some View {
         ZStack {
@@ -51,7 +53,9 @@ struct ContentView: View {
                 seedCharm: $vm.seedCharm,
                 score: vm.score,
                 isPaused: $vm.isPaused,
-                onApplySeed: { applySeed() },
+                onApplySeed: {
+                    applySeed()
+                },
                 onSavePostcard: {
                     guard let img = engine?.snapshot() else { return }
                     Task {
@@ -87,10 +91,10 @@ struct ContentView: View {
                     Spacer()
                     HStack {
                         MoveStickView { vec in
-                            engine.setMoveInput(vec)   // x = strafe, y = forward
+                            engine.setMoveInput(vec) // x = strafe, y = forward
                         }
                         Spacer(minLength: 24)
-                        // NEW: swipe-to-look (no inertia)
+                        // Swipe-to-look (no inertia)
                         LookPadView { delta in
                             engine.applyLookDelta(points: delta)
                         }
