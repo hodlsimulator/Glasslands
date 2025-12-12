@@ -186,7 +186,7 @@ final class FirstPersonEngine: NSObject {
         updateRig()
         
         // Cull billboard clouds near zenith to avoid GPU stalls when the sky fills the screen.
-        updateZenithCull()
+        // updateZenithCull()
 
         // Movement
         let forward = SIMD3(-sinf(yaw), 0, -cosf(yaw))
@@ -320,7 +320,7 @@ final class FirstPersonEngine: NSObject {
         }
 
         // Sun diffusion reacts to billboard occlusion
-        updateSunDiffusion()
+        // updateSunDiffusion()
 
         // Safety ground follow
         if let sg = scene.rootNode.childNode(withName: "SafetyGround", recursively: false) {
