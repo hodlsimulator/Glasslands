@@ -26,41 +26,43 @@ enum CloudImpostorProgram {
         #pragma transparent
 
         // ===== uniforms (SceneKit: keep arguments as explicit lines) =====
-        #pragma arguments float impostorHalfW;
-        #pragma arguments float impostorHalfH;
+        #pragma arguments
+        float impostorHalfW;
+        float impostorHalfH;
 
-        #pragma arguments float densityMul;
-        #pragma arguments float thickness;
-        #pragma arguments float densBias;
-        #pragma arguments float coverage;
-        #pragma arguments float puffScale;
+        float densityMul;
+        float thickness;
+        float densBias;
+        float coverage;
+        float puffScale;
 
-        #pragma arguments float edgeFeather;
-        #pragma arguments float edgeCut;
-        #pragma arguments float edgeNoiseAmp;
+        float edgeFeather;
+        float edgeCut;
+        float edgeNoiseAmp;
 
-        #pragma arguments float rimFeatherBoost;
-        #pragma arguments float rimFadePow;
+        float rimFeatherBoost;
+        float rimFadePow;
 
-        #pragma arguments float shapeScale;
-        #pragma arguments float shapeLo;
-        #pragma arguments float shapeHi;
-        #pragma arguments float shapePow;
-        #pragma arguments float shapeSeed;
+        float shapeScale;
+        float shapeLo;
+        float shapeHi;
+        float shapePow;
+        float shapeSeed;
 
-        #pragma arguments float3 sunDirView;
-        #pragma arguments float hgG;
+        float3 sunDirView;
+        float hgG;
 
-        #pragma arguments float baseWhite;
-        #pragma arguments float lightGain;
+        float baseWhite;
+        float lightGain;
 
         // Optional multiplier (engine currently sets hiGain; previous shader ignored it).
         // Default is 1.0 so behaviour remains unchanged.
-        #pragma arguments float hiGain;
+        float hiGain;
 
-        #pragma arguments float occK;
+        float occK;
 
         // ===== helpers =====
+
         #pragma declarations
 
         inline float hash1(float n)
