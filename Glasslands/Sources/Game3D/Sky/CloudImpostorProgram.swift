@@ -6,7 +6,7 @@
 //
 //  Volumetric “puff” impostor shader modifier for SceneKit.
 //  Magenta output indicates shader compile failure at runtime.
-//  Keep helper functions in `#pragma declarations` (global scope).
+//  Keep helper functions in `#pragma declaration` (global scope).
 //
 
 import SceneKit
@@ -54,6 +54,8 @@ enum CloudImpostorProgram {
     float  u_ambient;
     float  u_quality;
     float3 u_sunDir;
+
+    #pragma declaration
 
     inline float hash11(float n) {
         return fract(sin(n) * 43758.5453123);
