@@ -14,9 +14,8 @@ import simd
 import UIKit
 
 // Volumetric “puff” impostor for cloud billboards.
-// Implemented as a SceneKit surface shader modifier that integrates density through a soft ellipsoid.
-// Opacity is driven via `_surface.transparent.a` (SceneKit’s transparent channel), so the material must
-// have `transparent.contents` set to enable the transparent slot.
+// Implemented as a SceneKit surface shader modifier that raymarches a soft ellipsoid volume.
+// Output is premultiplied (rgb already includes alpha), so transparencyMode = .aOne is required.
 enum CloudImpostorProgram {
 
     // MARK: - Uniform keys (SceneKit material values)
@@ -37,6 +36,10 @@ enum CloudImpostorProgram {
 
     // MARK: - Shader modifier
 
+    // Goals:
+    // - Restore the “real cloud” interior from 5f739a9 (phase + soft self-shadow + multi-scale clumps).
+    // - Remove visible quad edges (hard square / rectangle silhouettes).
+    // - Keep render cost down versus 5f739a9 (fewer steps, fewer noise octaves, one shadow tap, early UV reject).
     private static let shader: String = """
     #pragma arguments
     float  u_halfWidth;
@@ -92,10 +95,10 @@ enum CloudImpostorProgram {
         float v = 0.0;
         float a = 0.5;
 
-        // Fewer octaves: big perf win for lots of sprites.
+        // 3 octaves (cheaper than the older 4).
         for (int i = 0; i < 3; i++) {
             v += a * noise3(p);
-            p = p * 2.01 + float3(17.1, 3.2, 5.9);
+            p = p * 2.02 + float3(17.1, 3.2, 5.9);
             a *= 0.5;
         }
         return v;
@@ -120,34 +123,45 @@ enum CloudImpostorProgram {
         float base = edge * yFade;
         if (base <= 0.0) { return 0.0; }
 
-        // Multi-scale noise. Anchor introduces per-instance variation even with shared materials.
-        float3 p = q * 2.20 + anchor * 0.00110 + seed;
+        // Multi-scale clumps (restores the “real cloud” interior feel).
+        float3 p = q * 2.35 + anchor * 0.00125 + seed;
 
-        float n = fbmFast(p);
-        float clumps = smoothstep(0.42, 0.82, n);
+        float n1 = fbmFast(p);
+        float n2 = fbmFast(p * 2.75 + 11.3);
+
+        float n = mix(n1, n2, 0.35);
+
+        // Shape into soft clumps.
+        float clumps = smoothstep(0.35, 0.80, n);
 
         return base * clumps;
     }
 
     #pragma body
 
-    // Fast corner reject using the plane UVs.
-    // For any pixel outside the unit circle in XY, density is guaranteed 0 for the whole ray,
-    // so the expensive integration can be skipped.
+    // UV-based circular mask to kill visible quad corners.
     float2 uv = _surface.diffuseTexcoord;
     float2 q2 = (uv - float2(0.5, 0.5)) * 2.0;
     float r2 = length(q2);
-    if (r2 > 1.0) {
-        _surface.diffuse = float4(1.0, 1.0, 1.0, 1.0);
-        _surface.transparent = float4(1.0, 1.0, 1.0, 0.0);
+
+    // Hard reject a little outside the unit circle to skip work entirely.
+    if (r2 > 1.02) {
+        _surface.diffuse = float4(0.0, 0.0, 0.0, 0.0);
     } else {
 
-        // Local ray origin and direction.
+        // Soft feather towards the rim (prevents “card” silhouettes).
+        float uvMask = 1.0 - smoothstep(0.96, 1.02, r2);
+
+        // Local ray origin and direction
         float3 ro = (scn_node.inverseModelViewTransform * float4(0.0, 0.0, 0.0, 1.0)).xyz;
 
         // _surface.position is in view space; camera is at origin in view space.
         float3 rdView = normalize(_surface.position);
         float3 rd = normalize((scn_node.inverseModelViewTransform * float4(rdView, 0.0)).xyz);
+
+        // Convert world sun direction to local space.
+        float3 sunW = normalize(u_sunDir);
+        float3 sunL = normalize((scn_node.inverseModelTransform * float4(sunW, 0.0)).xyz);
 
         // Slight shrink so density reaches zero before the plane boundary.
         float hw = max(0.001, u_halfWidth  * 0.97);
@@ -169,14 +183,14 @@ enum CloudImpostorProgram {
         float t0 = max(max(tsm.x, tsm.y), tsm.z);
         float t1 = min(min(tsM.x, tsM.y), tsM.z);
 
+        // If no intersection, output fully transparent.
         if (t1 <= max(t0, 0.0)) {
-            _surface.diffuse = float4(1.0, 1.0, 1.0, 1.0);
-            _surface.transparent = float4(1.0, 1.0, 1.0, 0.0);
+            _surface.diffuse = float4(0.0, 0.0, 0.0, 0.0);
         } else {
 
-            // Raymarch steps (reduced for performance).
+            // Raymarch step count (reduced vs 5f739a9 to avoid stalls).
             float q = clamp(u_quality, 0.0, 1.0);
-            float stepsF = mix(5.0, 11.0, q);
+            float stepsF = mix(10.0, 22.0, q);
             int steps = int(stepsF);
 
             float tStart = max(t0, 0.0);
@@ -187,57 +201,75 @@ enum CloudImpostorProgram {
             float t = tStart + dt * jitter;
 
             float trans = 1.0;
-            float shadeAcc = 0.0;
+            float3 col = float3(0.0);
 
             // Per-puff anchor (world translation) for variation.
             float3 anchor = scn_node.modelTransform[3].xyz;
 
-            // Integrate opacity and a very light “shade” term.
-            // Clouds stay white: shade is clamped very high.
-            for (int i = 0; i < 12; i++) {
+            // Phase term scaling (kept SDR).
+            float g = clamp(u_phaseG, -0.95, 0.95);
+            float phaseScale = 0.08;
+
+            // Fixed max loop keeps compilation predictable.
+            for (int i = 0; i < 24; i++) {
                 if (i >= steps) { break; }
-                if (trans < 0.06) { break; }
+                if (trans < 0.03) { break; }
 
                 float3 p = ro + rd * t;
 
+                // Normalised coords in the ellipsoid volume.
                 float3 qv = float3(p.x / hw, p.y / hh, p.z / hz);
+
                 float d = densityAt(qv, anchor, u_edgeFeather, u_heightFade, u_seed);
+                if (d > 0.0005) {
 
-                if (d > 0.0006) {
+                    // Normalise step length to unit size so densityMul behaves consistently.
                     float stepU = dt / unit;
+
+                    // Opacity step via Beer-Lambert.
                     float sigma = d * u_densityMul;
-                    float aStep = 1.0 - exp(-sigma * stepU);
+                    float a = 1.0 - exp(-sigma * stepU);
 
-                    if (aStep > 0.0002) {
-                        float w = trans * aStep;
+                    if (a > 0.0001) {
 
-                        // Very subtle shading from density only (no sun phase, no shadow taps).
-                        float bright = 1.0 - 0.10 * d;
-                        bright = clamp(bright, 0.90, 1.0);
+                        // One-tap self-shadow (cheaper than the older two-tap).
+                        float shadow = 1.0;
+                        float shadowStep = unit * 0.55;
 
-                        shadeAcc += w * bright;
-                        trans *= (1.0 - aStep);
+                        float3 sp = p + sunL * shadowStep;
+                        float3 sq = float3(sp.x / hw, sp.y / hh, sp.z / hz);
+                        float ds = densityAt(sq, anchor, u_edgeFeather, u_heightFade, u_seed * 1.37);
+                        shadow *= exp(-ds * u_densityMul * 0.45);
+
+                        // Henyey-Greenstein phase (scaled).
+                        float mu = dot(rd, sunL);
+                        float denom = pow(max(1.0 + g * g - 2.0 * g * mu, 1e-3), 1.5);
+                        float phase = ((1.0 - g * g) / denom) * phaseScale;
+
+                        float light = clamp(u_ambient + u_lightGain * shadow * phase, 0.0, 1.0);
+                        float3 sampleCol = float3(u_baseWhite) * light;
+
+                        // Front-to-back premultiplied compositing.
+                        col += trans * a * sampleCol;
+                        trans *= (1.0 - a);
                     }
                 }
 
                 t += dt;
             }
 
-            float alpha = clamp(1.0 - trans, 0.0, 1.0);
+            float alpha = 1.0 - trans;
 
-            if (alpha <= 0.0001) {
-                _surface.diffuse = float4(1.0, 1.0, 1.0, 1.0);
-                _surface.transparent = float4(1.0, 1.0, 1.0, 0.0);
-            } else {
-                float shade = shadeAcc / max(alpha, 1e-4);
-                shade = clamp(shade, 0.92, 1.0);
+            // Clamp to SDR.
+            col = clamp(col, float3(0.0), float3(1.0));
+            alpha = clamp(alpha, 0.0, 1.0);
 
-                float3 rgb = float3(clamp(shade * u_baseWhite, 0.0, 1.0));
+            // UV rim mask kills any remaining card edge.
+            col *= uvMask;
+            alpha *= uvMask;
 
-                // Diffuse stays opaque; opacity is provided by transparent.a.
-                _surface.diffuse = float4(rgb, 1.0);
-                _surface.transparent = float4(1.0, 1.0, 1.0, alpha);
-            }
+            // Premultiplied output.
+            _surface.diffuse = float4(col, alpha);
         }
     }
     """
@@ -264,19 +296,15 @@ enum CloudImpostorProgram {
         let m = SCNMaterial()
         m.lightingModel = .constant
 
-        // Enable the transparent slot so `_surface.transparent` is honoured.
-        // aOne uses the alpha channel (alpha=1 opaque, alpha=0 fully transparent).
-        m.transparent.contents = UIColor.white
+        // Premultiplied alpha output from shader.
         m.transparencyMode = .aOne
-
-        // Blending for soft vapour edges.
         m.blendMode = .alpha
 
         // Transparent objects: read depth for occlusion but do not write.
         m.readsFromDepthBuffer = true
         m.writesToDepthBuffer = false
 
-        // Material colours stay neutral.
+        // Neutral defaults (shader writes the final colour/alpha).
         m.diffuse.contents = UIColor.white
         m.multiply.contents = UIColor.white
 
