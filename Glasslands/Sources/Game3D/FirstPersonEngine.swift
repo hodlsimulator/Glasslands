@@ -383,12 +383,16 @@ final class FirstPersonEngine: NSObject {
 
     func groundHeightRaycast(worldX x: Float, z: Float) -> Float? {
         let from = SCNVector3(x, 10_000, z)
-        let to   = SCNVector3(x, -10_000, z)
-        let hits = scene.rootNode.hitTestWithSegment(from: from, to: to, options: nil)
-        if let hit = hits.first(where: {
-            let n = $0.node
-            return (n.categoryBitMask & 0x00000400) != 0 || (n.name?.hasPrefix("chunk_") ?? false)
-        }) {
+        let to = SCNVector3(x, -10_000, z)
+
+        // Terrain-only raycast: avoids hitting sky dome + cloud planes every frame.
+        let options: [SCNHitTestOption: Any] = [
+            .categoryBitMask: 0x0000_0400,
+            .firstFoundOnly: true,
+            .ignoreHiddenNodes: true
+        ]
+
+        if let hit = scene.rootNode.hitTestWithSegment(from: from, to: to, options: options).first {
             return hit.worldCoordinates.y
         }
         return nil
