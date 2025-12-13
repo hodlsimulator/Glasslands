@@ -11,20 +11,23 @@
 import Foundation
 import SceneKit
 
-// File-scope so it does not inherit any global-actor isolation inferred for RendererProxy.
+@MainActor
 private final class RenderFramePump: @unchecked Sendable {
 
     private weak var engine: FirstPersonEngine?
 
+    // Mutated from render thread + drained on MainActor.
+    // Lock provides the synchronisation; nonisolated(unsafe) opts these fields
+    // out of MainActor isolation.
     private let lock = NSLock()
-    private var scheduled = false
-    private var pendingTime: TimeInterval?
+    private nonisolated(unsafe) var scheduled = false
+    private nonisolated(unsafe) var pendingTime: TimeInterval?
 
     init(engine: FirstPersonEngine) {
         self.engine = engine
     }
 
-    func push(_ t: TimeInterval) {
+    nonisolated func push(_ t: TimeInterval) {
         var shouldSchedule = false
 
         lock.lock()
@@ -42,7 +45,6 @@ private final class RenderFramePump: @unchecked Sendable {
         }
     }
 
-    @MainActor
     private func drain() {
         while true {
             lock.lock()
@@ -65,7 +67,6 @@ private final class RenderFramePump: @unchecked Sendable {
 
 final class RendererProxy: NSObject, SCNSceneRendererDelegate {
 
-    // Nonisolated so the render-thread callback can access it even if this type is inferred @MainActor.
     nonisolated private let tick: @Sendable (TimeInterval) -> Void
 
     init(engine: FirstPersonEngine) {
@@ -76,7 +77,6 @@ final class RendererProxy: NSObject, SCNSceneRendererDelegate {
         super.init()
     }
 
-    // SceneKit may call this from a render thread.
     nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
         tick(time)
     }
