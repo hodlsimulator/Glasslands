@@ -18,28 +18,28 @@ extension FirstPersonEngine {
         baseY: CGFloat = 400,
         topY: CGFloat = 1400,
 
-        // ↓ Roughly halves overall vapour vs your current commit
-        coverage: CGFloat = 0.44,        // was 0.62
+        // Balanced scattered cumulus: plenty of clouds with clear blue gaps.
+        coverage: CGFloat = 0.52,
 
-        // ↓ Keeps puffs chunky but not “solid overcast”
-        densityMul: CGFloat = 1.20,      // was 1.40
+        // Chunky puffs without turning into an overcast sheet.
+        densityMul: CGFloat = 1.30,
 
-        // ↓ Small step count reduction for extra headroom
-        stepMul: CGFloat = 0.88,         // was 1.00
+        // Moderate march budget (keeps softness without being heavy).
+        stepMul: CGFloat = 0.92,
 
-        // ↓ Slightly more blue near the horizon
-        horizonLift: CGFloat = 0.08,     // was 0.10
+        // Slight lift keeps the horizon from becoming too grey under cloud.
+        horizonLift: CGFloat = 0.10,
 
-        // ↓ Preserve cauliflower edges; a touch less erosion than 0.85
-        detailMul: CGFloat = 0.90,       // was 0.85
+        // Cauliflower edges with enough breakup to avoid flat layers.
+        detailMul: CGFloat = 0.94,
 
-        // ↓ Similar micro-cell size and influence as before
-        puffScale: CGFloat = 0.0043,     // was 0.0042
-        puffStrength: CGFloat = 0.74,    // was 0.78
+        // Micro-cell scale and strength.
+        puffScale: CGFloat = 0.0043,
+        puffStrength: CGFloat = 0.76,
 
-        // ↓ More, smaller “islands” with a stricter gate → scattered cumulus
-        macroScale: CGFloat = 0.00044,   // was 0.00030
-        macroThreshold: CGFloat = 0.62   // was 0.49
+        // Macro “islands” to keep clouds scattered rather than uniform.
+        macroScale: CGFloat = 0.00042,
+        macroThreshold: CGFloat = 0.63
     ) {
         installVolumetricCloudsIfMissing(baseY: baseY, topY: topY, coverage: coverage)
         enableVolumetricCloudImpostors(false)

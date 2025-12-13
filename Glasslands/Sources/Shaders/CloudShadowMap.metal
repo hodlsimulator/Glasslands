@@ -16,7 +16,7 @@ inline float clamp01(float x){ return clamp(x, 0.0f, 1.0f); }
 inline float lerp1(float a,float b,float t){ return a + (b - a) * t; }
 inline float frac(float x){ return x - floor(x); }
 
-inline float hash1(float n){ return frac(sin(n) * 43758.5453123f); }
+inline float hash1(float n){ n = frac(n * 0.1031f); n *= n + 33.33f; n *= n + n; return frac(n); }
 inline float noise3(float3 x){
     float3 p = floor(x), f = x - p;
     f = f * f * (3.0f - 2.0f * f);
