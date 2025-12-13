@@ -4,40 +4,69 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Stores the procedural volumetric-cloud parameter pack used by:
-//  - CloudShadowMap.metal (cloud shadows sweeping over terrain)
-//  - optional volumetric sky cloud layers
+//  Thread-safe live uniforms for the volumetric vapour shader (Metal).
+//  Adds a configure(...) API so gameplay code can choose "scattered cumulus" easily.
 //
 
-import Foundation
 import simd
+import os
 
-actor VolCloudUniformsStore {
+public struct GLCloudUniforms {
+    public var sunDirWorld: SIMD4<Float>
+    public var sunTint: SIMD4<Float>
+    public var params0: SIMD4<Float> // x=time, y=wind.x, z=wind.y, w=baseY
+    public var params1: SIMD4<Float> // x=topY, y=coverage, z=densityMul, w=stepMul
+    public var params2: SIMD4<Float> // x=mieG, y=powderK, z=horizonLift, w=detailMul
+    public var params3: SIMD4<Float> // x=domainOffX, y=domainOffY, z=domainRotate, w=puffScale
+    public var params4: SIMD4<Float> // x=puffStrength, y=quality, z=macroScale, w=macroThreshold
+}
 
-    static let shared = VolCloudUniformsStore()
+public final class VolCloudUniformsStore {
 
-    struct Snapshot {
-        var params1: simd_float4
-        var params2: simd_float4
-        var params3: simd_float4
-        var params4: simd_float4
-        var wind: simd_float4
-        var time: Float
+    public static let shared = VolCloudUniformsStore()
+
+    private var u: GLCloudUniforms
+    private var lock = os_unfair_lock()
+
+    private init() {
+        // Bright scattered-cumulus defaults.
+        u = GLCloudUniforms(
+            sunDirWorld: SIMD4(0, 1, 0, 0),
+            sunTint:     SIMD4(1, 1, 1, 0),
+            params0:     SIMD4(0, 0.60, 0.20, 400),        // time, wind.x, wind.y, baseY
+            params1:     SIMD4(1400, 0.34, 1.10, 0.70),    // topY, coverage, densityMul, stepMul
+            params2:     SIMD4(0.60, 1.40, 0.10, 0.90),    // mieG, powderK, horizonLift, detailMul
+            params3:     SIMD4(0, 0, 0, 0.0048),           // domainOffX, domainOffY, rotate, puffScale
+            params4:     SIMD4(0.62, 0.45, 0.00035, 0.58)  // puffStrength, quality, macroScale, macroThreshold
+        )
     }
 
-    // params1: topY, coverage, densityMul, stepMul
-    // params2: mieG, powderK, horizonLift, detailMul
-    // params3: domainOffX, domainOffY, rotate, puffScale
-    // params4: puffStrength, quality, macroScale, macroThreshold
-    private var params1 = simd_float4(1400, 0.46, 1.25, 0.82)
-    private var params2 = simd_float4(0.60, 1.40, 0.10, 0.90)
-    private var params3 = simd_float4(0, 0, 0, 0.0046)
-    private var params4 = simd_float4(0.70, 0.45, 0.00042, 0.62)
+    public func snapshot() -> GLCloudUniforms {
+        os_unfair_lock_lock(&lock)
+        let out = u
+        os_unfair_lock_unlock(&lock)
+        return out
+    }
 
-    private var wind = simd_float4(0.45, 0.0, 0.18, 0.0) // xz = wind direction, z = speed scale
-    private var time: Float = 0
+    // Fast per-frame update from the render clock.
+    public func update(
+        time: Float,
+        sunDirWorld: SIMD3<Float>,
+        wind: SIMD2<Float>,
+        domainOffset: SIMD2<Float>
+    ) {
+        os_unfair_lock_lock(&lock)
+        u.sunDirWorld = SIMD4(simd_normalize(sunDirWorld), 0)
+        u.params0.x = time
+        u.params0.y = wind.x
+        u.params0.z = wind.y
+        u.params3.x = domainOffset.x
+        u.params3.y = domainOffset.y
+        os_unfair_lock_unlock(&lock)
+    }
 
-    func configure(
+    // Optional one-shot reconfiguration for style/quality.
+    public func configure(
         baseY: Float,
         topY: Float,
         coverage: Float,
@@ -50,31 +79,18 @@ actor VolCloudUniformsStore {
         macroScale: Float,
         macroThreshold: Float
     ) {
-        params1 = simd_float4(topY, coverage, densityMul, stepMul)
-        params2.z = horizonLift
-        params2.w = detailMul
-        params3.w = puffScale
-        params4.x = puffStrength
-        params4.z = macroScale
-        params4.w = macroThreshold
-    }
-
-    func setWind(directionXZ: simd_float2, speed: Float) {
-        wind.x = directionXZ.x
-        wind.y = directionXZ.y
-        wind.z = speed
-    }
-
-    func advance(dt: Float) {
-        time += dt
-        params3.x += wind.x * wind.z * dt
-        params3.y += wind.y * wind.z * dt
-
-        // Gentle slow rotation to keep the pattern alive.
-        params3.z += 0.01 * dt
-    }
-
-    func snapshot() -> Snapshot {
-        Snapshot(params1: params1, params2: params2, params3: params3, params4: params4, wind: wind, time: time)
+        os_unfair_lock_lock(&lock)
+        u.params0.w = baseY
+        u.params1.x = topY
+        u.params1.y = max(0, min(0.95, coverage))
+        u.params1.z = max(0, densityMul)
+        u.params1.w = max(0.35, min(1.25, stepMul))
+        u.params2.z = max(0, min(1, horizonLift))
+        u.params2.w = detailMul
+        u.params3.w = max(1e-4, puffScale)
+        u.params4.x = max(0, puffStrength)
+        u.params4.z = max(1e-6, macroScale)
+        u.params4.w = max(0, min(1, macroThreshold))
+        os_unfair_lock_unlock(&lock)
     }
 }
