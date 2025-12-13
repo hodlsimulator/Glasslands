@@ -94,14 +94,14 @@ extension FirstPersonEngine {
 
         let sunDir = simd_normalize(sunDirWorld)
 
-        // Back to “wispy volumetric” values (SDR).
-        // More clouds should come from spawning more clusters, not turning each puff into a white HDR blob.
+        // Brighter, whiter puffs (still SDR, no HDR bloom).
+        // This keeps the internal “real cloud” structure but lifts the overall luminance.
         let densityMul: Float = 0.95
         let thickness: Float = 4.2
         let phaseG: Float = 0.62
-        let ambient: Float = 0.22
+        let ambient: Float = 0.34
         let baseWhite: Float = 1.0
-        let lightGain: Float = 2.0
+        let lightGain: Float = 2.6
         let quality: Float = 0.60
 
         // Optional: slightly softer silhouettes so the billboards never show.
