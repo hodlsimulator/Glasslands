@@ -308,7 +308,7 @@ enum CloudImpostorProgram {
         m.setValue(NSNumber(value: ambient),      forKey: kAmbient)
         m.setValue(NSNumber(value: quality),      forKey: kQuality)
 
-        m.setValue(NSValue(simdVector3: sunDir),  forKey: kSunDir)
+        m.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: kSunDir)
 
         return m
     }

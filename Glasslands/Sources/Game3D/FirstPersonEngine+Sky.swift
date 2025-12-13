@@ -92,7 +92,7 @@ extension FirstPersonEngine {
             return
         }
 
-        let sunDir = simd_normalize(world.sunDirection)
+        let sunDir = simd_normalize(sunDirWorld)
 
         // Back to “wispy volumetric” values (SDR).
         // More clouds should come from spawning more clusters, not turning each puff into a white HDR blob.
@@ -114,7 +114,7 @@ extension FirstPersonEngine {
                 let mat = plane.firstMaterial
             else { return }
 
-            mat.setValue(NSValue(simdVector3: sunDir), forKey: CloudImpostorProgram.kSunDir)
+            mat.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: CloudImpostorProgram.kSunDir)
 
             mat.setValue(NSNumber(value: densityMul), forKey: CloudImpostorProgram.kDensityMul)
             mat.setValue(NSNumber(value: thickness),  forKey: CloudImpostorProgram.kThickness)
