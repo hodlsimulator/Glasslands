@@ -14,8 +14,8 @@ import simd
 import UIKit
 
 // Volumetric “puff” impostor for cloud billboards.
-// Implemented as a SceneKit surface shader modifier that raymarches a soft ellipsoid volume.
-// Output is premultiplied (rgb already includes alpha), so transparencyMode = .aOne is required.
+// Implemented as a SceneKit fragment shader modifier that raymarches a soft ellipsoid volume.
+// Output is premultiplied (rgb already includes alpha).
 enum CloudImpostorProgram {
 
     // MARK: - Uniform keys (SceneKit material values)
@@ -39,8 +39,15 @@ enum CloudImpostorProgram {
     // Goals:
     // - Restore the “real cloud” interior from 5f739a9 (phase + soft self-shadow + multi-scale clumps).
     // - Remove visible quad edges (hard square / rectangle silhouettes).
+    // - Ensure alpha written by the shader actually drives per-fragment transparency.
     // - Keep render cost down versus 5f739a9 (fewer steps, fewer noise octaves, one shadow tap, early UV reject).
+    //
+    // Notes:
+    // - Implemented as a fragment shader modifier with `#pragma transparent` so SceneKit honours alpha output.
+    // - Output is premultiplied (rgb already includes alpha).
     private static let shader: String = """
+    #pragma transparent
+
     #pragma arguments
     float  u_halfWidth;
     float  u_halfHeight;
@@ -139,6 +146,9 @@ enum CloudImpostorProgram {
 
     #pragma body
 
+    // Default: fully transparent.
+    _output.color = float4(0.0);
+
     // UV-based circular mask to kill visible quad corners.
     float2 uv = _surface.diffuseTexcoord;
     float2 q2 = (uv - float2(0.5, 0.5)) * 2.0;
@@ -146,7 +156,7 @@ enum CloudImpostorProgram {
 
     // Hard reject a little outside the unit circle to skip work entirely.
     if (r2 > 1.02) {
-        _surface.diffuse = float4(0.0, 0.0, 0.0, 0.0);
+        discard_fragment();
     } else {
 
         // Soft feather towards the rim (prevents “card” silhouettes).
@@ -185,7 +195,7 @@ enum CloudImpostorProgram {
 
         // If no intersection, output fully transparent.
         if (t1 <= max(t0, 0.0)) {
-            _surface.diffuse = float4(0.0, 0.0, 0.0, 0.0);
+            discard_fragment();
         } else {
 
             // Raymarch step count (reduced vs 5f739a9 to avoid stalls).
@@ -269,7 +279,7 @@ enum CloudImpostorProgram {
             alpha *= uvMask;
 
             // Premultiplied output.
-            _surface.diffuse = float4(col, alpha);
+            _output.color = float4(col, alpha);
         }
     }
     """
@@ -309,7 +319,7 @@ enum CloudImpostorProgram {
         m.multiply.contents = UIColor.white
 
         // Shader modifier does the rendering.
-        m.shaderModifiers = [.surface: shader]
+        m.shaderModifiers = [.fragment: shader]
 
         // Default uniform values.
         m.setValue(NSNumber(value: Float(halfWidth)),  forKey: kHalfWidth)
