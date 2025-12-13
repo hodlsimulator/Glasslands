@@ -31,7 +31,7 @@ struct CloudBillboardLayer {
     ) async -> SCNNode {
 
         // Sprite atlas is still generated for future/compat use (factory is volumetric currently).
-        let atlas = CloudSpriteTexture.makeAtlas(size: 512, count: 8)
+        let atlas = await CloudSpriteTexture.makeAtlas(size: 512, count: 8)
 
         let p = Params(
             radius: radius,
@@ -141,7 +141,7 @@ struct CloudBillboardLayer {
             seed: &rng
         )
 
-        let factory = CloudBillboardFactory.initWithAtlas(atlas)
+        let factory = CloudBillboardFactory.initWithAtlas(atlas.images.first)
 
         func addBand(
             points: [simd_float2],

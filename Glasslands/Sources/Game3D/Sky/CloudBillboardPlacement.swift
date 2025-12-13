@@ -148,9 +148,9 @@ enum CloudBillboardPlacement {
                     pos: pos,
                     size: size,
                     roll: rollBase + rollJitter,
+                    atlasIndex: randAtlasIndex(),
                     opacity: opacity,
-                    tint: clusterTint,
-                    atlasIndex: randAtlasIndex()
+                    tint: clusterTint
                 )
             )
         }
@@ -225,6 +225,6 @@ enum CloudBillboardPlacement {
             addPuff(offsetXZ: off, yFrac: yFrac, sizeMul: sMul, opacityMulLocal: oMul, rollJitter: roll)
         }
 
-        return CloudClusterSpec(anchorXZ: anchorXZ, puffs: puffs)
+        return CloudClusterSpec(puffs: puffs)
     }
 }

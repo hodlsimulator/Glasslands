@@ -84,14 +84,14 @@ struct CloudBillboardFactory {
             let sprite = SCNNode(geometry: plane)
             sprite.name = "CloudPuff"
             sprite.simdPosition = p.pos
-            sprite.eulerAngles.z = CGFloat(p.roll)
+            sprite.eulerAngles.z = p.roll
 
             // Per-puff opacity and tint.
             sprite.opacity = CGFloat(max(0, min(1, p.opacity)))
 
             // Tint is applied via multiply (shader outputs white by default).
             if let m = plane.firstMaterial {
-                let t = p.tint
+                let t = p.tint ?? simd_float3(1, 1, 1)
                 m.multiply.contents = UIColor(
                     red: CGFloat(t.x),
                     green: CGFloat(t.y),
