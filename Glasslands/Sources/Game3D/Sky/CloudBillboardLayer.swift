@@ -2,145 +2,192 @@
 //  CloudBillboardLayer.swift
 //  Glasslands
 //
-//  Created by . . on 10/3/25.
+//  Created by . . on 10/7/25.
 //
 //  Billboarded cumulus built from soft sprites.
-//  Denser distribution than the “fewer, bigger clusters” variant,
-//  with a runtime coverage knob (UserDefaults "clouds.coverage").
+//  Updated: multi-band placement (near → horizon) for better distribution.
 //
 
 import SceneKit
-import UIKit
 import simd
+import UIKit
 
-@MainActor
-enum CloudBillboardLayer {
+struct CloudBillboardLayer {
 
-    /// Builds the cloud billboard layer and returns it via `completion` on the main actor.
-    ///
-    /// - Parameters:
-    ///   - radius:        sky dome radius
-    ///   - minAltitudeY:  normalized [0,1] altitude for the cloud belt center
-    ///   - clusterCount:  baseline number of clusters (scaled by coverage)
-    ///   - seed:          RNG seed
-    ///   - completion:    callback on main actor
-    ///
-    /// Notes:
-    /// - We keep the node name "CumulusBillboardLayer" for compatibility with zenith guards.
-    /// - Density can be tuned at runtime by setting:
-    ///       UserDefaults.standard.set(1.35 as Float, forKey: "clouds.coverage")
-    ///   Valid range is ~[0.75, 1.75]. Defaults to 1.35 if not present.
+    struct Params {
+        var radius: CGFloat
+        var clusterCount: Int
+        var seed: UInt32
+        var minAltitudeY: Float
+    }
+
+    // Build a node containing cluster groups (each group contains multiple puff planes).
+    // Async is used for texture generation and node creation to keep main thread light.
     static func makeAsync(
         radius: CGFloat,
-        minAltitudeY: Float = 0.12,
-        clusterCount: Int = 92,     // ↑ from 56 → denser baseline
-        seed: UInt32 = 0xC10D5,
-        completion: @escaping (SCNNode) -> Void
-    ) {
-        // --- Coverage & spacing scaling -------------------------------------
-        let coverageFromDefaults: Float = {
-            if let v = UserDefaults.standard.object(forKey: "clouds.coverage") as? Float { return v }
-            return 1.35 // default to a visibly denser sky than the sparse build
+        clusterCount: Int = 92,
+        seed: UInt32 = 1,
+        minAltitudeY: Float = 0.12
+    ) async -> SCNNode {
+
+        // Sprite atlas is still generated for future/compat use (factory is volumetric currently).
+        let atlas = CloudSpriteTexture.makeAtlas(size: 512, count: 8)
+
+        let p = Params(
+            radius: radius,
+            clusterCount: clusterCount,
+            seed: seed,
+            minAltitudeY: minAltitudeY
+        )
+
+        let root = SCNNode()
+        root.name = "CumulusBillboardLayer"
+
+        // Coverage control (default tuned for “mid-day scattered”).
+        let coverage: Float = {
+            let v = UserDefaults.standard.float(forKey: "clouds.coverage")
+            return (v > 0.01) ? v : 1.35
         }()
-        // Clamp to a sane range so we don't explode draw calls accidentally.
-        let coverage: Float = max(0.75, min(coverageFromDefaults, 1.75))
-        // Reduce minimum separations roughly with sqrt law to avoid sudden overdraw spikes.
-        let sepScale: Float = 1.0 / sqrt(coverage)
-        // Scale the cluster budget by coverage.
-        let N: Int = max(24, Int((Float(clusterCount) * coverage).rounded()))
 
         // --- Vertical placement ----------------------------------------------
-        let layerY: Float = max(1100, min(Float(radius) * 0.34, 1800))
+        // A single fixed altitude makes the horizon feel empty. This build
+        // intentionally lowers far/horizon bands to create a cloud bank.
+        let yNear: Float = max(1100, min(Float(radius) * 0.36, 1800))
+        let yMid: Float = max(950,  yNear - 180)
+        let yFar: Float = max(820,  yNear - 360)
+        let yHzn: Float = max(700,  yNear - 520)
 
-        // --- Radial bands (XZ around the camera). Far belt is widest/densest. -
+        // --- Radial bands (scaled from radius) -------------------------------
+        // Keep the near band fairly tight so the zenith doesn't look empty.
         let rNearMax: Float = max(560, Float(radius) * 0.22)
-        let rNearHole: Float = rNearMax * 0.26 // ↓ from 0.34 → fills more overhead
-        let rBridge0: Float = rNearMax * 1.06
-        let rBridge1: Float = rBridge0 + max(900,  Float(radius) * 0.42)
-        let rMid0:    Float = rBridge1 - 100
-        let rMid1:    Float = rMid0   + max(2100, Float(radius) * 1.05)
-        let rFar0:    Float = rMid1   + max(650,  Float(radius) * 0.34)
-        let rFar1:    Float = rFar0   + max(3000, Float(radius) * 1.40)
-        let rUltra0:  Float = rFar1   + max(700,  Float(radius) * 0.40)
-        let rUltra1:  Float = rUltra0 + max(1600, Float(radius) * 0.60)
+        // Smaller hole gives coverage closer to the zenith without making
+        // the layer feel like a tight ceiling.
+        let rNearHole: Float = rNearMax * 0.12
 
-        // --- Allocation per band (dozens total) ------------------------------
-        // Bias a little more into near/bridge to make the sky feel richer around/overhead.
-        let nearC   = max( 3, Int(Float(N) * 0.08)) // ~8%
-        let bridgeC = max( 6, Int(Float(N) * 0.14)) // ~14%
-        let midC    = max(12, Int(Float(N) * 0.32)) // ~32%
-        let farC    = max(12, Int(Float(N) * 0.36)) // ~36%
-        let ultraC  = max( 2, N - nearC - bridgeC - midC - farC)
+        let rBridge0: Float = rNearMax * 1.03
+        let rBridge1: Float = rBridge0 + max(900, Float(radius) * 0.46)
 
-        var s = (seed == 0) ? 1 : seed
-        let bandSpan: (Float, Float) = (rNearHole, rUltra1)
+        let rMid0: Float = rBridge1 - 120
+        let rMid1: Float = rMid0 + max(2400, Float(radius) * 1.15)
 
-        // --- Blue-noise placements with tighter separations ------------------
-        @inline(__always)
-        func scaled(_ a: Float) -> Float { max(200.0, a * sepScale) }
+        let rFar0: Float = rMid1 + max(700, Float(radius) * 0.40)
+        let rFar1: Float = rFar0 + max(3400, Float(radius) * 1.55)
+
+        // Horizon band: sits near the far clip, lower altitude, larger scale.
+        let rHzn0: Float = rFar1 + max(850, Float(radius) * 0.45)
+        let rHzn1Wanted: Float = rHzn0 + max(2400, Float(radius) * 0.75)
+
+        // Clamp horizon distance to avoid camera zFar clipping (engine uses ~20k).
+        let approxZFar: Float = 20_000
+        let rHzn1Limit: Float = max(rHzn0 + 1600, approxZFar - 800)
+        let rHzn1: Float = min(rHzn1Wanted, rHzn1Limit)
+
+        let bandSpan: (Float, Float) = (rNearHole, rHzn1)
+
+        // Cluster budget (biased towards far/horizon so the horizon isn't empty).
+        let N = max(1, Int(Float(p.clusterCount) * coverage))
+
+        let nearC = max(3, Int(Float(N) * 0.07))
+        let brdgC = max(6, Int(Float(N) * 0.13))
+        let midC  = max(10, Int(Float(N) * 0.30))
+        let farC  = max(10, Int(Float(N) * 0.32))
+        let hznC  = max(2, N - nearC - brdgC - midC - farC)
+
+        // Place clusters with blue-noise distribution per band.
+        var rng = p.seed
 
         let nearPts = CloudBillboardPlacement.poissonAnnulus(
-            nearC, r0: rNearHole, r1: rNearMax,
-            minSepNear: scaled(900.0),  minSepFar: scaled(1250.0), seed: &s)
+            count: nearC,
+            r0: rNearHole,
+            r1: rNearMax,
+            minSepNear: 520,
+            minSepFar: 820,
+            seed: &rng
+        )
 
-        let bridgePts = CloudBillboardPlacement.poissonAnnulus(
-            bridgeC, r0: rBridge0, r1: rBridge1,
-            minSepNear: scaled(800.0),  minSepFar: scaled(1100.0), seed: &s)
+        let brdgPts = CloudBillboardPlacement.poissonAnnulus(
+            count: brdgC,
+            r0: rBridge0,
+            r1: rBridge1,
+            minSepNear: 600,
+            minSepFar: 980,
+            seed: &rng
+        )
 
         let midPts = CloudBillboardPlacement.poissonAnnulus(
-            midC, r0: rMid0, r1: rMid1,
-            minSepNear: scaled(650.0),  minSepFar: scaled(900.0),  seed: &s)
+            count: midC,
+            r0: rMid0,
+            r1: rMid1,
+            minSepNear: 720,
+            minSepFar: 1280,
+            seed: &rng
+        )
 
         let farPts = CloudBillboardPlacement.poissonAnnulus(
-            farC, r0: rFar0, r1: rFar1,
-            minSepNear: scaled(520.0),  minSepFar: scaled(760.0),  seed: &s)
+            count: farC,
+            r0: rFar0,
+            r1: rFar1,
+            minSepNear: 900,
+            minSepFar: 1500,
+            seed: &rng
+        )
 
-        let ultraPts = CloudBillboardPlacement.poissonAnnulus(
-            ultraC, r0: rUltra0, r1: rUltra1,
-            minSepNear: scaled(440.0),  minSepFar: scaled(680.0),  seed: &s)
+        let hznPts = CloudBillboardPlacement.poissonAnnulus(
+            count: hznC,
+            r0: rHzn0,
+            r1: rHzn1,
+            minSepNear: 720,
+            minSepFar: 1100,
+            seed: &rng
+        )
 
-        // --- Cluster specs ----------------------------------------------------
-        var specs: [CloudClusterSpec] = []
-        specs.reserveCapacity(N)
+        let factory = CloudBillboardFactory.initWithAtlas(atlas)
 
-        // Slightly smaller cluster scales than the sparse build, so more can fit
-        // without blowing fill-rate; small opacity tweaks to keep depth softness.
-        for p in nearPts {
-            specs.append(CloudBillboardPlacement.buildCluster(
-                at: p, baseY: layerY, bandSpan: bandSpan,
-                scaleMul: 1.06, opacityMul: 0.96, tint: nil, seed: &s))
-        }
-        for p in bridgePts {
-            specs.append(CloudBillboardPlacement.buildCluster(
-                at: p, baseY: layerY, bandSpan: bandSpan,
-                scaleMul: 1.02, opacityMul: 0.95,
-                tint: simd_float3(0.98, 0.99, 1.00), seed: &s))
-        }
-        for p in midPts {
-            specs.append(CloudBillboardPlacement.buildCluster(
-                at: p, baseY: layerY, bandSpan: bandSpan,
-                scaleMul: 1.00, opacityMul: 0.95,
-                tint: simd_float3(0.97, 0.99, 1.00), seed: &s))
-        }
-        for p in farPts {
-            specs.append(CloudBillboardPlacement.buildCluster(
-                at: p, baseY: layerY, bandSpan: bandSpan,
-                scaleMul: 0.96, opacityMul: 0.94,
-                tint: simd_float3(0.95, 0.98, 1.00), seed: &s))
-        }
-        for p in ultraPts {
-            specs.append(CloudBillboardPlacement.buildCluster(
-                at: p, baseY: layerY, bandSpan: bandSpan,
-                scaleMul: 0.86, opacityMul: 0.84,
-                tint: simd_float3(0.90, 0.93, 1.00), seed: &s))
+        func addBand(
+            points: [simd_float2],
+            baseY: Float,
+            scaleMul: Float,
+            opacityMul: Float,
+            tint: simd_float3
+        ) {
+            for p2 in points {
+                var s = rng
+                let spec = CloudBillboardPlacement.buildCluster(
+                    at: p2,
+                    baseY: baseY,
+                    bandSpan: bandSpan,
+                    scaleMul: scaleMul,
+                    opacityMul: opacityMul,
+                    tint: tint,
+                    seed: &s
+                )
+                rng &+= 0x9E3779B9 // stir RNG between clusters
+                let node = factory.makeNode(from: spec)
+                root.addChildNode(node)
+            }
         }
 
-        // --- Build atlas (async) and node ------------------------------------
-        Task { @MainActor in
-            let atlas = await CloudSpriteTexture.makeAtlas(size: 512, seed: seed, count: 8)
-            let node  = CloudBillboardFactory.makeNode(from: specs, atlas: atlas)
-            node.name = "CumulusBillboardLayer" // keep stable for zenith guards
-            completion(node)
-        }
+        // Band tints (subtle atmospheric perspective).
+        let tintNear = simd_float3(1.00, 1.00, 1.00)
+        let tintMid  = simd_float3(0.98, 0.99, 1.00)
+        let tintFar  = simd_float3(0.94, 0.97, 1.00)
+        let tintHzn  = simd_float3(0.90, 0.95, 1.00)
+
+        // Near: big, bright, overhead volume.
+        addBand(points: nearPts, baseY: yNear, scaleMul: 1.06, opacityMul: 0.96, tint: tintNear)
+
+        // Bridge: transition.
+        addBand(points: brdgPts, baseY: yMid, scaleMul: 1.02, opacityMul: 0.95, tint: tintMid)
+
+        // Mid: bulk of the field.
+        addBand(points: midPts, baseY: yMid, scaleMul: 1.00, opacityMul: 0.94, tint: tintMid)
+
+        // Far: slightly larger to remain legible, lower altitude.
+        addBand(points: farPts, baseY: yFar, scaleMul: 1.12, opacityMul: 0.90, tint: tintFar)
+
+        // Horizon: larger + softer bank.
+        addBand(points: hznPts, baseY: yHzn, scaleMul: 1.34, opacityMul: 0.78, tint: tintHzn)
+
+        return root
     }
 }

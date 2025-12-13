@@ -102,7 +102,7 @@ enum CloudImpostorProgram {
         float v = 0.0;
         float a = 0.5;
 
-        // 3 octaves (cheaper than the older 4).
+        // 3 octaves (kept cheap; edge detail comes from additional single-noise taps).
         for (int i = 0; i < 3; i++) {
             v += a * noise3(p);
             p = p * 2.02 + float3(17.1, 3.2, 5.9);
@@ -120,26 +120,41 @@ enum CloudImpostorProgram {
     ) {
         float r = length(q);
 
-        // Radial edge fade so the plane never shows as a hard square.
-        float edge = 1.0 - smoothstep(1.0 - edgeFeather, 1.0, r);
+        // Build a local noise domain first (used for edge warping + interior clumps).
+        float3 p = q * 2.15 + anchor * 0.00125 + seed;
 
-        // Soft fade at top/bottom to avoid a hard clipping plane.
-        float y01 = q.y * 0.5 + 0.5; // -1..1 -> 0..1
+        // Domain warp breaks up axis-aligned noise and stops "blocky" silhouettes.
+        float3 warp = float3(
+            noise3(p * 0.65 + float3(10.0, 0.0, 0.0)),
+            noise3(p * 0.65 + float3(0.0, 37.0, 0.0)),
+            noise3(p * 0.65 + float3(0.0, 0.0, 91.0))
+        );
+        p += (warp - 0.5) * 0.85;
+
+        // Noisy edge warp (less perfect discs).
+        float rimN = noise3(p * 1.35 + 7.1);
+        float rw = r + (rimN - 0.5) * 0.14;
+        float edge = 1.0 - smoothstep(1.0 - edgeFeather, 1.0, rw);
+
+        // Soft fade at top/bottom with a tiny noisy bias (avoids a perfectly flat cap).
+        float y01 = q.y * 0.5 + 0.5;
+        y01 = clamp(y01 + (noise3(p * 0.90 + 5.7) - 0.5) * 0.08, 0.0, 1.0);
         float yFade = smoothstep(0.0, heightFade, y01) * (1.0 - smoothstep(1.0 - heightFade, 1.0, y01));
 
         float base = edge * yFade;
         if (base <= 0.0) { return 0.0; }
 
-        // Multi-scale clumps (restores the “real cloud” interior feel).
-        float3 p = q * 2.35 + anchor * 0.00125 + seed;
-
+        // Multi-scale clumps.
         float n1 = fbmFast(p);
-        float n2 = fbmFast(p * 2.75 + 11.3);
+        float n2 = fbmFast(p * 2.35 + 11.3);
+        float n = mix(n1, n2, 0.45);
 
-        float n = mix(n1, n2, 0.35);
+        // Add a small amount of higher-frequency billow to keep edges lively.
+        float billow = 1.0 - abs(2.0 * noise3(p * 4.5 + 19.2) - 1.0);
+        n = n + 0.18 * billow - 0.08 * (rimN - 0.5);
 
         // Shape into soft clumps.
-        float clumps = smoothstep(0.35, 0.80, n);
+        float clumps = smoothstep(0.32, 0.82, n);
 
         return base * clumps;
     }
@@ -198,30 +213,30 @@ enum CloudImpostorProgram {
             discard_fragment();
         } else {
 
-            // Raymarch step count (reduced vs 5f739a9 to avoid stalls).
+            // Per-puff anchor (world translation) for variation.
+            float3 anchor = scn_node.modelTransform[3].xyz;
+
+            // Raymarch step count (balanced for interior smoothness).
             float q = clamp(u_quality, 0.0, 1.0);
-            float stepsF = mix(10.0, 22.0, q);
+            float stepsF = mix(12.0, 26.0, q);
             int steps = int(stepsF);
 
             float tStart = max(t0, 0.0);
             float dt = (t1 - tStart) / stepsF;
 
-            // Jitter reduces banding.
-            float jitter = fract(sin(dot(uv + u_seed, float2(12.9898, 78.233))) * 43758.5453);
+            // Jitter reduces banding; include the anchor so neighbouring puffs don't share patterns.
+            float jitter = fract(sin(dot(uv + float2(anchor.x, anchor.z) * 0.00007 + u_seed, float2(12.9898, 78.233))) * 43758.5453);
             float t = tStart + dt * jitter;
 
             float trans = 1.0;
             float3 col = float3(0.0);
-
-            // Per-puff anchor (world translation) for variation.
-            float3 anchor = scn_node.modelTransform[3].xyz;
 
             // Phase term scaling (kept SDR).
             float g = clamp(u_phaseG, -0.95, 0.95);
             float phaseScale = 0.08;
 
             // Fixed max loop keeps compilation predictable.
-            for (int i = 0; i < 24; i++) {
+            for (int i = 0; i < 28; i++) {
                 if (i >= steps) { break; }
                 if (trans < 0.03) { break; }
 

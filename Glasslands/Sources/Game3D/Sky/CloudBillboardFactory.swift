@@ -2,104 +2,107 @@
 //  CloudBillboardFactory.swift
 //  Glasslands
 //
-//  Created by . . on 10/4/25.
+//  Created by . . on 10/7/25.
 //
-//  Builds the cloud billboard layer using volumetric impostor materials.
-//  Each cluster is a single billboarded group; individual puffs are plain nodes.
-//  This eliminates hundreds of per-puff SCNBillboardConstraints while keeping the look.
+//  Creates SceneKit nodes for a cloud cluster spec. Each puff is a plane with a
+//  shader-driven volumetric impostor. Material caching is used to reduce overhead.
+//
 
 import SceneKit
 import UIKit
+import simd
 
-enum CloudBillboardFactory {
+struct CloudBillboardFactory {
+
+    private let atlas: UIImage?
+
+    init(_ atlas: UIImage?) { self.atlas = atlas }
+
+    static func initWithAtlas(_ atlas: UIImage?) -> CloudBillboardFactory {
+        CloudBillboardFactory(atlas)
+    }
+
+    @inline(__always)
+    private static func fract(_ x: Float) -> Float { x - floorf(x) }
+
+    @inline(__always)
+    private static func hash01(_ x: Float, _ y: Float, _ z: Float) -> Float {
+        // Simple deterministic hash for stable per-puff variation.
+        fract(sinf(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453)
+    }
+
+    // Material cache keyed by quantised (halfW, halfH) so stretched puffs reuse shaders.
+    @MainActor
+    private static var materialCache: [UInt64: SCNMaterial] = [:]
 
     @MainActor
-    static func makeNode(
-        from clusters: [CloudClusterSpec],
-        atlas: CloudSpriteTexture.Atlas
-    ) -> SCNNode {
-        let root = SCNNode()
-        root.name = "CumulusBillboardLayer"
-        root.castsShadow = false
+    private func materialFor(halfW: CGFloat, halfH: CGFloat) -> SCNMaterial {
+        // Quantise to reduce cache size.
+        let qW = UInt32((halfW * 0.05).rounded(.toNearestOrAwayFromZero) * 20.0)
+        let qH = UInt32((halfH * 0.05).rounded(.toNearestOrAwayFromZero) * 20.0)
+        let key = (UInt64(qW) << 32) | UInt64(qH)
 
-        struct SizeKey: Hashable { let w: Int; let h: Int }
-        var materialCache: [SizeKey: SCNMaterial] = [:]
+        if let m = CloudBillboardFactory.materialCache[key] { return m }
 
-        // Quantise half-sizes a bit so we reuse materials aggressively.
-        let quant: CGFloat = 0.05
+        let m = CloudImpostorProgram.makeMaterial(
+            halfWidth: halfW,
+            halfHeight: halfH
+        )
+        CloudBillboardFactory.materialCache[key] = m
+        return m
+    }
 
-        @inline(__always)
-        func materialFor(halfW: CGFloat, halfH: CGFloat) -> SCNMaterial {
-            let key = SizeKey(w: Int(round(halfW / quant)), h: Int(round(halfH / quant)))
-            if let m = materialCache[key] { return m }
+    @MainActor
+    func makeNode(from spec: CloudClusterSpec) -> SCNNode {
 
-            let m = CloudImpostorProgram.makeMaterial(halfWidth: halfW, halfHeight: halfH)
+        let group = SCNNode()
+        group.name = "CloudCluster"
 
-            // Keep blending (for soft vapour), but avoid extra work.
-            m.isDoubleSided = false
-            m.cullMode = .back
-            m.blendMode = .alpha
-            m.readsFromDepthBuffer = true
-            m.writesToDepthBuffer = false       // keep transparent sorting correct
-            m.lightingModel = .constant
-            m.diffuse.contents = UIColor.white
-            m.multiply.contents = UIColor.white
-            materialCache[key] = m
-            return m
-        }
+        // Global scale to keep puffs in a sane range.
+        let GLOBAL_SIZE_SCALE: CGFloat = 0.56
 
-        // Global scale keeps puffs visually identical to previous builds.
-        let GLOBAL_SIZE_SCALE: CGFloat = 0.58
+        for p in spec.puffs {
 
-        for cl in clusters {
-            // Compute a stable anchor so puffs can be positioned relatively.
-            var ax: Float = 0, ay: Float = 0, az: Float = 0
-            if !cl.puffs.isEmpty {
-                for p in cl.puffs { ax += p.pos.x; ay += p.pos.y; az += p.pos.z }
-                let inv = 1.0 / Float(cl.puffs.count)
-                ax *= inv; ay *= inv; az *= inv
-            }
-            let anchor = SCNVector3(ax, ay, az)
+            // Stable per-puff stretch (clouds tend to be wider than tall).
+            let h0 = CloudBillboardFactory.hash01(p.pos.x * 0.010, p.pos.z * 0.010, p.roll + Float(p.atlasIndex) * 0.73)
+            let h1 = CloudBillboardFactory.hash01(p.pos.x * 0.017, p.pos.z * 0.013, p.roll * 0.71 + Float(p.atlasIndex) * 1.91)
 
-            // Cluster group: single billboard constraint (replaces per-puff constraints).
-            let group = SCNNode()
-            group.castsShadow = false
-            group.position = anchor
-            // No SCNBillboardConstraint: orientation is set manually each frame (see FirstPersonEngine+Clouds).
+            let aspect: CGFloat = 1.00 + 0.85 * CGFloat(h0)          // 1.00 ... 1.85
+            let inv: CGFloat = 1.0 / sqrt(max(0.0001, aspect))
+            let hMul: CGFloat = (0.78 + 0.22 * CGFloat(h1)) * inv     // keeps area reasonable
 
-            // Build sprites under the group.
-            for p in cl.puffs {
-                let size = max(0.01, CGFloat(p.size) * GLOBAL_SIZE_SCALE)
-                let half = max(0.001, size * 0.5)
+            let size = CGFloat(p.size) * GLOBAL_SIZE_SCALE
+            let w = size * aspect
+            let h = size * hMul
 
-                let plane = SCNPlane(width: size, height: size)
-                plane.firstMaterial = materialFor(halfW: half, halfH: half)
+            let plane = SCNPlane(width: w, height: h)
+            plane.cornerRadius = 0
 
-                let sprite = SCNNode(geometry: plane)
-                sprite.castsShadow = false
-                sprite.opacity = CGFloat(max(0, min(1, p.opacity)))
+            let material = materialFor(halfW: w * 0.5, halfH: h * 0.5)
+            plane.firstMaterial = material
 
-                // Relative offset from the group’s anchor.
-                sprite.position = SCNVector3(p.pos.x - ax, p.pos.y - ay, p.pos.z - az)
+            let sprite = SCNNode(geometry: plane)
+            sprite.name = "CloudPuff"
+            sprite.simdPosition = p.pos
+            sprite.eulerAngles.z = CGFloat(p.roll)
 
-                // Roll within the billboarded plane.
-                var ea = sprite.eulerAngles
-                ea.z = Float(p.roll)
-                sprite.eulerAngles = ea
+            // Per-puff opacity and tint.
+            sprite.opacity = CGFloat(max(0, min(1, p.opacity)))
 
-                // Optional subtle tint (kept as multiply to preserve premultiplied look).
-                if let t = p.tint {
-                    sprite.geometry?.firstMaterial?.multiply.contents =
-                        UIColor(red: CGFloat(t.x), green: CGFloat(t.y), blue: CGFloat(t.z), alpha: 1.0)
-                }
-
-                // Let SceneKit choose ordering; do not force renderingOrder here.
-                group.addChildNode(sprite)
+            // Tint is applied via multiply (shader outputs white by default).
+            if let m = plane.firstMaterial {
+                let t = p.tint
+                m.multiply.contents = UIColor(
+                    red: CGFloat(t.x),
+                    green: CGFloat(t.y),
+                    blue: CGFloat(t.z),
+                    alpha: 1.0
+                )
             }
 
-            root.addChildNode(group)
+            group.addChildNode(sprite)
         }
 
-        return root
+        return group
     }
 }
