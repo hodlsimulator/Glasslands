@@ -54,9 +54,27 @@ struct CloudBillboardFactory {
 
     @MainActor
     func makeNode(from spec: CloudClusterSpec) -> SCNNode {
-
         let group = SCNNode()
         group.name = "CloudCluster"
+
+        // IMPORTANT:
+        // The engine orients *cluster groups* (not each puff) toward the camera each frame.
+        // For that to work without backface-culling artefacts, the group must be positioned at
+        // the cluster's centroid and the puffs must be positioned relative to that centroid.
+        //
+        // If puffs are left in absolute layer-space while the group remains at (0,0,0), then:
+        // - All groups share the same world position (the layer origin), so group-billboarding
+        //   never activates (forward≈0) and planes don't face the camera.
+        // - Any group rotation would spin the entire field around the origin, causing clouds to
+        //   vanish in most directions.
+        //
+        // Centering here keeps draw count the same and fixes “clouds only in one sky section”.
+        var centroid = simd_float3.zero
+        if !spec.puffs.isEmpty {
+            for p in spec.puffs { centroid += p.pos }
+            centroid /= Float(spec.puffs.count)
+        }
+        group.simdPosition = centroid
 
         // Global scale to keep puffs in a sane range.
         let GLOBAL_SIZE_SCALE: CGFloat = 0.56
@@ -83,7 +101,7 @@ struct CloudBillboardFactory {
 
             let sprite = SCNNode(geometry: plane)
             sprite.name = "CloudPuff"
-            sprite.simdPosition = p.pos
+            sprite.simdPosition = p.pos - centroid
             sprite.eulerAngles.z = p.roll
 
             // Per-puff opacity and tint.

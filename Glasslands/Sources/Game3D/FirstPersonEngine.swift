@@ -147,6 +147,25 @@ final class FirstPersonEngine: NSObject {
                 root.eulerAngles.y = self.cloudInitialYaw
                 self.skyAnchor.addChildNode(root)
                 self.cloudLayerNode = root
+
+                // The cloud conveyor (wind wrap + parallax) relies on sensible radial bounds.
+                // These are derived from the cluster group positions. If left at the default
+                // (1,1), the wrap path will incorrectly recycle far clouds every frame.
+                var rMin = Float.greatestFiniteMagnitude
+                var rMax: Float = 0
+                for g in root.childNodes {
+                    let r = simd_length(simd_float2(g.simdPosition.x, g.simdPosition.z))
+                    if r.isFinite {
+                        rMin = min(rMin, r)
+                        rMax = max(rMax, r)
+                    }
+                }
+                if rMax > 0, rMin.isFinite {
+                    self.cloudRMin = max(1, rMin)
+                    self.cloudRMax = max(self.cloudRMin, rMax)
+                }
+                self.cloudClusterCentroidLocal.removeAll(keepingCapacity: true)
+
                 self.enableVolumetricCloudImpostors(true)
             }
         }
