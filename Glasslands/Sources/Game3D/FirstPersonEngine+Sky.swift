@@ -88,56 +88,45 @@ extension FirstPersonEngine {
 
     @MainActor
     func applyCloudSunUniforms() {
-        let sunW = simd_normalize(sunDirWorld)
-        let pov = (scnView?.pointOfView ?? camNode).presentation
-        let invView = simd_inverse(pov.simdWorldTransform)
-        let sunView4 = invView * simd_float4(sunW, 0)
-        let sunView = simd_normalize(simd_float3(sunView4.x, sunView4.y, sunView4.z))
-        let sunViewV = SCNVector3(sunView.x, sunView.y, sunView.z)
+        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return
+        }
 
-        guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else { return }
+        let sunDir = simd_normalize(world.sunDirection)
+
+        // Back to “wispy volumetric” values (SDR).
+        // More clouds should come from spawning more clusters, not turning each puff into a white HDR blob.
+        let densityMul: Float = 0.95
+        let thickness: Float = 4.2
+        let phaseG: Float = 0.62
+        let ambient: Float = 0.22
+        let baseWhite: Float = 1.0
+        let lightGain: Float = 2.0
+        let quality: Float = 0.60
+
+        // Optional: slightly softer silhouettes so the billboards never show.
+        let edgeFeather: Float = 0.38
+        let heightFade: Float = 0.34
 
         layer.enumerateChildNodes { node, _ in
-            guard let g = node.geometry else { return }
-            for m in g.materials {
-                // Sun direction is in view space so camera-facing impostors behave consistently.
-                m.setValue(sunViewV, forKey: "sunDirView")
+            guard
+                let plane = node.geometry as? SCNPlane,
+                let mat = plane.firstMaterial
+            else { return }
 
-                // Phase / highlight response.
-                m.setValue(0.62 as CGFloat, forKey: "hgG")
-                m.setValue(1.00 as CGFloat, forKey: "baseWhite")
-                m.setValue(1.65 as CGFloat, forKey: "lightGain")
-                m.setValue(1.00 as CGFloat, forKey: "hiGain")
+            mat.setValue(NSValue(simdVector3: sunDir), forKey: CloudImpostorProgram.kSunDir)
 
-                // Thick, fluffy scattered cumulus (matches the current CloudImpostorProgram defaults).
-                m.setValue(14.00 as CGFloat, forKey: "densityMul")
-                m.setValue(5.60 as CGFloat, forKey: "thickness")
-                m.setValue(-0.02 as CGFloat, forKey: "densBias")
-                m.setValue(0.86 as CGFloat, forKey: "coverage")
-                m.setValue(0.0036 as CGFloat, forKey: "puffScale")
+            mat.setValue(NSNumber(value: densityMul), forKey: CloudImpostorProgram.kDensityMul)
+            mat.setValue(NSNumber(value: thickness),  forKey: CloudImpostorProgram.kThickness)
+            mat.setValue(NSNumber(value: phaseG),     forKey: CloudImpostorProgram.kPhaseG)
 
-                // Silhouette shaping.
-                m.setValue(0.16 as CGFloat, forKey: "edgeFeather")
-                m.setValue(0.07 as CGFloat, forKey: "edgeCut")
-                m.setValue(0.18 as CGFloat, forKey: "edgeNoiseAmp")
-                m.setValue(2.10 as CGFloat, forKey: "rimFeatherBoost")
-                m.setValue(2.80 as CGFloat, forKey: "rimFadePow")
+            mat.setValue(NSNumber(value: ambient),    forKey: CloudImpostorProgram.kAmbient)
+            mat.setValue(NSNumber(value: baseWhite),  forKey: CloudImpostorProgram.kBaseWhite)
+            mat.setValue(NSNumber(value: lightGain),  forKey: CloudImpostorProgram.kLightGain)
+            mat.setValue(NSNumber(value: quality),    forKey: CloudImpostorProgram.kQuality)
 
-                // Macro breakup inside each puff.
-                m.setValue(1.05 as CGFloat, forKey: "shapeScale")
-                m.setValue(0.42 as CGFloat, forKey: "shapeLo")
-                m.setValue(0.70 as CGFloat, forKey: "shapeHi")
-                m.setValue(2.15 as CGFloat, forKey: "shapePow")
-
-                // Higher = sun is more “covered” through thick cores.
-                m.setValue(0.70 as CGFloat, forKey: "occK")
-
-                // Compatibility knobs (safe if ignored by a given shader variant).
-                m.setValue(0.50 as CGFloat, forKey: "stepMul")
-                m.setValue(0.62 as CGFloat, forKey: "edgeErode")
-                m.setValue(0.78 as CGFloat, forKey: "centreFill")
-                m.setValue(0.28 as CGFloat, forKey: "microAmp")
-            }
+            mat.setValue(NSNumber(value: edgeFeather), forKey: CloudImpostorProgram.kEdgeFeather)
+            mat.setValue(NSNumber(value: heightFade),  forKey: CloudImpostorProgram.kHeightFade)
         }
     }
 

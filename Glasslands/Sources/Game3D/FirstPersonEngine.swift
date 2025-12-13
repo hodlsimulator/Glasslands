@@ -136,7 +136,7 @@ final class FirstPersonEngine: NSObject {
         removeVolumetricDomeIfPresent()
         CloudBillboardLayer.makeAsync(
             radius: CGFloat(cfg.skyDistance),
-            clusterCount: 56,
+            clusterCount: 84,
             seed: cloudSeed
         ) { [weak self] root in
             guard let self else { return }

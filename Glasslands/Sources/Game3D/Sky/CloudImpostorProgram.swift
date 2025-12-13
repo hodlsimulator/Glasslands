@@ -10,257 +10,305 @@
 //
 
 import SceneKit
-import UIKit
-import CoreGraphics
+import simd
 
+// Volumetric “puff” impostor for cloud billboards.
+// Implemented as a SceneKit surface shader modifier that raymarches a soft ellipsoid volume.
+// Output is premultiplied (rgb already includes alpha), so transparencyMode = .aOne is required.
 enum CloudImpostorProgram {
 
-    @MainActor
-    static func makeMaterial(halfWidth: CGFloat, halfHeight: CGFloat) -> SCNMaterial {
-        let frag = """
-        #pragma transparent
+    // MARK: - Uniform keys (SceneKit material values)
 
-        #pragma arguments
-        float3 sunDirView;
-        float hgG;
-        float baseWhite;
-        float lightGain;
-        float hiGain;
+    static let kHalfWidth     = "u_halfWidth"
+    static let kHalfHeight    = "u_halfHeight"
+    static let kThickness     = "u_thickness"
+    static let kDensityMul    = "u_densityMul"
+    static let kPhaseG        = "u_phaseG"
+    static let kSeed          = "u_seed"
+    static let kHeightFade    = "u_heightFade"
+    static let kEdgeFeather   = "u_edgeFeather"
+    static let kBaseWhite     = "u_baseWhite"
+    static let kLightGain     = "u_lightGain"
+    static let kAmbient       = "u_ambient"
+    static let kQuality       = "u_quality"
+    static let kSunDir        = "u_sunDir"
 
-        float densityMul;
-        float thickness;
-        float densBias;
-        float coverage;
+    // MARK: - Shader modifier
 
-        float puffScale;
+    // Notes:
+    // - Uses scn_node.inverseModelViewTransform to raymarch in local space.
+    // - Uses scn_node.modelTransform[3].xyz to vary noise per puff even when materials are shared.
+    // - Produces premultiplied output: col is accumulated using front-to-back compositing.
+    private static let shader: String = """
+    #pragma arguments
+    float  u_halfWidth;
+    float  u_halfHeight;
+    float  u_thickness;
+    float  u_densityMul;
+    float  u_phaseG;
+    float  u_seed;
+    float  u_heightFade;
+    float  u_edgeFeather;
+    float  u_baseWhite;
+    float  u_lightGain;
+    float  u_ambient;
+    float  u_quality;
+    float3 u_sunDir;
 
-        float edgeFeather;
-        float edgeCut;
-        float edgeNoiseAmp;
+    inline float hash11(float n) {
+        return fract(sin(n) * 43758.5453123);
+    }
 
-        float rimFeatherBoost;
-        float rimFadePow;
+    inline float hash31(float3 p) {
+        return hash11(dot(p, float3(127.1, 311.7, 74.7)));
+    }
 
-        float shapeScale;
-        float shapeLo;
-        float shapeHi;
-        float shapePow;
+    inline float noise3(float3 p) {
+        float3 i = floor(p);
+        float3 f = fract(p);
+        float3 u = f * f * (3.0 - 2.0 * f);
 
-        float occK;
+        float n000 = hash31(i + float3(0.0, 0.0, 0.0));
+        float n100 = hash31(i + float3(1.0, 0.0, 0.0));
+        float n010 = hash31(i + float3(0.0, 1.0, 0.0));
+        float n110 = hash31(i + float3(1.0, 1.0, 0.0));
+        float n001 = hash31(i + float3(0.0, 0.0, 1.0));
+        float n101 = hash31(i + float3(1.0, 0.0, 1.0));
+        float n011 = hash31(i + float3(0.0, 1.0, 1.0));
+        float n111 = hash31(i + float3(1.0, 1.0, 1.0));
 
-        float shapeSeed;
+        float n00 = mix(n000, n100, u.x);
+        float n10 = mix(n010, n110, u.x);
+        float n01 = mix(n001, n101, u.x);
+        float n11 = mix(n011, n111, u.x);
 
-        float impostorHalfW;
-        float impostorHalfH;
+        float n0 = mix(n00, n10, u.y);
+        float n1 = mix(n01, n11, u.y);
 
-        #pragma declarations
+        return mix(n0, n1, u.z);
+    }
 
-        float hash11(float p) {
-            p = fract(p * 0.1031);
-            p *= p + 33.33;
-            p *= p + p;
-            return fract(p);
+    inline float fbm(float3 p) {
+        float v = 0.0;
+        float a = 0.5;
+
+        // Fixed octave count keeps Metal compilation predictable.
+        for (int i = 0; i < 4; i++) {
+            v += a * noise3(p);
+            p = p * 2.02 + float3(17.1, 3.2, 5.9);
+            a *= 0.5;
         }
+        return v;
+    }
 
-        float hash31(float3 p) {
-            p = fract(p * 0.1031);
-            p += dot(p, p.yzx + 33.33);
-            return fract((p.x + p.y) * p.z);
-        }
+    inline float densityAt(
+        float3 q,              // normalised volume coords (roughly -1..1)
+        float3 anchor,         // per-puff anchor (world translation)
+        float  edgeFeather,
+        float  heightFade,
+        float  seed
+    ) {
+        float r = length(q);
 
-        float noise3(float3 p) {
-            float3 i = floor(p);
-            float3 f = fract(p);
-            f = f * f * (3.0 - 2.0 * f);
+        // Radial edge fade so the plane never shows as a hard square.
+        float edge = 1.0 - smoothstep(1.0 - edgeFeather, 1.0, r);
 
-            float n000 = hash31(i + float3(0,0,0));
-            float n100 = hash31(i + float3(1,0,0));
-            float n010 = hash31(i + float3(0,1,0));
-            float n110 = hash31(i + float3(1,1,0));
-            float n001 = hash31(i + float3(0,0,1));
-            float n101 = hash31(i + float3(1,0,1));
-            float n011 = hash31(i + float3(0,1,1));
-            float n111 = hash31(i + float3(1,1,1));
+        // Soft fade at top/bottom to avoid a hard clipping plane.
+        float y01 = q.y * 0.5 + 0.5; // -1..1 -> 0..1
+        float yFade = smoothstep(0.0, heightFade, y01) * (1.0 - smoothstep(1.0 - heightFade, 1.0, y01));
 
-            float nx00 = mix(n000, n100, f.x);
-            float nx10 = mix(n010, n110, f.x);
-            float nx01 = mix(n001, n101, f.x);
-            float nx11 = mix(n011, n111, f.x);
+        float base = edge * yFade;
+        if (base <= 0.0) { return 0.0; }
 
-            float nxy0 = mix(nx00, nx10, f.y);
-            float nxy1 = mix(nx01, nx11, f.y);
+        // Multi-scale noise. Anchor introduces per-instance variation even with shared materials.
+        float3 p = q * 2.35 + anchor * 0.00125 + seed;
 
-            return mix(nxy0, nxy1, f.z);
-        }
+        float n1 = fbm(p);
+        float n2 = fbm(p * 2.75 + 11.3);
 
-        float fbm3_billow(float3 p) {
-            float a = 0.5;
-            float f = 0.0;
+        float n = mix(n1, n2, 0.35);
 
-            float3 q = p;
-            for (int i = 0; i < 4; i++) {
-                float n = noise3(q);
-                n = 1.0 - abs(2.0 * n - 1.0);
-                f += a * n;
-                q = q * 2.02 + float3(17.0, 11.0, 5.0);
-                a *= 0.5;
+        // Shape the noise into clumps. This keeps the cloud “vapour” look instead of streaks.
+        float clumps = smoothstep(0.35, 0.80, n);
+
+        return base * clumps;
+    }
+
+    #pragma body
+
+    // Local ray origin and direction
+    float3 ro = (scn_node.inverseModelViewTransform * float4(0.0, 0.0, 0.0, 1.0)).xyz;
+
+    // _surface.position is in view space; camera is at origin in view space.
+    float3 rdView = normalize(_surface.position);
+    float3 rd = normalize((scn_node.inverseModelViewTransform * float4(rdView, 0.0)).xyz);
+
+    // Convert world sun direction to local space.
+    float3 sunW = normalize(u_sunDir);
+    float3 sunL = normalize((scn_node.inverseModelTransform * float4(sunW, 0.0)).xyz);
+
+    // Slight shrink so density reaches zero before the plane boundary.
+    float hw = max(0.001, u_halfWidth  * 0.97);
+    float hh = max(0.001, u_halfHeight * 0.97);
+
+    // Thickness is a ratio multiplied by the puff size.
+    float unit = max(hw, hh);
+    float hz = max(0.001, u_thickness) * unit;
+
+    float3 bmin = float3(-hw, -hh, -hz);
+    float3 bmax = float3( hw,  hh,  hz);
+
+    // Ray-box intersection (slab method).
+    float3 t0s = (bmin - ro) / rd;
+    float3 t1s = (bmax - ro) / rd;
+    float3 tsm = min(t0s, t1s);
+    float3 tsM = max(t0s, t1s);
+
+    float t0 = max(max(tsm.x, tsm.y), tsm.z);
+    float t1 = min(min(tsM.x, tsM.y), tsM.z);
+
+    // If no intersection, output fully transparent.
+    if (t1 <= max(t0, 0.0)) {
+        _surface.diffuse = float4(0.0, 0.0, 0.0, 0.0);
+    } else {
+
+        // Raymarch step count.
+        float q = clamp(u_quality, 0.0, 1.0);
+        float stepsF = mix(14.0, 34.0, q);
+        int steps = int(stepsF);
+
+        float tStart = max(t0, 0.0);
+        float dt = (t1 - tStart) / stepsF;
+
+        // Jitter reduces banding, derived from local position + seed.
+        float jitter = fract(sin(dot(_surface.position.xy + u_seed, float2(12.9898, 78.233))) * 43758.5453);
+        float t = tStart + dt * jitter;
+
+        float trans = 1.0;
+        float3 col = float3(0.0);
+
+        // Per-puff anchor (world translation) for variation.
+        float3 anchor = scn_node.modelTransform[3].xyz;
+
+        // Precompute phase term scaling
+        float g = clamp(u_phaseG, -0.95, 0.95);
+
+        // HG phase can spike a lot near the sun; scale down to stay SDR.
+        float phaseScale = 0.08;
+
+        for (int i = 0; i < 34; i++) {
+            if (i >= steps) { break; }
+            if (trans < 0.02) { break; }
+
+            float3 p = ro + rd * t;
+
+            // Normalised coords in the ellipsoid volume.
+            float3 qv = float3(p.x / hw, p.y / hh, p.z / hz);
+
+            float d = densityAt(qv, anchor, u_edgeFeather, u_heightFade, u_seed);
+            if (d > 0.0005) {
+
+                // Normalise step length to unit size so densityMul behaves consistently.
+                float stepU = dt / unit;
+
+                // Opacity step via Beer-Lambert.
+                float sigma = d * u_densityMul;
+                float a = 1.0 - exp(-sigma * stepU);
+
+                if (a > 0.0001) {
+
+                    // Cheap self-shadow: 2 taps along sun direction.
+                    float shadow = 1.0;
+                    float shadowStep = unit * 0.55;
+
+                    float3 sp = p + sunL * shadowStep;
+                    float3 sq1 = float3(sp.x / hw, sp.y / hh, sp.z / hz);
+                    float ds1 = densityAt(sq1, anchor, u_edgeFeather, u_heightFade, u_seed * 1.37);
+                    shadow *= exp(-ds1 * u_densityMul * 0.35);
+
+                    sp = p + sunL * shadowStep * 2.0;
+                    float3 sq2 = float3(sp.x / hw, sp.y / hh, sp.z / hz);
+                    float ds2 = densityAt(sq2, anchor, u_edgeFeather, u_heightFade, u_seed * 2.11);
+                    shadow *= exp(-ds2 * u_densityMul * 0.25);
+
+                    // Henyey-Greenstein phase (scaled).
+                    float mu = dot(rd, sunL);
+                    float denom = pow(max(1.0 + g * g - 2.0 * g * mu, 1e-3), 1.5);
+                    float phase = ((1.0 - g * g) / denom) * phaseScale;
+
+                    float light = clamp(u_ambient + u_lightGain * shadow * phase, 0.0, 1.0);
+                    float3 sampleCol = float3(u_baseWhite) * light;
+
+                    // Front-to-back premultiplied compositing.
+                    col += trans * a * sampleCol;
+                    trans *= (1.0 - a);
+                }
             }
-            return f;
+
+            t += dt;
         }
 
-        float hg(float cosTheta, float g) {
-            float g2 = g * g;
-            return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5);
-        }
+        float alpha = 1.0 - trans;
 
-        float macroMask2D(float2 uv, float seed, float sc, float lo, float hi, float pw) {
-            float2 p = uv * sc;
-            float n0 = noise3(float3(p, seed));
-            float n1 = noise3(float3(p * 2.03 + 11.0, seed + 7.0));
-            float n2 = noise3(float3(p * 4.07 + 23.0, seed + 19.0));
-            float m = (0.55 * n0 + 0.30 * n1 + 0.15 * n2);
-            m = smoothstep(lo, hi, m);
-            return pow(m, max(0.01, pw));
-        }
+        // Clamp to SDR.
+        col = clamp(col, float3(0.0), float3(1.0));
+        alpha = clamp(alpha, 0.0, 1.0);
 
-        float sampleD3(float3 p) {
-            float n = fbm3_billow(p);
-            return clamp(n, 0.0, 1.0);
-        }
+        // Premultiplied output.
+        _surface.diffuse = float4(col, alpha);
+    }
+    """
 
-        #pragma body
+    // MARK: - Material factory
 
-        float2 uv = _surface.diffuseTexcoord;
-
-        // Ellipse-correct UVs using plane half-sizes in world units.
-        float hw = max(0.001, impostorHalfW);
-        float hh = max(0.001, impostorHalfH);
-        float denom = max(hw, hh);
-
-        float2 uv0 = uv * 2.0 - 1.0;
-        float2 uvE = uv0 * float2(hw, hh) / denom;
-
-        float r2 = dot(uvE, uvE);
-        if (r2 >= 1.0) {
-            discard_fragment();
-        }
-
-        float zt = sqrt(max(0.0, 1.0 - r2));
-
-        // Macro breakup (keeps lots of blue sky while allowing dense puffs).
-        float macro = macroMask2D(uvE, shapeSeed, max(0.001, shapeScale), shapeLo, shapeHi, shapePow);
-        float coreFloorK = clamp(0.20 + 0.22 * coverage, 0.0, 0.60);
-
-        // Edge shaping with small noise erosion.
-        float edgeBase = smoothstep(1.0 - max(0.001, edgeFeather), 1.0, sqrt(r2));
-        float edgeN = noise3(float3(uvE * 6.0, shapeSeed + 13.0));
-        float edge = edgeBase + edgeNoiseAmp * (edgeN - 0.5);
-        float edgeMask = 1.0 - smoothstep(edgeCut, 1.0, clamp(edge, 0.0, 1.0));
-
-        // Screen footprint -> sample count, clamped.
-        const int NMAX = 5;
-        float fw = max(fwidth(uvE.x), fwidth(uvE.y));
-        float targetSamples = clamp((3.0 * thickness) / max(0.06, fw * 1200.0), 2.0, float(NMAX));
-        int Ncalc = int(ceil(targetSamples));
-
-        float zLUT[NMAX] = { 0.10, 0.32, 0.54, 0.76, 0.90 };
-        float wLUT[NMAX] = { 0.20, 0.23, 0.24, 0.21, 0.12 };
-
-        float accumAlpha = 0.0;
-        float accumOcc = 0.0;
-
-        float puff = max(0.0005, puffScale);
-
-        // Fake “depth” march through a sphere, modulated by macro field.
-        for (int i = 0; i < NMAX; i++) {
-            if (i >= Ncalc) { break; }
-
-            float z = zLUT[i] * zt * thickness;
-            float w = wLUT[i];
-
-            float3 p = float3(uvE * (1.0 + puff * 22.0) * macro, z + shapeSeed * 3.1);
-            float d = sampleD3(p);
-
-            // Bias + macro floor.
-            d = max(d + densBias, 0.0);
-            d = max(d, coreFloorK * macro);
-
-            // Edge mask.
-            d *= edgeMask;
-
-            accumAlpha += d * w;
-            accumOcc += d * w;
-        }
-
-        float alpha = 1.0 - exp(-accumAlpha * max(0.0, densityMul));
-        if (alpha <= 0.001) {
-            discard_fragment();
-        }
-
-        // View-space lighting: camera looks down -Z.
-        float3 sView = normalize(sunDirView);
-        float cosVS = clamp(-sView.z, -1.0, 1.0);
-
-        float phase = hg(cosVS, clamp(hgG, 0.0, 0.95));
-        phase = phase / max(0.001, hg(1.0, clamp(hgG, 0.0, 0.95)));
-
-        // Rim brightening that fades with opacity so dense cores cover the sun more.
-        float rim = pow(1.0 - zt, max(0.2, rimFadePow));
-        rim *= (1.0 + rimFeatherBoost * (1.0 - alpha));
-
-        float occ = clamp(1.0 - occK * accumOcc, 0.0, 1.0);
-
-        float light = baseWhite + lightGain * phase * occ;
-        float hi = hiGain * pow(max(0.0, phase), 2.0);
-
-        float shade = clamp(light + hi + rim * 0.35, 0.0, 6.0);
-
-        _output.color = float4(shade, shade, shade, alpha);
-        """
+    @MainActor
+    static func makeMaterial(
+        halfWidth: CGFloat,
+        halfHeight: CGFloat,
+        thickness: Float = 4.2,
+        densityMul: Float = 0.95,
+        phaseG: Float = 0.62,
+        seed: Float = 0.0,
+        heightFade: Float = 0.34,
+        edgeFeather: Float = 0.38,
+        baseWhite: Float = 1.0,
+        lightGain: Float = 2.0,
+        ambient: Float = 0.22,
+        quality: Float = 0.60,
+        sunDir: simd_float3 = simd_float3(0.3, 0.9, 0.1)
+    ) -> SCNMaterial {
 
         let m = SCNMaterial()
         m.lightingModel = .constant
-        m.isDoubleSided = false
-        m.cullMode = .back
-        m.blendMode = .alpha
+
+        // Premultiplied alpha output from shader.
         m.transparencyMode = .aOne
+        m.blendMode = .alpha
+
+        // Clouds should not write depth (transparent), but can read depth for correct occlusion.
         m.readsFromDepthBuffer = true
         m.writesToDepthBuffer = false
-        m.shaderModifiers = [.fragment: frag]
 
-        // Defaults are overridden by applyCloudSunUniforms(), but keep sensible values.
-        m.setValue(SCNVector3(0, 1, 0), forKey: "sunDirView")
-        m.setValue(0.62 as CGFloat, forKey: "hgG")
-        m.setValue(1.00 as CGFloat, forKey: "baseWhite")
-        m.setValue(1.65 as CGFloat, forKey: "lightGain")
-        m.setValue(1.00 as CGFloat, forKey: "hiGain")
+        // Shader modifier does the rendering.
+        m.shaderModifiers = [.surface: shader]
 
-        m.setValue(14.00 as CGFloat, forKey: "densityMul")
-        m.setValue(5.60 as CGFloat, forKey: "thickness")
-        m.setValue(-0.02 as CGFloat, forKey: "densBias")
-        m.setValue(0.86 as CGFloat, forKey: "coverage")
+        // Default uniform values.
+        m.setValue(NSNumber(value: Float(halfWidth)),  forKey: kHalfWidth)
+        m.setValue(NSNumber(value: Float(halfHeight)), forKey: kHalfHeight)
 
-        m.setValue(0.0036 as CGFloat, forKey: "puffScale")
+        m.setValue(NSNumber(value: thickness),    forKey: kThickness)
+        m.setValue(NSNumber(value: densityMul),   forKey: kDensityMul)
+        m.setValue(NSNumber(value: phaseG),       forKey: kPhaseG)
+        m.setValue(NSNumber(value: seed),         forKey: kSeed)
+        m.setValue(NSNumber(value: heightFade),   forKey: kHeightFade)
+        m.setValue(NSNumber(value: edgeFeather),  forKey: kEdgeFeather)
 
-        m.setValue(0.16 as CGFloat, forKey: "edgeFeather")
-        m.setValue(0.07 as CGFloat, forKey: "edgeCut")
-        m.setValue(0.18 as CGFloat, forKey: "edgeNoiseAmp")
+        m.setValue(NSNumber(value: baseWhite),    forKey: kBaseWhite)
+        m.setValue(NSNumber(value: lightGain),    forKey: kLightGain)
+        m.setValue(NSNumber(value: ambient),      forKey: kAmbient)
+        m.setValue(NSNumber(value: quality),      forKey: kQuality)
 
-        m.setValue(2.10 as CGFloat, forKey: "rimFeatherBoost")
-        m.setValue(2.80 as CGFloat, forKey: "rimFadePow")
-
-        m.setValue(1.05 as CGFloat, forKey: "shapeScale")
-        m.setValue(0.42 as CGFloat, forKey: "shapeLo")
-        m.setValue(0.70 as CGFloat, forKey: "shapeHi")
-        m.setValue(2.15 as CGFloat, forKey: "shapePow")
-
-        m.setValue(0.70 as CGFloat, forKey: "occK")
-
-        let seed = CGFloat(Double.random(in: 1_000...9_999))
-        m.setValue(seed, forKey: "shapeSeed")
-
-        m.setValue(max(0.001, halfWidth) as CGFloat, forKey: "impostorHalfW")
-        m.setValue(max(0.001, halfHeight) as CGFloat, forKey: "impostorHalfH")
+        m.setValue(NSValue(simdVector3: sunDir),  forKey: kSunDir)
 
         return m
     }
