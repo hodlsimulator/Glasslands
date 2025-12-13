@@ -16,6 +16,14 @@ import simd
 import UIKit
 
 enum CloudImpostorProgram {
+    
+    @MainActor
+    static func makeMaterial(halfWidth: CGFloat, halfHeight: CGFloat) -> SCNMaterial {
+        let m = makeMaterial()
+        m.setValue(max(0.001, halfWidth) as CGFloat, forKey: "impostorHalfW")
+        m.setValue(max(0.001, halfHeight) as CGFloat, forKey: "impostorHalfH")
+        return m
+    }
 
     static func makeMaterial() -> SCNMaterial {
         let m = SCNMaterial()
