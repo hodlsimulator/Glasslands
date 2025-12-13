@@ -28,7 +28,7 @@ extension FirstPersonEngine {
         // Remove any leftover constraints inside the cloud layer.
         // Earlier builds used SCNBillboardConstraint on lots of puff nodes; that becomes costly fast.
         layer.enumerateChildNodes { node, _ in
-            if !node.constraints.isEmpty { node.constraints = [] }
+            if node.constraints?.isEmpty == false { node.constraints = nil }
         }
 
         // Swap materials on puff planes.
@@ -128,7 +128,11 @@ extension FirstPersonEngine {
         // All cluster groups share the same parent (the layer).
         // Convert world-facing orientation into the parent's local space.
         let parentWorld = layer.presentation.simdWorldTransform
-        let parentRot = simd_quatf(simd_float3x3(parentWorld))
+        let c0 = simd_normalize(simd_float3(parentWorld.columns.0.x, parentWorld.columns.0.y, parentWorld.columns.0.z))
+        let c1 = simd_normalize(simd_float3(parentWorld.columns.1.x, parentWorld.columns.1.y, parentWorld.columns.1.z))
+        let c2 = simd_normalize(simd_float3(parentWorld.columns.2.x, parentWorld.columns.2.y, parentWorld.columns.2.z))
+        let parentRot3 = simd_float3x3(columns: (c0, c1, c2))
+        let parentRot = simd_quatf(parentRot3)
         let parentInv = simd_inverse(parentRot)
 
         for g in layer.childNodes {
@@ -152,6 +156,55 @@ extension FirstPersonEngine {
 
             // Convert world rotation into the layer’s local space.
             g.simdOrientation = simd_mul(parentInv, qWorld)
+        }
+    }
+
+    @MainActor
+    func installVolumetricCloudsIfMissing(
+        baseY: CGFloat,
+        topY: CGFloat,
+        coverage: CGFloat
+    ) {
+        // Remove any simple cloud dome that might have been installed earlier.
+        skyAnchor.childNodes
+            .filter { $0.name == "CloudDome" }
+            .forEach { $0.removeFromParentNode() }
+
+        // If the volumetric layer already exists, just update its key uniforms.
+        if let existing = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true) {
+            if let m = existing.geometry?.firstMaterial {
+                m.setValue(baseY, forKey: "baseY")
+                m.setValue(topY, forKey: "topY")
+                m.setValue(coverage, forKey: "coverage")
+
+                let dir = simd_normalize(sunDirWorld)
+                m.setValue(SCNVector3(dir.x, dir.y, dir.z), forKey: "sunDirWorld")
+                m.setValue(SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z), forKey: "sunTint")
+            }
+            return
+        }
+
+        // True volumetric vapour path is exclusive: remove billboard sprites if present.
+        if let billboards = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
+            billboards.removeFromParentNode()
+        }
+        cloudLayerNode = nil
+        cloudBillboardNodes.removeAll(keepingCapacity: true)
+        cloudClusterGroups.removeAll(keepingCapacity: true)
+        cloudClusterCentroidLocal.removeAll(keepingCapacity: true)
+
+        let vol = VolumetricCloudLayer.make(
+            radius: CGFloat(cfg.skyDistance),
+            baseY: baseY,
+            topY: topY,
+            coverage: coverage
+        )
+        skyAnchor.addChildNode(vol)
+
+        if let m = vol.geometry?.firstMaterial {
+            let dir = simd_normalize(sunDirWorld)
+            m.setValue(SCNVector3(dir.x, dir.y, dir.z), forKey: "sunDirWorld")
+            m.setValue(SCNVector3(cloudSunTint.x, cloudSunTint.y, cloudSunTint.z), forKey: "sunTint")
         }
     }
 
