@@ -134,15 +134,21 @@ final class FirstPersonEngine: NSObject {
 
         // No dome; start with billboard layer then enable volumetric impostors.
         removeVolumetricDomeIfPresent()
-        CloudBillboardLayer.makeAsync(
-            radius: CGFloat(cfg.skyDistance),
-            clusterCount: 84,
-            seed: cloudSeed
-        ) { [weak self] root in
+        Task { [weak self] in
             guard let self else { return }
-            root.eulerAngles.y = cloudInitialYaw
-            self.skyAnchor.addChildNode(root)
-            self.enableVolumetricCloudImpostors(true)
+
+            let root = await CloudBillboardLayer.makeAsync(
+                radius: CGFloat(self.cfg.skyDistance),
+                clusterCount: 84,
+                seed: self.cloudSeed
+            )
+
+            await MainActor.run {
+                root.eulerAngles.y = self.cloudInitialYaw
+                self.skyAnchor.addChildNode(root)
+                self.cloudLayerNode = root
+                self.enableVolumetricCloudImpostors(true)
+            }
         }
     }
 
