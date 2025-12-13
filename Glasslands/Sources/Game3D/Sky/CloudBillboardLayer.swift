@@ -33,35 +33,32 @@ struct CloudBillboardLayer {
         // Sprite atlas is still generated for future/compat use (factory is volumetric currently).
         let atlas = await CloudSpriteTexture.makeAtlas(size: 512, count: 8)
 
-        let p = Params(
-            radius: radius,
-            clusterCount: clusterCount,
-            seed: seed,
-            minAltitudeY: minAltitudeY
-        )
+        let p = Params(radius: radius, clusterCount: clusterCount, seed: seed, minAltitudeY: minAltitudeY)
 
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
 
         // Coverage control (default tuned for “mid-day scattered”).
+        // Lower default improves performance now that clusters render correctly in all directions.
         let coverage: Float = {
             let v = UserDefaults.standard.float(forKey: "clouds.coverage")
-            return (v > 0.01) ? v : 1.35
+            return (v > 0.01) ? v : 1.0
         }()
 
         // --- Vertical placement ----------------------------------------------
-        // A single fixed altitude makes the horizon feel empty. This build
-        // intentionally lowers far/horizon bands to create a cloud bank.
+        // A single fixed altitude makes the horizon feel empty. This build intentionally
+        // lowers far/horizon bands to create a cloud bank.
         let yNear: Float = max(1100, min(Float(radius) * 0.36, 1800))
-        let yMid: Float = max(950,  yNear - 180)
-        let yFar: Float = max(820,  yNear - 360)
-        let yHzn: Float = max(700,  yNear - 520)
+        let yMid: Float = max(950, yNear - 180)
+        let yFar: Float = max(820, yNear - 360)
+        let yHzn: Float = max(700, yNear - 520)
 
         // --- Radial bands (scaled from radius) -------------------------------
         // Keep the near band fairly tight so the zenith doesn't look empty.
         let rNearMax: Float = max(560, Float(radius) * 0.22)
-        // Smaller hole gives coverage closer to the zenith without making
-        // the layer feel like a tight ceiling.
+
+        // Smaller hole gives coverage closer to the zenith without making the layer
+        // feel like a tight ceiling.
         let rNearHole: Float = rNearMax * 0.12
 
         let rBridge0: Float = rNearMax * 1.03
@@ -86,12 +83,11 @@ struct CloudBillboardLayer {
 
         // Cluster budget (biased towards far/horizon so the horizon isn't empty).
         let N = max(1, Int(Float(p.clusterCount) * coverage))
-
         let nearC = max(3, Int(Float(N) * 0.07))
         let brdgC = max(6, Int(Float(N) * 0.13))
-        let midC  = max(10, Int(Float(N) * 0.30))
-        let farC  = max(10, Int(Float(N) * 0.32))
-        let hznC  = max(2, N - nearC - brdgC - midC - farC)
+        let midC = max(10, Int(Float(N) * 0.30))
+        let farC = max(10, Int(Float(N) * 0.32))
+        let hznC = max(2, N - nearC - brdgC - midC - farC)
 
         // Place clusters with blue-noise distribution per band.
         var rng = p.seed
@@ -167,11 +163,11 @@ struct CloudBillboardLayer {
             }
         }
 
-        // Band tints (subtle atmospheric perspective).
+        // Band tints (subtle atmospheric perspective). Keep these close to white.
         let tintNear = simd_float3(1.00, 1.00, 1.00)
-        let tintMid  = simd_float3(0.98, 0.99, 1.00)
-        let tintFar  = simd_float3(0.94, 0.97, 1.00)
-        let tintHzn  = simd_float3(0.90, 0.95, 1.00)
+        let tintMid = simd_float3(0.995, 0.997, 1.00)
+        let tintFar = simd_float3(0.985, 0.990, 1.00)
+        let tintHzn = simd_float3(0.970, 0.985, 1.00)
 
         // Near: big, bright, overhead volume.
         addBand(points: nearPts, baseY: yNear, scaleMul: 1.06, opacityMul: 0.96, tint: tintNear)
@@ -183,10 +179,10 @@ struct CloudBillboardLayer {
         addBand(points: midPts, baseY: yMid, scaleMul: 1.00, opacityMul: 0.94, tint: tintMid)
 
         // Far: slightly larger to remain legible, lower altitude.
-        addBand(points: farPts, baseY: yFar, scaleMul: 1.12, opacityMul: 0.90, tint: tintFar)
+        addBand(points: farPts, baseY: yFar, scaleMul: 1.12, opacityMul: 0.92, tint: tintFar)
 
         // Horizon: larger + softer bank.
-        addBand(points: hznPts, baseY: yHzn, scaleMul: 1.34, opacityMul: 0.78, tint: tintHzn)
+        addBand(points: hznPts, baseY: yHzn, scaleMul: 1.28, opacityMul: 0.82, tint: tintHzn)
 
         return root
     }

@@ -94,39 +94,32 @@ extension FirstPersonEngine {
 
         let sunDir = simd_normalize(sunDirWorld)
 
-        // Brighter, whiter puffs (still SDR, no HDR bloom).
-        // This keeps the internal “real cloud” structure but lifts the overall luminance.
-        let densityMul: Float = 0.95
-        let thickness: Float = 4.2
-        let phaseG: Float = 0.62
-        let ambient: Float = 0.34
+        // Whiter (still SDR), a touch sharper, and cheaper (fewer raymarch steps).
+        let densityMul: Float = 1.02
+        let thickness: Float = 4.5
+        let phaseG: Float = 0.60
+        let ambient: Float = 0.48
         let baseWhite: Float = 1.0
-        let lightGain: Float = 2.6
-        let quality: Float = 0.60
+        let lightGain: Float = 3.20
+        let quality: Float = 0.35
 
-        // Optional: slightly softer silhouettes so the billboards never show.
-        let edgeFeather: Float = 0.38
-        let heightFade: Float = 0.34
+        // Lower feather = crisper cloud edge; still soft enough to hide the quad.
+        let edgeFeather: Float = 0.26
+        let heightFade: Float = 0.28
 
         layer.enumerateChildNodes { node, _ in
-            guard
-                let plane = node.geometry as? SCNPlane,
-                let mat = plane.firstMaterial
-            else { return }
+            guard let plane = node.geometry as? SCNPlane, let mat = plane.firstMaterial else { return }
 
             mat.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: CloudImpostorProgram.kSunDir)
-
             mat.setValue(NSNumber(value: densityMul), forKey: CloudImpostorProgram.kDensityMul)
-            mat.setValue(NSNumber(value: thickness),  forKey: CloudImpostorProgram.kThickness)
-            mat.setValue(NSNumber(value: phaseG),     forKey: CloudImpostorProgram.kPhaseG)
-
-            mat.setValue(NSNumber(value: ambient),    forKey: CloudImpostorProgram.kAmbient)
-            mat.setValue(NSNumber(value: baseWhite),  forKey: CloudImpostorProgram.kBaseWhite)
-            mat.setValue(NSNumber(value: lightGain),  forKey: CloudImpostorProgram.kLightGain)
-            mat.setValue(NSNumber(value: quality),    forKey: CloudImpostorProgram.kQuality)
-
+            mat.setValue(NSNumber(value: thickness), forKey: CloudImpostorProgram.kThickness)
+            mat.setValue(NSNumber(value: phaseG), forKey: CloudImpostorProgram.kPhaseG)
+            mat.setValue(NSNumber(value: ambient), forKey: CloudImpostorProgram.kAmbient)
+            mat.setValue(NSNumber(value: baseWhite), forKey: CloudImpostorProgram.kBaseWhite)
+            mat.setValue(NSNumber(value: lightGain), forKey: CloudImpostorProgram.kLightGain)
+            mat.setValue(NSNumber(value: quality), forKey: CloudImpostorProgram.kQuality)
             mat.setValue(NSNumber(value: edgeFeather), forKey: CloudImpostorProgram.kEdgeFeather)
-            mat.setValue(NSNumber(value: heightFade),  forKey: CloudImpostorProgram.kHeightFade)
+            mat.setValue(NSNumber(value: heightFade), forKey: CloudImpostorProgram.kHeightFade)
         }
     }
 
@@ -142,12 +135,14 @@ extension FirstPersonEngine {
         haloPixels: Int
     ) -> SCNNode {
         let dist = CGFloat(cfg.skyDistance)
+
         let radians = coreAngularSizeDeg * .pi / 180.0
         let coreDiameter = max(1.0, 2.0 * dist * tan(0.5 * radians))
         let haloDiameter = max(coreDiameter * haloScale, coreDiameter + 1.0)
 
         let corePlane = SCNPlane(width: coreDiameter, height: coreDiameter)
         corePlane.cornerRadius = coreDiameter * 0.5
+
         let coreMat = SCNMaterial()
         coreMat.lightingModel = .constant
         coreMat.diffuse.contents = UIColor.black
@@ -168,6 +163,7 @@ extension FirstPersonEngine {
 
         let haloPlane = SCNPlane(width: haloDiameter, height: haloDiameter)
         haloPlane.cornerRadius = haloDiameter * 0.5
+
         let haloMat = SCNMaterial()
         haloMat.lightingModel = .constant
         haloMat.diffuse.contents = UIColor.black
@@ -197,6 +193,7 @@ extension FirstPersonEngine {
     func sunHaloImage(diameter: Int, exponent: CGFloat) -> UIImage {
         let size = CGSize(width: diameter, height: diameter)
         let renderer = UIGraphicsImageRenderer(size: size)
+
         return renderer.image { ctx in
             let cg = ctx.cgContext
             cg.setFillColor(UIColor.clear.cgColor)
@@ -204,6 +201,7 @@ extension FirstPersonEngine {
 
             let center = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
             let steps = 8
+
             var colors: [CGColor] = []
             var locations: [CGFloat] = []
 
@@ -223,8 +221,10 @@ extension FirstPersonEngine {
             let radius = min(size.width, size.height) * 0.5
             cg.drawRadialGradient(
                 gradient,
-                startCenter: center, startRadius: 0,
-                endCenter: center, endRadius: radius,
+                startCenter: center,
+                startRadius: 0,
+                endCenter: center,
+                endRadius: radius,
                 options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
             )
         }
@@ -232,7 +232,7 @@ extension FirstPersonEngine {
 
     @MainActor
     func prewarmSkyAndSun() {
-        // Keep this lightweight. Sun diffusion prewarm is handled separately and is idempotent.
+        // Sun diffusion prewarm is handled separately and is idempotent.
         prewarmSunDiffusion()
     }
 }
