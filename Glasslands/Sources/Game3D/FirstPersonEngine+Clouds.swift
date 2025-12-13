@@ -71,8 +71,7 @@ extension FirstPersonEngine {
             skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
         }
 
-        // applyCloudSunUniforms() is intentionally not called every frame.
-        // Sun direction only needs pushing when it actually changes (buildSky/applySunDirection).
+        // Cloud sun-uniforms are updated by applySunDirection(...) in FirstPersonEngine+Sky.swift.
     }
 
     // MARK: - Orientation
@@ -110,17 +109,6 @@ extension FirstPersonEngine {
             let rotW = simd_float3x3(columns: (rightW, up2W, fwdW))
             let rotLocal = parentInv * simd_quatf(rotW)
             g.simdOrientation = rotLocal
-        }
-    }
-
-    // MARK: - Material uniforms
-
-    @MainActor
-    func applyCloudSunUniforms() {
-        let sun = sunDirWorld
-        for n in cloudBillboardNodes {
-            guard let m = n.geometry?.firstMaterial else { continue }
-            m.setValue(SCNVector3(sun.x, sun.y, sun.z), forKey: CloudImpostorProgram.kSunDir)
         }
     }
 }
