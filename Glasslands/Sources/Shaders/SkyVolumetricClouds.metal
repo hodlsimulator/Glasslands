@@ -37,10 +37,13 @@ vertex GLVSOut gl_vapour_vertex(GLVSIn vin [[stage_in]],
                                 constant SCNSceneBuffer& scn_frame [[buffer(0)]])
 {
     GLVSOut o;
+
+    // This project’s existing SkyVolumetricClouds path uses vin.position as “world”.
     float4 world = float4(vin.position, 1.0);
     float4 view  = scn_frame.viewTransform * world;
     o.position   = scn_frame.projectionTransform * view;
     o.worldPos   = world.xyz;
+
     return o;
 }
 
@@ -107,12 +110,10 @@ inline float phaseHG(float mu, float g){
 }
 
 // -------- coarse macro gate (cheap empty-space skip) --------
-// Uses a single low-frequency value-noise layer to reject obvious empty space
-// before running the expensive FBM/Worley evaluator. Tuned to match macro islands.
+
 inline float coarseMacroMask(float2 advXY,
                              constant GLCloudUniforms& U)
 {
-    // Domain transform
     float macroScale = max(1e-6, U.params4.z);
     float2 domOff    = float2(U.params3.x, U.params3.y);
     float  domRot    = U.params3.z;
@@ -120,50 +121,53 @@ inline float coarseMacroMask(float2 advXY,
     float2 wind      = float2(U.params0.y, U.params0.z);
 
     float ca = cos(domRot), sa = sin(domRot);
-    float2 xz = advXY + domOff;
+
+    float2 xz  = advXY + domOff;
     float2 xzr = float2(xz.x*ca - xz.y*sa, xz.x*sa + xz.y*ca);
 
-    // Slow advection; very cheap
     float2 adv = xzr + wind * (time * 0.0018);
 
-    // One octave value noise is enough for a conservative gate
     float n = noise3(float3(adv * macroScale * 0.6, 3.1));
     float thr = clamp(U.params4.w, 0.0, 1.0);
 
-    // Wider transitions reduce popping when skipping steps
     return smoothstep(thr - 0.18, thr + 0.18, n);
 }
 
 // -------- full density (keeps your shape/look) --------
-inline float densityAt(float3 wp, constant GLCloudUniforms& U)
+
+inline float densityAt(float3 wp,
+                       constant GLCloudUniforms& U)
 {
-    float time       = U.params0.x;
-    float2 wind      = float2(U.params0.y, U.params0.z);
-    float baseY      = U.params0.w;
-    float topY       = U.params1.x;
-    float coverage   = clamp(U.params1.y, 0.05, 0.98);
-    float detailMul  = U.params2.w;
-    float horizonLift= U.params2.z;
-    float2 domOff    = float2(U.params3.x, U.params3.y);
-    float  domRot    = U.params3.z;
-    float  puffScale = max(1e-4, U.params3.w);
-    float  puffStrength = clamp(U.params4.x, 0.0, 1.5);
-    float  macroScale   = max(1e-6, U.params4.z);
-    float  macroThresh  = clamp(U.params4.w, 0.0, 1.0);
+    float time      = U.params0.x;
+    float2 wind     = float2(U.params0.y, U.params0.z);
+    float baseY     = U.params0.w;
+    float topY      = U.params1.x;
+
+    float coverage  = clamp(U.params1.y, 0.05, 0.98);
+    float detailMul = U.params2.w;
+    float horizonLift = U.params2.z;
+
+    float2 domOff   = float2(U.params3.x, U.params3.y);
+    float domRot    = U.params3.z;
+    float puffScale = max(1e-4, U.params3.w);
+
+    float puffStrength = clamp(U.params4.x, 0.0, 1.5);
+    float macroScale   = max(1e-6, U.params4.z);
+    float macroThresh  = clamp(U.params4.w, 0.0, 1.0);
 
     float h01 = hProfile(wp.y, baseY, topY);
 
     float ca = cos(domRot), sa = sin(domRot);
-    float2 xz = wp.xz + domOff;
+
+    float2 xz  = wp.xz + domOff;
     float2 xzr = float2(xz.x*ca - xz.y*sa, xz.x*sa + xz.y*ca);
-    float  adv = mix(0.55, 1.55, h01);
+
+    float adv = mix(0.55, 1.55, h01);
     float2 advXY = xzr + wind * adv * (time * 0.0035);
 
-    // Macro islands
     float macro = 1.0 - clamp(worley2(advXY * macroScale), 0.0, 1.0);
     float macroMask = smoothstep(macroThresh - 0.10, macroThresh + 0.10, macro);
 
-    // Base + micro puffs + erosion
     float3 P0 = float3(advXY.x, wp.y, advXY.y) * 0.00110;
     float base = fbm2(P0 * float3(1.0, 0.35, 1.0));
 
@@ -183,18 +187,19 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U)
     float dens = pow(clamp(t, 0.0, 1.0), 0.85);
     dens *= macroMask;
     dens *= hProfile(wp.y + horizonLift*120.0, baseY, topY);
+
     return dens;
 }
 
 // -------- fragment (sun-only, premultiplied white) --------
 
-fragment half4 gl_vapour_fragment(GLVSOut in                [[stage_in]],
+fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                                   constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-                                  constant GLCloudUniforms& U        [[buffer(1)]])
+                                  constant GLCloudUniforms& U [[buffer(1)]])
 {
-    // Camera & ray
     float4 camW4 = scn_frame.inverseViewTransform * float4(0,0,0,1);
     float3 camPos = camW4.xyz / camW4.w;
+
     float3 V = normalize(in.worldPos - camPos);
 
     float baseY = U.params0.w;
@@ -203,88 +208,74 @@ fragment half4 gl_vapour_fragment(GLVSOut in                [[stage_in]],
     float vdY = V.y;
     float t0  = (baseY - camPos.y) / max(1e-5, vdY);
     float t1  = (topY  - camPos.y) / max(1e-5, vdY);
+
     float tEnt = max(0.0, min(t0, t1));
     float tExt = min(tEnt + 5000.0, max(t0, t1));
     if (tExt <= tEnt + 1e-5) discard_fragment();
 
     float Lm = tExt - tEnt;
 
-    // Distance LOD + external stepMul
     float distLOD = clamp(Lm / 4000.0, 0.0, 1.4);
     float stepMul = clamp(U.params1.w, 0.60, 1.40);
     int   Nbase   = int(round(mix(10.0, 18.0, 1.0 - distLOD*0.6)));
 
-    // ---- Zenith-aware ramp (key to kill freezes when looking up) ----
-    // vUp=0 at vdY<=0.25 (near horizon / down), vUp->1 as we look straight up.
     float vUp = clamp((abs(vdY) - 0.25) / 0.65, 0.0, 1.0);
-    float qualMul   = mix(1.0, 0.34, vUp);    // shrink step count up to ~66%
-    bool  doSunVis  = (vUp < 0.60);           // skip sun-occlusion march near zenith
-    int   refineMax = (vUp < 0.30 ? 1 : 0);   // drop refine samples near zenith
+    float qualMul   = mix(1.0, 0.34, vUp);
+    bool  doSunVis  = (vUp < 0.60);
+    int   refineMax = (vUp < 0.30 ? 1 : 0);
 
     int   N  = clamp(int(round(float(Nbase) * stepMul * qualMul)), 6, 18);
     float dt = Lm / float(N);
 
-    // Per-pixel jitter
     float2 st = float2(in.position.x, in.position.y);
     float  j  = fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453);
     float  t  = tEnt + (0.25 + 0.5*j) * dt;
 
     half3 S   = half3(normalize(U.sunDirWorld.xyz));
-    half mu   = half(clamp(dot(V, float3(S)), -1.0, 1.0));
-    half g    = half(clamp(U.params2.x, 0.0, 0.95));
-    half T    = half(1.0);
+    half  mu  = half(clamp(dot(V, float3(S)), -1.0, 1.0));
+    half  g   = half(clamp(U.params2.x, 0.0, 0.95));
 
-    // Tuned gates for speed (slightly looser near zenith)
-    half rhoGate  = half(mix(0.0032, 0.0060, vUp));
-    half skipMul  = half(mix(1.55, 1.90, vUp));
-    half refineMul= half(0.40);
+    half T = half(1.0);
 
-    // Precompute a cheap coarse macro mask at the entry,
-    // then reuse it while marching to short-circuit obvious empty spans.
-    // We evaluate on the slab’s xz; it’s conservative and stable.
+    half rhoGate   = half(mix(0.0032, 0.0060, vUp));
+    half skipMul   = half(mix(1.55, 1.90, vUp));
+    half refineMul = half(0.40);
+
     float2 advXY0 = (camPos + V * tEnt).xz;
     float coarse0 = coarseMacroMask(advXY0, U);
 
-    for (int i=0; i < N && T > half(0.004); ++i)
-    {
+    for (int i = 0; i < N && T > half(0.004); ++i) {
         float3 sp = camPos + V * t;
 
-        // Cheap coarse rejection first (fast path)
         float coarse = coarse0;
-        // Slightly decorrelate along the ray without extra noise calls
         coarse = mix(coarse, coarseMacroMask(sp.xz, U), 0.35);
         if (coarse < 0.10) {
             t += dt * float(skipMul);
             continue;
         }
 
-        // Full density at sample
         half rho = half(densityAt(sp, U));
         if (rho < rhoGate) {
             t += dt * float(skipMul);
             continue;
         }
 
-        // Optional one-tap sun visibility (skipped near zenith to save a density call)
         if (doSunVis) {
             float dL = (topY - baseY) * 0.22;
             float3 lp = sp + float3(S) * dL;
             half occ = half(densityAt(lp, U));
-            half aL  = half(1.0) - half(exp(-float(occ) * max(0.0f, U.params1.z) * dL * 0.010));
+            half aL = half(1.0) - half(exp(-float(occ) * max(0.0f, U.params1.z) * dL * 0.010));
             rho = half(min(1.0f, float(rho) * (1.0f - 0.6f * float(aL))));
         }
 
-        // Optional micro-refine (disabled near zenith)
         half td = half(dt) * refineMul;
-        for (int k=0; k < refineMax && T > half(0.004); ++k){
+        for (int k = 0; k < refineMax && T > half(0.004); ++k) {
             float3 sp2 = sp + V * (float(td) * float(k));
-            half rho2  = half(densityAt(sp2, U));
-
+            half rho2 = half(densityAt(sp2, U));
             half sigma = half(max(0.0f, U.params1.z) * 0.028);
             half aStep = half(1.0) - half(exp(-float(rho2) * float(sigma) * float(td)));
-            half ph    = half(phaseHG(float(mu), float(g)));
-            half gain  = half(clamp(1.85 * float(ph), 0.0, 2.0));
-
+            half ph = half(phaseHG(float(mu), float(g)));
+            half gain = half(clamp(1.85 * float(ph), 0.0, 2.0));
             T *= (half(1.0) - aStep * gain);
             if (T <= half(0.004)) break;
         }
@@ -293,6 +284,6 @@ fragment half4 gl_vapour_fragment(GLVSOut in                [[stage_in]],
     }
 
     half alpha = half(clamp(1.0 - float(T), 0.0, 1.0));
-    half3 rgb  = half3(1.0) * alpha; // premultiplied WHITE
+    half3 rgb = half3(1.0) * alpha;
     return half4(rgb, alpha);
 }

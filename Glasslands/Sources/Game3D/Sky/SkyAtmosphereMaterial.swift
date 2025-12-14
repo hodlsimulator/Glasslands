@@ -15,7 +15,6 @@ import UIKit
 enum SkyAtmosphereMaterial {
     static func make() -> SCNMaterial {
         let frag = """
-        #pragma transparent
         #pragma arguments
         float3 sunDirWorld;
         float3 sunTint;
@@ -31,7 +30,7 @@ enum SkyAtmosphereMaterial {
 
         // Coefficients (approximate, in 1/m)
         float3 betaR = float3(5.802e-6, 13.558e-6, 33.1e-6);
-        float  betaM = 3.996e-6 * clamp(turbidity, 1.0, 10.0);
+        float3 betaM = float3(3.996e-6 * clamp(turbidity, 1.0, 10.0));
 
         // Elevation above horizon (0=horizon, 1=zenith).
         // Shape the ramp so haze collapses towards the horizon instead of
@@ -81,7 +80,7 @@ enum SkyAtmosphereMaterial {
         m.cullMode = .front
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
-        m.blendMode = .alpha
+        m.blendMode = .replace
         m.shaderModifiers = [.fragment: frag]
 
         // Defaults tuned for a clear-ish day with visible horizon haze.
