@@ -27,6 +27,7 @@ private struct CloudUniforms {
 private struct ShadowUniforms {
     var centerXZ : SIMD2<Float>
     var halfSize : Float
+    var groundY  : Float
     var pad0     : Float = 0
 }
 
@@ -65,6 +66,7 @@ private final class SunDiffusionState {
     private var halfB: Float = 1
     private var blend: Float = 1.0
     private var lastBlendTick: CFTimeInterval = CACurrentMediaTime()
+    private var lastAnimatedEncodeTick: CFTimeInterval = 0
     private var needsEncodeA = true
     private var needsEncodeB = true
     private var ping = false
@@ -77,6 +79,7 @@ private final class SunDiffusionState {
     private let texSize = 512
     private let recenterFrac: Float = 0.45
     private let blendTime: CFTimeInterval = 0.35
+    private let animatedEncodeInterval: CFTimeInterval = 1.0 / 6.0
     
     private var compilingPipe = false
 
@@ -152,11 +155,22 @@ private final class SunDiffusionState {
         }
     }
 
+    func requestAnimatedEncode(now: CFTimeInterval = CACurrentMediaTime()) {
+        if now - lastAnimatedEncodeTick < animatedEncodeInterval { return }
+        lastAnimatedEncodeTick = now
+        if ping {
+            needsEncodeB = true
+        } else {
+            needsEncodeA = true
+        }
+    }
+
     // Encodes a single map; completion flips the in-flight flag back on the main actor.
     private func encodeMap(
         to tex: MTLTexture?,
         centre: simd_float2,
         half: Float,
+        groundY: Float,
         uniforms u: CloudUniforms,
         clusters: UnsafeRawPointer?,
         clusterBytes: Int,
@@ -181,7 +195,7 @@ private final class SunDiffusionState {
                                      options: [])
         enc.setBuffer(ubuf, offset: 0, index: 0)
 
-        var SU = ShadowUniforms(centerXZ: centre, halfSize: max(1, half))
+        var SU = ShadowUniforms(centerXZ: centre, halfSize: max(1, half), groundY: groundY)
         let sbuf = device.makeBuffer(bytes: &SU,
                                      length: MemoryLayout<ShadowUniforms>.stride,
                                      options: [])
@@ -216,11 +230,21 @@ private final class SunDiffusionState {
 
     func bindToMaterials() {
         guard let texA, let texB else { return }
-        if propA.contents as? MTLTexture !== texA { propA.contents = texA }
-        if propB.contents as? MTLTexture !== texB { propB.contents = texB }
 
-        let p0 = NSValue(scnVector3: SCNVector3(centreA.x, centreA.y, halfA))
-        let p1 = NSValue(scnVector3: SCNVector3(centreB.x, centreB.y, halfB))
+        // ping == false: A is active (blend to A)
+        // ping == true:  B is active (blend to B)
+        let tex0: MTLTexture = ping ? texA : texB // previous
+        let tex1: MTLTexture = ping ? texB : texA // active
+        if propA.contents as? MTLTexture !== tex0 { propA.contents = tex0 }
+        if propB.contents as? MTLTexture !== tex1 { propB.contents = tex1 }
+
+        let c0 = ping ? centreA : centreB
+        let h0 = ping ? halfA   : halfB
+        let c1 = ping ? centreB : centreA
+        let h1 = ping ? halfB   : halfA
+
+        let p0 = NSValue(scnVector3: SCNVector3(c0.x, c0.y, h0))
+        let p1 = NSValue(scnVector3: SCNVector3(c1.x, c1.y, h1))
         let mixNum = NSNumber(value: Double(blend)) // keep type stable (Double)
 
         for m in GroundShadowMaterials.shared.all() {
@@ -266,26 +290,44 @@ private final class SunDiffusionState {
     }
 
     // One encode per call; completion resets the throttle.
-    func encodeIfNeeded(uniforms U: CloudUniforms, clusters: [ClusterRec]) {
+    func encodeIfNeeded(uniforms U: CloudUniforms, clusters: [ClusterRec], groundY: Float) {
         if encodeInFlight { return }
 
         let ptr = clusters.withUnsafeBytes { $0.baseAddress }
         let bytes = clusters.count * MemoryLayout<ClusterRec>.stride
 
-        if needsEncodeA {
-            encodeInFlight = true
-            encodeMap(to: texA, centre: centreA, half: halfA, uniforms: U,
-                      clusters: ptr, clusterBytes: bytes, nClusters: clusters.count)
-            needsEncodeA = false
-            return
-        }
-
-        if needsEncodeB {
-            encodeInFlight = true
-            encodeMap(to: texB, centre: centreB, half: halfB, uniforms: U,
-                      clusters: ptr, clusterBytes: bytes, nClusters: clusters.count)
-            needsEncodeB = false
-            return
+        // Prefer encoding the active target map first so the crossfade never waits on the
+        // "wrong" texture.
+        if ping {
+            if needsEncodeB {
+                encodeInFlight = true
+                encodeMap(to: texB, centre: centreB, half: halfB, groundY: groundY, uniforms: U,
+                          clusters: ptr, clusterBytes: bytes, nClusters: clusters.count)
+                needsEncodeB = false
+                return
+            }
+            if needsEncodeA {
+                encodeInFlight = true
+                encodeMap(to: texA, centre: centreA, half: halfA, groundY: groundY, uniforms: U,
+                          clusters: ptr, clusterBytes: bytes, nClusters: clusters.count)
+                needsEncodeA = false
+                return
+            }
+        } else {
+            if needsEncodeA {
+                encodeInFlight = true
+                encodeMap(to: texA, centre: centreA, half: halfA, groundY: groundY, uniforms: U,
+                          clusters: ptr, clusterBytes: bytes, nClusters: clusters.count)
+                needsEncodeA = false
+                return
+            }
+            if needsEncodeB {
+                encodeInFlight = true
+                encodeMap(to: texB, centre: centreB, half: halfB, groundY: groundY, uniforms: U,
+                          clusters: ptr, clusterBytes: bytes, nClusters: clusters.count)
+                needsEncodeB = false
+                return
+            }
         }
     }
 }
@@ -308,6 +350,7 @@ extension FirstPersonEngine {
         let pos = yawNode.presentation.simdWorldPosition
         let centre = SIMD2<Float>(pos.x, pos.z)
         let half   = S.defaultHalfSize(cfg: cfg)
+        let groundY = pos.y - cfg.eyeHeight
 
         S.plan(centreWanted: centre, halfWanted: half)
         S.stepBlend()
@@ -323,11 +366,40 @@ extension FirstPersonEngine {
             params3    : uSnap.params3
         )
 
-        // Lightweight path for now.
-        let clusters: [ClusterRec] = []
+        // Shadow-casting clusters: filter by projected (sun) footprint so the compute
+        // kernel stays cheap.
+        var clusters: [ClusterRec] = []
+        clusters.reserveCapacity(min(cloudClusterGroups.count, 64))
+
+        if !cloudClusterGroups.isEmpty {
+            let sunW = SIMD3<Float>(uSnap.sunDirWorld.x, uSnap.sunDirWorld.y, uSnap.sunDirWorld.z)
+            let dy = max(0.12, sunW.y)
+            let sunXZ = SIMD2<Float>(sunW.x, sunW.z)
+
+            // A small safety margin so shadows don't pop at the edges of the map.
+            let margin: Float = 260
+
+            for g in cloudClusterGroups {
+                let wp = g.presentation.simdWorldPosition
+                let rad = (g.value(forKey: "gl_clusterRadius") as? NSNumber)?.floatValue ?? 900
+
+                // Project the cloud centre to the ground plane along the sun ray.
+                let h = max(0, wp.y - groundY)
+                let shadowXZ = SIMD2<Float>(wp.x, wp.z) - sunXZ * (h / dy)
+
+                let d = shadowXZ - centre
+                let r = half + rad + margin
+                if simd_length_squared(d) <= (r * r) {
+                    clusters.append(ClusterRec(pos: wp, rad: rad))
+                }
+            }
+        }
+
+        // Keep the active map ticking so cloud shadows sweep across the terrain.
+        S.requestAnimatedEncode()
 
         // Encode if needed, then bind maps/params to materials.
-        S.encodeIfNeeded(uniforms: U, clusters: clusters)
+        S.encodeIfNeeded(uniforms: U, clusters: clusters, groundY: groundY)
         S.bindToMaterials()
     }
 }

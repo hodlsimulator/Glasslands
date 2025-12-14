@@ -33,6 +33,9 @@ enum CloudImpostorProgram {
     static let kAmbient = "u_ambient"
     static let kQuality = "u_quality"
     static let kSunDir = "u_sunDir"
+    static let kPowderK = "u_powderK"
+    static let kEdgeLight = "u_edgeLight"
+    static let kBacklight = "u_backlight"
 
     // MARK: - Shader modifier
 
@@ -62,6 +65,9 @@ enum CloudImpostorProgram {
     float u_lightGain;
     float u_ambient;
     float u_quality;
+    float u_powderK;
+    float u_edgeLight;
+    float u_backlight;
     float3 u_sunDir;
 
     #pragma declaration
@@ -259,7 +265,19 @@ enum CloudImpostorProgram {
                         float ds = densityAt(sq, anchor, u_edgeFeather, u_heightFade, u_seed * 1.37);
                         shadow *= exp(-ds * u_densityMul * 0.45);
 
-                        float light = clamp(u_ambient + u_lightGain * shadow * phase, 0.0, 1.0);
+                        // Height-aware ambient + simple powder/edge lighting.
+                        // These extra terms help “paint with light” without changing the overall approach.
+                        float y01 = clamp((qv.y * 0.5) + 0.5, 0.0, 1.0);
+                        float amb = u_ambient * mix(0.62, 1.05, y01);
+                        float powder = 1.0 - exp(-sigma * u_powderK);
+                        float edge = clamp((d - ds) * u_edgeLight, 0.0, 1.0);
+                        float back = pow(clamp(-mu, 0.0, 1.0), 2.0) * u_backlight;
+
+                        float light = amb + u_lightGain * shadow * phase;
+                        light *= (0.86 + powder * 0.14);
+                        light += edge * (0.18 + powder * 0.35) * shadow;
+                        light += back * edge * (0.25 + powder * 0.25);
+                        light = clamp(light, 0.0, 1.0);
                         float3 sampleCol = baseWhite3 * light;
 
                         // Front-to-back premultiplied compositing.
@@ -337,6 +355,9 @@ enum CloudImpostorProgram {
         m.setValue(NSNumber(value: lightGain), forKey: kLightGain)
         m.setValue(NSNumber(value: ambient), forKey: kAmbient)
         m.setValue(NSNumber(value: quality), forKey: kQuality)
+        m.setValue(NSNumber(value: 0.85 as Float), forKey: kPowderK)
+        m.setValue(NSNumber(value: 3.0 as Float), forKey: kEdgeLight)
+        m.setValue(NSNumber(value: 0.45 as Float), forKey: kBacklight)
         m.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: kSunDir)
 
         return m

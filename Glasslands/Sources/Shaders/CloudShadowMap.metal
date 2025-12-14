@@ -133,6 +133,10 @@ kernel void cloudShadowKernel(
     float z = SU.centerXZ.y + (v * 2.0f - 1.0f) * SU.halfSize;
 
     float3 sunW = normalize(uClouds.sunDirWorld.xyz);
+    if (sunW.y <= 1e-4f) {
+        outShadow.write(float4(1.0f, 1.0f, 1.0f, 1.0f), gid);
+        return;
+    }
 
     const float baseY = uClouds.params0.w;
     const float topY  = uClouds.params1.x;
@@ -140,10 +144,15 @@ kernel void cloudShadowKernel(
     const float densMulClus = 3.2f;
 
     const int NL = 10;
+    const float dy = sunW.y;
     const float totalH = max(1.0f, (topY - baseY)) / max(1, NL);
-    const float stepL = totalH * (abs(sunW.y) > 1e-4f ? (1.0f / abs(sunW.y)) : 1.0f);
+    const float stepL = totalH * (1.0f / dy);
 
-    float3 p = float3(x, topY, z);
+    // Anchor the ray to the ground texel, then start at the cloud-top intersection.
+    // This removes the sun-direction-dependent slip that can make shadows look missing.
+    float3 groundP = float3(x, SU.groundY, z);
+    float tTop = max(0.0f, (topY - SU.groundY) / dy);
+    float3 p = groundP + sunW * tTop;
     float3 d = -sunW * stepL;
 
     float tau = 0.0f;
@@ -156,7 +165,11 @@ kernel void cloudShadowKernel(
     }
 
     float T = exp(-tau);
-    float shadow = 0.25f + 0.75f * pow(T, 0.90f);
+
+    // Darker, more readable shadows without crushing the terrain.
+    float shadow = 0.18f + 0.82f * pow(T, 0.85f);
+    const float strength = 0.65f;
+    shadow = mix(1.0f, shadow, strength);
 
     float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));
     float fade = smoothstep(0.00f, 0.12f, edge);  // wider soft edge → no square

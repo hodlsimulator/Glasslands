@@ -23,8 +23,8 @@ extension FirstPersonEngine {
         cloudInitialYaw = (rng.nextUniform() * 2.0 - 1.0) * Float.pi
         cloudSpinAccum = 0
 
-        // 12° per minute (radians/second)
-        cloudSpinRate = 0.0034906586
+        // 5° per minute (radians/second)
+        cloudSpinRate = 0.0014544410
         cloudWind = simd_float2(0.60, 0.20)
 
         let ang = rng.nextUniform() * 6.2831853

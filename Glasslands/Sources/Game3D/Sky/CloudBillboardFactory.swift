@@ -79,6 +79,10 @@ struct CloudBillboardFactory {
         // Global scale to keep puffs in a sane range.
         let GLOBAL_SIZE_SCALE: CGFloat = 0.56
 
+        // Cached per-cluster XZ radius used by the cloud shadow map (SunDiffusion).
+        // This avoids walking child geometry bounds every frame.
+        var maxRadXZ: Float = 0
+
         for p in spec.puffs {
 
             // Stable per-puff stretch (clouds tend to be wider than tall).
@@ -101,8 +105,13 @@ struct CloudBillboardFactory {
 
             let sprite = SCNNode(geometry: plane)
             sprite.name = "CloudPuff"
-            sprite.simdPosition = p.pos - centroid
+            let localPos = p.pos - centroid
+            sprite.simdPosition = localPos
             sprite.eulerAngles.z = p.roll
+
+            let centreDist = simd_length(simd_float2(localPos.x, localPos.z))
+            let puffR = 0.5 * Float(max(w, h))
+            maxRadXZ = max(maxRadXZ, centreDist + puffR)
 
             // Per-puff opacity and tint.
             sprite.opacity = CGFloat(max(0, min(1, p.opacity)))
@@ -120,6 +129,8 @@ struct CloudBillboardFactory {
 
             group.addChildNode(sprite)
         }
+
+        group.setValue(NSNumber(value: maxRadXZ), forKey: "gl_clusterRadius")
 
         return group
     }

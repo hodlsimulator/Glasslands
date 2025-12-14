@@ -98,10 +98,15 @@ extension FirstPersonEngine {
         let densityMul: Float = 1.02
         let thickness: Float = 4.5
         let phaseG: Float = 0.60
-        let ambient: Float = 0.48
+        let ambient: Float = 0.36
         let baseWhite: Float = 1.0
-        let lightGain: Float = 3.20
+        let lightGain: Float = 3.35
         let quality: Float = 0.35
+
+        // Extra lighting controls (cheap, but makes the clouds read more like real vapour).
+        let powderK: Float = 0.85
+        let edgeLight: Float = 3.0
+        let backlight: Float = Float(cloudSunBacklight)
 
         // Lower feather = crisper cloud edge; still soft enough to hide the quad.
         let edgeFeather: Float = 0.26
@@ -125,6 +130,9 @@ extension FirstPersonEngine {
             mat.setValue(NSNumber(value: baseWhite), forKey: CloudImpostorProgram.kBaseWhite)
             mat.setValue(NSNumber(value: lightGain), forKey: CloudImpostorProgram.kLightGain)
             mat.setValue(NSNumber(value: quality), forKey: CloudImpostorProgram.kQuality)
+            mat.setValue(NSNumber(value: powderK), forKey: CloudImpostorProgram.kPowderK)
+            mat.setValue(NSNumber(value: edgeLight), forKey: CloudImpostorProgram.kEdgeLight)
+            mat.setValue(NSNumber(value: backlight), forKey: CloudImpostorProgram.kBacklight)
             mat.setValue(NSNumber(value: edgeFeather), forKey: CloudImpostorProgram.kEdgeFeather)
             mat.setValue(NSNumber(value: heightFade), forKey: CloudImpostorProgram.kHeightFade)
         }

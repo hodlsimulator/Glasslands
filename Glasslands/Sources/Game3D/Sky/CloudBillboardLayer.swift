@@ -83,10 +83,10 @@ struct CloudBillboardLayer {
 
         // Cluster budget (biased towards far/horizon so the horizon isn't empty).
         let N = max(1, Int(Float(p.clusterCount) * coverage))
-        let nearC = max(3, Int(Float(N) * 0.07))
-        let brdgC = max(6, Int(Float(N) * 0.13))
-        let midC = max(10, Int(Float(N) * 0.30))
-        let farC = max(10, Int(Float(N) * 0.32))
+        let nearC = max(4, Int(Float(N) * 0.10))
+        let brdgC = max(6, Int(Float(N) * 0.14))
+        let midC = max(10, Int(Float(N) * 0.28))
+        let farC = max(10, Int(Float(N) * 0.31))
         let hznC = max(2, N - nearC - brdgC - midC - farC)
 
         // Place clusters with blue-noise distribution per band.

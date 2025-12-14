@@ -69,7 +69,7 @@ final class FirstPersonEngine: NSObject {
     var cloudSeed: UInt32 = 0
     var cloudInitialYaw: Float = 0
     var cloudSpinAccum: Float = 0
-    var cloudSpinRate: Float = 0.0034906586   // 12°/min in rad/s
+    var cloudSpinRate: Float = 0.0014544410   // 5°/min in rad/s
     var cloudWind: simd_float2 = simd_float2(0.60, 0.20)
     var cloudDomainOffset: simd_float2 = simd_float2(0, 0)
 
@@ -221,13 +221,28 @@ final class FirstPersonEngine: NSObject {
         let right   = SIMD3( cosf(yaw), 0, -sinf(yaw))
         let moveVec = (right * moveInput.x) + (forward * moveInput.y)
         let attemptedDelta = moveVec * (cfg.moveSpeed * dt)
-        var next = yawNode.simdPosition + attemptedDelta
+
+        let current = yawNode.simdPosition
+        let movedXZ = simd_length_squared(simd_float2(attemptedDelta.x, attemptedDelta.z)) > 1e-8
+        var next = current + attemptedDelta
 
         // Height follow + descent cap
-        let groundY = groundHeightFootprint(worldX: next.x, z: next.z)
+        // When stationary (e.g. looking around), avoid the raycast path: it's CPU-expensive and
+        // can introduce camera-latency on mid-range devices.
+        var groundY: Float
+        if movedXZ {
+            groundY = groundHeightFootprint(worldX: next.x, z: next.z)
+        } else {
+            groundY = TerrainMath.heightWorld(x: current.x, z: current.z, cfg: cfg, noise: noise)
+        }
+
         let targetY = groundY + cfg.eyeHeight
         if !targetY.isFinite {
             next = spawn().simd
+        } else if movedXZ == false && abs(current.y - targetY) < 0.02 {
+            // Already grounded and not translating: keep the exact y to avoid micro-jitter.
+            next = current
+            groundY = current.y - cfg.eyeHeight
         } else if next.y <= targetY {
             next.y = targetY
         } else {
@@ -235,15 +250,19 @@ final class FirstPersonEngine: NSObject {
             next.y = max(targetY, next.y - maxDrop)
         }
 
-        // Collisions
-        next = resolveObstacleCollisions(position: next)
+        // Collisions (skip when fully stationary and grounded)
+        if movedXZ || abs(next.y - current.y) > 0.001 {
+            next = resolveObstacleCollisions(position: next)
+        }
 
         // Apply position
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
 
-        // Stream world
-        chunker.updateVisible(center: next)
+        // Stream world (only when translating)
+        if movedXZ {
+            chunker.updateVisible(center: next)
+        }
 
         // -------------------- CLOUD CONVEYOR (robust: re-scan groups + centroid fallback) --------------------
         if let layer = cloudLayerNode {
