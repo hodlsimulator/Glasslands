@@ -112,3 +112,42 @@ extension FirstPersonEngine {
         }
     }
 }
+
+@MainActor
+extension FirstPersonEngine {
+
+    func removeVolumetricDomeIfPresent() {
+        if let dome = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false) {
+            dome.removeFromParentNode()
+        }
+    }
+
+    func installVolumetricCloudsIfMissing(baseY: CGFloat, topY: CGFloat, coverage: CGFloat) {
+        // Scattered volumetric cumulus mode is intended to run without the billboard layer.
+        if let layer = cloudLayerNode ?? skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: false) {
+            layer.removeFromParentNode()
+        }
+
+        cloudLayerNode = nil
+        cloudBillboardNodes.removeAll(keepingCapacity: true)
+        cloudClusterGroups.removeAll(keepingCapacity: true)
+        cloudClusterCentroidLocal.removeAll(keepingCapacity: true)
+
+        if let existing = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false) {
+            if let m = existing.geometry?.firstMaterial {
+                m.setValue(baseY, forKey: "baseY")
+                m.setValue(topY, forKey: "topY")
+                m.setValue(coverage, forKey: "coverage")
+            }
+            return
+        }
+
+        let dome = VolumetricCloudLayer.make(
+            radius: CGFloat(cfg.skyDistance),
+            baseY: baseY,
+            topY: topY,
+            coverage: coverage
+        )
+        skyAnchor.addChildNode(dome)
+    }
+}

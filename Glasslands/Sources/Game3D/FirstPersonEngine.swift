@@ -386,10 +386,10 @@ final class FirstPersonEngine: NSObject {
         let to = SCNVector3(x, -10_000, z)
 
         // Terrain-only raycast: avoids hitting sky dome + cloud planes every frame.
-        let options: [SCNHitTestOption: Any] = [
-            .categoryBitMask: 0x0000_0400,
-            .firstFoundOnly: true,
-            .ignoreHiddenNodes: true
+        let options: [String: Any] = [
+            SCNHitTestOption.categoryBitMask.rawValue: 0x0000_0400,
+            SCNHitTestOption.firstFoundOnly.rawValue: true,
+            SCNHitTestOption.ignoreHiddenNodes.rawValue: true
         ]
 
         if let hit = scene.rootNode.hitTestWithSegment(from: from, to: to, options: options).first {
