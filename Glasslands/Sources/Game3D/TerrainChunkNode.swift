@@ -8,21 +8,35 @@
 //
 
 import SceneKit
+import simd
+import UIKit
+import Metal
+
+struct TerrainChunkData: Sendable {
+    let originChunkX: Int
+    let originChunkY: Int
+    let tilesX: Int
+    let tilesZ: Int
+    let tileSize: Float
+    let positions: [simd_float3]
+    let normals: [simd_float3]
+    let colors: [simd_float4]
+    let uvs: [simd_float2]
+    let indices: [UInt32]
+}
 
 enum TerrainChunkNode {
 
-    // Terrain material is identical across chunks. Reusing a single instance avoids per-chunk
-    // shader compilation and significantly reduces streaming hitching.
-    @MainActor private static var cachedTerrainMaterial: SCNMaterial?
-    @MainActor private static var cachedTilesX: Int = -1
-    @MainActor private static var cachedTilesZ: Int = -1
+    @MainActor
+    private static var cachedMaterial: SCNMaterial?
 
     @MainActor
-    private static func sharedTerrainMaterial(tilesX: Int, tilesZ: Int) -> SCNMaterial {
-        if let mat = cachedTerrainMaterial,
-           cachedTilesX == tilesX,
-           cachedTilesZ == tilesZ {
-            return mat
+    private static var cachedMaterialKey: (tilesX: Int, tilesZ: Int)?
+
+    @MainActor
+    private static func terrainMaterial(tilesX: Int, tilesZ: Int) -> SCNMaterial {
+        if let m = cachedMaterial, let k = cachedMaterialKey, k.tilesX == tilesX, k.tilesZ == tilesZ {
+            return m
         }
 
         let mat = SCNMaterial()
@@ -36,30 +50,30 @@ enum TerrainChunkNode {
         mat.readsFromDepthBuffer = true
         mat.writesToDepthBuffer = true
 
-        // Use the same texture configuration as before.
-        mat.diffuse.contents = SceneKitHelpers.groundStops()
-        mat.diffuse.intensity = pow(2, -2)
+        let albedoMTL = SceneKitHelpers.grassAlbedoTextureMTL(size: 512)
+        mat.diffuse.contents = albedoMTL
+
+        let groundStops: CGFloat = -2.0
+        mat.diffuse.intensity = CGFloat(pow(2.0, Double(groundStops)))
+
         mat.diffuse.wrapS = .repeat
         mat.diffuse.wrapT = .repeat
-
-        let repeatsPerTile: Float = SceneKitHelpers.grassRepeatsPerTile()
-        let repeatsX = Float(tilesX) * repeatsPerTile
-        let repeatsZ = Float(tilesZ) * repeatsPerTile
-        mat.diffuse.contentsTransform = SCNMatrix4MakeScale(repeatsX, repeatsZ, 1)
-
-        mat.diffuse.magnificationFilter = .linear
         mat.diffuse.minificationFilter = .linear
+        mat.diffuse.magnificationFilter = .linear
         mat.diffuse.mipFilter = .linear
+
+        let repeatsPerTile = SceneKitHelpers.grassRepeatsPerTile
+        let repeatsX = CGFloat(tilesX) * repeatsPerTile
+        let repeatsY = CGFloat(tilesZ) * repeatsPerTile
+        mat.diffuse.contentsTransform = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
 
         GroundShadowShader.applyIfNeeded(to: mat)
 
-        cachedTerrainMaterial = mat
-        cachedTilesX = tilesX
-        cachedTilesZ = tilesZ
+        cachedMaterial = mat
+        cachedMaterialKey = (tilesX: tilesX, tilesZ: tilesZ)
         return mat
     }
 
-    // Helper called by TerrainMeshBuilder.makeNode(...) (2D/3D compatibility).
     @MainActor
     static func makeNode(
         originChunk: IVec2,
@@ -67,64 +81,66 @@ enum TerrainChunkNode {
         noise: NoiseFields,
         recipe: BiomeRecipe
     ) -> SCNNode {
-        let data = TerrainMeshBuilder.makeData(originChunk: originChunk, cfg: cfg, noise: noise, recipe: recipe)
+        let data = TerrainMeshBuilder.makeData(
+            originChunkX: originChunk.x,
+            originChunkY: originChunk.y,
+            tilesX: cfg.tilesX,
+            tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize,
+            heightScale: cfg.heightScale,
+            noise: noise,
+            recipe: recipe
+        )
         return node(from: data, cfg: cfg)
     }
 
     @MainActor
     static func node(from data: TerrainChunkData) -> SCNNode {
-        makeNode(data, cfg: .default)
+        node(from: data, cfg: FirstPersonEngine.Config())
     }
 
     @MainActor
     static func node(from data: TerrainChunkData, cfg: FirstPersonEngine.Config) -> SCNNode {
-        // Convert arrays into contiguous Data buffers.
+        _ = cfg
+
+        let node = SCNNode()
+        node.name = "chunk_\(data.originChunkX)_\(data.originChunkY)"
+
         let posData = data.positions.withUnsafeBytes { Data($0) }
-        let norData = data.normals.withUnsafeBytes { Data($0) }
-        let uvData = data.uvs.withUnsafeBytes { Data($0) }
+        let nrmData = data.normals.withUnsafeBytes { Data($0) }
+        let uvData  = data.uvs.withUnsafeBytes { Data($0) }
         let idxData = data.indices.withUnsafeBytes { Data($0) }
 
-        let posSrc = SCNGeometrySource(data: posData,
-                                       semantic: .vertex,
-                                       vectorCount: data.positions.count,
-                                       usesFloatComponents: true,
-                                       componentsPerVector: 3,
-                                       bytesPerComponent: MemoryLayout<Float>.size,
-                                       dataOffset: 0,
-                                       dataStride: MemoryLayout<SIMD3<Float>>.stride)
+        let posSrc = SCNGeometrySource(
+            data: posData, semantic: .vertex, vectorCount: data.positions.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<simd_float3>.stride
+        )
+        let nrmSrc = SCNGeometrySource(
+            data: nrmData, semantic: .normal, vectorCount: data.normals.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<simd_float3>.stride
+        )
+        let uvSrc = SCNGeometrySource(
+            data: uvData, semantic: .texcoord, vectorCount: data.uvs.count,
+            usesFloatComponents: true, componentsPerVector: 2,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<simd_float2>.stride
+        )
+        let element = SCNGeometryElement(
+            data: idxData, primitiveType: .triangles, primitiveCount: data.indices.count / 3,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
 
-        let norSrc = SCNGeometrySource(data: norData,
-                                       semantic: .normal,
-                                       vectorCount: data.normals.count,
-                                       usesFloatComponents: true,
-                                       componentsPerVector: 3,
-                                       bytesPerComponent: MemoryLayout<Float>.size,
-                                       dataOffset: 0,
-                                       dataStride: MemoryLayout<SIMD3<Float>>.stride)
+        let geom = SCNGeometry(sources: [posSrc, nrmSrc, uvSrc], elements: [element])
+        geom.materials = [terrainMaterial(tilesX: data.tilesX, tilesZ: data.tilesZ)]
 
-        let uvSrc = SCNGeometrySource(data: uvData,
-                                      semantic: .texcoord,
-                                      vectorCount: data.uvs.count,
-                                      usesFloatComponents: true,
-                                      componentsPerVector: 2,
-                                      bytesPerComponent: MemoryLayout<Float>.size,
-                                      dataOffset: 0,
-                                      dataStride: MemoryLayout<SIMD2<Float>>.stride)
+        node.geometry = geom
 
-        let elem = SCNGeometryElement(data: idxData,
-                                      primitiveType: .triangles,
-                                      primitiveCount: data.indices.count / 3,
-                                      bytesPerIndex: MemoryLayout<UInt32>.size)
-
-        let geom = SCNGeometry(sources: [posSrc, norSrc, uvSrc], elements: [elem])
-
-        // Shared material.
-        geom.materials = [sharedTerrainMaterial(tilesX: data.tilesX, tilesZ: data.tilesZ)]
-
-        let node = SCNNode(geometry: geom)
-        node.categoryBitMask = 0x400 // terrain for hit test filtering
-        node.castsShadow = true
-        node.name = "terrain_chunk_\(data.originChunk.x)_\(data.originChunk.y)"
+        node.castsShadow = false
+        node.categoryBitMask = 0x0000_0400
 
         return node
     }

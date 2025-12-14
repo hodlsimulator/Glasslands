@@ -8,110 +8,105 @@
 //  Swift 6–safe: all SceneKit on MainActor; heavy mesh generation in an actor.
 //
 
-import SceneKit
-import Metal
+@preconcurrency import SceneKit
+@preconcurrency import GameplayKit
+import simd
 
 @MainActor
 final class ChunkStreamer3D {
-
-    // MARK: - Types
-
-    typealias BeaconSink = ([SCNNode]) -> Void
-    typealias ObstacleSink = (IVec2, [SCNNode]) -> Void
-    typealias ChunkRemovedCallback = (IVec2) -> Void
-
-    // MARK: - State
-
-    private weak var root: SCNNode?
     private let cfg: FirstPersonEngine.Config
-    private let noise: NoiseFields
     private let recipe: BiomeRecipe
+    private let noise: NoiseFields
+    private weak var root: SCNNode?
     private let renderer: SCNSceneRenderer
-    private let builder = ChunkMeshBuilder()
 
-    private let beaconSink: BeaconSink
-    private let obstacleSink: ObstacleSink
-    private let onChunkRemoved: ChunkRemovedCallback
+    private let builder: ChunkMeshBuilder
 
     private var loaded: [IVec2: SCNNode] = [:]
     private var desired: Set<IVec2> = []
     private var pending: Set<IVec2> = []
     private var queued: [IVec2] = []
 
-    // Decorations are relatively expensive (lots of small nodes/materials). To avoid hitches when
-    // multiple chunks complete in the same moment, we time-slice decoration generation/attachment
-    // through a single worker queue.
-    private var decorationQueue: [IVec2] = []
-    private var decorationQueued: Set<IVec2> = []
-    private var decorated: Set<IVec2> = []
-    private var decorationWorker: Task<Void, Never>?
+    private let beaconSink: ([SCNNode]) -> Void
+    private let obstacleSink: (IVec2, [SCNNode]) -> Void
+    private let onChunkRemoved: (IVec2) -> Void
 
-    // MARK: - Init
+    var tasksPerFrame: Int = 1
 
-    init(root: SCNNode,
-         cfg: FirstPersonEngine.Config,
-         noise: NoiseFields,
-         recipe: BiomeRecipe,
-         renderer: SCNSceneRenderer,
-         beaconSink: @escaping BeaconSink,
-         obstacleSink: @escaping ObstacleSink,
-         onChunkRemoved: @escaping ChunkRemovedCallback)
-    {
-        self.root = root
+    init(
+        cfg: FirstPersonEngine.Config,
+        noise: NoiseFields,
+        recipe: BiomeRecipe,
+        root: SCNNode,
+        renderer: SCNSceneRenderer,
+        beaconSink: @escaping ([SCNNode]) -> Void,
+        obstacleSink: @escaping (IVec2, [SCNNode]) -> Void,
+        onChunkRemoved: @escaping (IVec2) -> Void
+    ) {
         self.cfg = cfg
-        self.noise = noise
         self.recipe = recipe
+        self.noise = noise
+        self.root = root
         self.renderer = renderer
         self.beaconSink = beaconSink
         self.obstacleSink = obstacleSink
         self.onChunkRemoved = onChunkRemoved
+
+        self.builder = ChunkMeshBuilder(
+            tilesX: cfg.tilesX,
+            tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize,
+            heightScale: cfg.heightScale,
+            recipe: recipe
+        )
     }
 
-    // MARK: - Public
-
-    func clearAll() {
-        for (_, n) in loaded {
-            n.removeAllActions()
-            n.removeFromParentNode()
-        }
-        loaded.removeAll()
-        desired.removeAll()
-        pending.removeAll()
-        queued.removeAll()
-
-        decorationQueue.removeAll()
-        decorationQueued.removeAll()
-        decorated.removeAll()
-        decorationWorker?.cancel()
-        decorationWorker = nil
-    }
-
-    func updateVisible(center worldPos: simd_float3) {
+    func warmupCenter(at center: simd_float3) {
         guard let root else { return }
+        let ci = chunkIndex(forWorldX: center.x, z: center.z)
+        let key = IVec2(ci.x, ci.y)
+        guard loaded[key] == nil else { return }
 
-        let centreChunk = chunkIndex(fromWorld: worldPos)
-        let r = cfg.preloadRadius
+        let sp = Signposts.begin("BuildChunk")
+        let data = TerrainMeshBuilder.makeData(
+            originChunkX: key.x,
+            originChunkY: key.y,
+            tilesX: cfg.tilesX,
+            tilesZ: cfg.tilesZ,
+            tileSize: cfg.tileSize,
+            heightScale: cfg.heightScale,
+            noise: noise,
+            recipe: recipe
+        )
+        let node = TerrainChunkNode.node(from: data)
+        root.addChildNode(node)
+        loaded[key] = node
+        Signposts.end("BuildChunk", sp)
+    }
 
-        // Desired ring.
-        var keep: Set<IVec2> = []
-        keep.reserveCapacity((2*r + 1) * (2*r + 1))
+    func updateVisible(center: simd_float3) {
+        guard root != nil else { return }
 
-        for dy in -r...r {
-            for dx in -r...r {
-                let k = IVec2(centreChunk.x + dx, centreChunk.y + dy)
+        let ci = chunkIndex(forWorldX: center.x, z: center.z)
+
+        var keep = Set<IVec2>()
+        var toStage: [IVec2] = []
+
+        for dy in -cfg.preloadRadius...cfg.preloadRadius {
+            for dx in -cfg.preloadRadius...cfg.preloadRadius {
+                let k = IVec2(ci.x + dx, ci.y + dy)
                 keep.insert(k)
+                if loaded[k] == nil, !pending.contains(k), !queued.contains(k) {
+                    toStage.append(k)
+                }
             }
         }
-        desired = keep
 
-        // Unload anything well outside the ring.
-        let m = max(cfg.preloadRadius, cfg.unloadRadius)
-        var keepWithMargin: Set<IVec2> = []
-        keepWithMargin.reserveCapacity((2*m + 1) * (2*m + 1))
-        for dy in -m...m {
-            for dx in -m...m {
-                let k = IVec2(centreChunk.x + dx, centreChunk.y + dy)
-                keepWithMargin.insert(k)
+        let unloadRadius = cfg.preloadRadius + 3
+        var keepWithMargin = Set<IVec2>()
+        for dy in -unloadRadius...unloadRadius {
+            for dx in -unloadRadius...unloadRadius {
+                keepWithMargin.insert(IVec2(ci.x + dx, ci.y + dy))
             }
         }
 
@@ -119,107 +114,99 @@ final class ChunkStreamer3D {
             n.removeAllActions()
             n.removeFromParentNode()
             loaded.removeValue(forKey: k)
-            removeDecorationState(for: k)
             onChunkRemoved(k)
         }
 
-        // Stage new chunks.
-        let toStage = keep
-            .filter { loaded[$0] == nil && !pending.contains($0) && !queued.contains($0) }
-            .sorted { priority(of: $0, around: centreChunk) < priority(of: $1, around: centreChunk) }
+        toStage.sort { priority(of: $0, around: ci) < priority(of: $1, around: ci) }
 
-        let maxStage = max(0, cfg.tasksPerFrame)
-        for k in toStage.prefix(maxStage) {
+        var launched = 0
+        while launched < tasksPerFrame, let k = toStage.first {
+            toStage.removeFirst()
             queued.append(k)
-            enqueueBuild(k, around: centreChunk, root: root)
+            pending.insert(k)
+            enqueueBuild(k)
+            launched += 1
         }
-    }
 
-    // Builds the centre chunk immediately. Use sparingly.
-    func warmupCenter(at worldPos: simd_float3) {
-        guard let root else { return }
-        let sp = Signposts.begin("BuildChunk")
-
-        let centreChunk = chunkIndex(fromWorld: worldPos)
-        let key = centreChunk
-
-        // Build terrain synchronously so there’s no visible void.
-        let data = TerrainMeshBuilder.makeData(originChunk: key, cfg: cfg, noise: noise, recipe: recipe)
-        let node = TerrainChunkNode.node(from: data)
-        root.addChildNode(node)
-        loaded[key] = node
-        enqueueDecoration(for: key)
-        Signposts.end("BuildChunk", sp)
-    }
-
-    func warmupInitial(at worldPos: simd_float3, radius: Int) {
-        guard let root else { return }
-        let centreChunk = chunkIndex(fromWorld: worldPos)
-
-        for dy in -radius...radius {
-            for dx in -radius...radius {
-                let key = IVec2(centreChunk.x + dx, centreChunk.y + dy)
-
-                if loaded[key] != nil { continue }
-
-                // Terrain synchronously to avoid a blank frame at launch.
-                let data = TerrainMeshBuilder.makeData(originChunk: key, cfg: cfg, noise: noise, recipe: recipe)
-                let terrainNode = TerrainChunkNode.node(from: data)
-                root.addChildNode(terrainNode)
-                loaded[key] = terrainNode
-
-                // Decorations are queued and time-sliced to avoid launch hitches.
-                enqueueDecoration(for: key)
+        if launched < tasksPerFrame, !queued.isEmpty {
+            var i = 0
+            while launched < tasksPerFrame, i < queued.count {
+                let k = queued[i]
+                if keep.contains(k), loaded[k] == nil, !pending.contains(k) {
+                    pending.insert(k)
+                    enqueueBuild(k)
+                    queued.remove(at: i)
+                    launched += 1
+                } else {
+                    i += 1
+                }
             }
         }
+
+        if !queued.isEmpty {
+            queued.removeAll { loaded[$0] != nil || !keepWithMargin.contains($0) }
+        }
+
+        desired = keep
     }
 
     // MARK: - Private
 
-    private func enqueueBuild(_ key: IVec2, around centre: IVec2, root: SCNNode) {
-        guard !pending.contains(key) else { return }
-        pending.insert(key)
+    private func enqueueBuild(_ k: IVec2) {
+        let ox = k.x, oy = k.y
 
-        // Inherit @MainActor from the class (DO NOT use Task.detached here).
-        // Use .utility so chunk streaming work doesn't fight the renderer for CPU.
-        Task(priority: .utility) { [weak self] in
+        Task(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            defer {
-                self.pending.remove(key)
-                if let idx = self.queued.firstIndex(of: key) { self.queued.remove(at: idx) }
-            }
 
-            // If it’s no longer desired by the time build completes, skip attaching entirely.
-            // (Avoids wasted work when moving quickly.)
-            if !self.desired.contains(key) {
-                return
-            }
+            let key = IVec2(ox, oy)
+            defer { self.pending.remove(key) }
 
-            // Build mesh data off-main via actor.
-            let data = await self.builder.build(originChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let data = await self.builder.build(originChunkX: ox, originChunkY: oy)
 
-            // Create node on main.
+            guard let root = self.root else { return }
+
             let terrainNode = TerrainChunkNode.node(from: data)
 
-            // Prepare only the terrain to reduce first-draw stutters (cheap compared to preparing everything).
             await self.prepareAsync([terrainNode])
 
-            // Replace if present.
-            if let existing = self.loaded[key] {
+            if let existing = self.loaded.removeValue(forKey: key) {
                 existing.removeAllActions()
                 existing.removeFromParentNode()
-                self.loaded.removeValue(forKey: key)
-                self.removeDecorationState(for: key)
                 self.onChunkRemoved(key)
             }
 
             root.addChildNode(terrainNode)
             self.loaded[key] = terrainNode
 
-            // Queue decorations separately (time-sliced worker).
-            self.enqueueDecoration(for: key)
+            let beacons = BeaconPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let veg     = VegetationPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+            let scenery = SceneryPlacer3D.place(inChunk: key, cfg: self.cfg, noise: self.noise, recipe: self.recipe)
+
+            for (i, n) in beacons.enumerated() {
+                terrainNode.addChildNode(n)
+                if i & 0x0F == 0 { await Task.yield() }
+            }
+            for (i, n) in veg.enumerated() {
+                terrainNode.addChildNode(n)
+                if i & 0x0F == 0 { await Task.yield() }
+            }
+            for (i, n) in scenery.enumerated() {
+                terrainNode.addChildNode(n)
+                if i & 0x0F == 0 { await Task.yield() }
+            }
+
+            self.beaconSink(beacons)
+            self.obstacleSink(key, veg + beacons + scenery)
         }
     }
+
+    private func chunkIndex(forWorldX x: Float, z: Float) -> IVec2 {
+        let tX = Int(floor(Double(x) / Double(cfg.tileSize)))
+        let tZ = Int(floor(Double(z) / Double(cfg.tileSize)))
+        return IVec2(floorDiv(tX, cfg.tilesX), floorDiv(tZ, cfg.tilesZ))
+    }
+
+    private func floorDiv(_ a: Int, _ b: Int) -> Int { a >= 0 ? a / b : ((a + 1) / b - 1) }
 
     private func priority(of k: IVec2, around c: IVec2) -> Int {
         let dx = k.x - c.x
@@ -227,300 +214,312 @@ final class ChunkStreamer3D {
         return dx &* dx &+ dy &* dy
     }
 
-    private func enqueueDecoration(for key: IVec2) {
-        guard loaded[key] != nil else { return }
-        guard !decorated.contains(key), !decorationQueued.contains(key) else { return }
-
-        decorationQueue.append(key)
-        decorationQueued.insert(key)
-        startDecorationWorkerIfNeeded()
-    }
-
-    private func removeDecorationState(for key: IVec2) {
-        decorated.remove(key)
-        decorationQueued.remove(key)
-        decorationQueue.removeAll { $0 == key }
-    }
-
-    private func startDecorationWorkerIfNeeded() {
-        guard decorationWorker == nil else { return }
-
-        decorationWorker = Task(priority: .utility) { [weak self] in
-            guard let self else { return }
-
-            while !Task.isCancelled {
-                guard let key = self.dequeueNextDecorationKey() else { break }
-                await self.buildDecorations(for: key)
-                await Task.yield()
-            }
-
-            self.decorationWorker = nil
-        }
-    }
-
-    private func dequeueNextDecorationKey() -> IVec2? {
-        while !decorationQueue.isEmpty {
-            let key = decorationQueue.removeFirst()
-            decorationQueued.remove(key)
-
-            if decorated.contains(key) { continue }
-            if loaded[key] == nil { continue }
-
-            // Prefer decorating chunks that are still in the desired ring.
-            // If it’s only in the unload margin, deprioritise by pushing it back once.
-            if !desired.contains(key) {
-                decorationQueue.append(key)
-                decorationQueued.insert(key)
-                // Avoid infinite cycling if only margin chunks remain.
-                if decorationQueue.count > 1 {
-                    continue
-                }
-            }
-
-            return key
-        }
-        return nil
-    }
-
-    private func buildDecorations(for key: IVec2) async {
-        guard let terrainNode = loaded[key] else { return }
-        guard !decorated.contains(key) else { return }
-
-        // Generate on main (SceneKit + UIKit work).
-        let beacons = BeaconPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
-        if Task.isCancelled { return }
-
-        let veg = VegetationPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
-        if Task.isCancelled { return }
-
-        // Give the renderer/input loop a chance to breathe before the heaviest step.
-        await Task.yield()
-
-        // Scenery is the heaviest chunk-decoration step; time-sliced via placeAsync.
-        let scenery = await SceneryPlacer3D.placeAsync(
-            inChunk: key,
-            cfg: cfg,
-            noise: noise,
-            recipe: recipe,
-            frameBudgetSeconds: 0.0020
-        )
-        if Task.isCancelled { return }
-
-        // Chunk might have been removed/replaced while yielding.
-        guard let current = loaded[key], current === terrainNode else { return }
-
-        // Attach nodes with small yields to keep frames smooth.
-        for (i, n) in beacons.enumerated() {
-            if Task.isCancelled { return }
-            terrainNode.addChildNode(n)
-            if i & 0x07 == 0 { await Task.yield() }
-        }
-
-        for (i, n) in veg.enumerated() {
-            if Task.isCancelled { return }
-            terrainNode.addChildNode(n)
-            if i & 0x07 == 0 { await Task.yield() }
-        }
-
-        for (i, n) in scenery.enumerated() {
-            if Task.isCancelled { return }
-            terrainNode.addChildNode(n)
-            if i & 0x07 == 0 { await Task.yield() }
-        }
-
-        // Only mark complete after everything is attached + sinks are notified.
-        decorated.insert(key)
-        beaconSink(beacons)
-        obstacleSink(key, veg + beacons + scenery)
-    }
-
+    @MainActor
     private func prepareAsync(_ objects: [Any]) async {
-        await withCheckedContinuation { cont in
+        guard !objects.isEmpty else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             renderer.prepare(objects) { _ in
                 cont.resume()
             }
         }
     }
 
-    private func chunkIndex(fromWorld p: simd_float3) -> IVec2 {
-        let cs = Float(cfg.tileSize) * Float(cfg.tilesX)
-        let ix = Int(floor(p.x / cs))
-        let iz = Int(floor(p.z / cs))
-        return IVec2(ix, iz)
+    @MainActor
+    func warmupInitial(at center: simd_float3, radius: Int = 1) {
+        guard let root else { return }
+        let ci = chunkIndex(forWorldX: center.x, z: center.z)
+
+        for dy in -radius...radius {
+            for dx in -radius...radius {
+                let key = IVec2(ci.x + dx, ci.y + dy)
+                guard loaded[key] == nil else { continue }
+
+                let data = TerrainMeshBuilder.makeData(
+                    originChunkX: key.x, originChunkY: key.y,
+                    tilesX: cfg.tilesX, tilesZ: cfg.tilesZ,
+                    tileSize: cfg.tileSize, heightScale: cfg.heightScale,
+                    noise: noise, recipe: recipe
+                )
+                let terrainNode = TerrainChunkNode.node(from: data)
+                root.addChildNode(terrainNode)
+                loaded[key] = terrainNode
+
+                let beacons = BeaconPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+                let veg     = VegetationPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+                let scenery = SceneryPlacer3D.place(inChunk: key, cfg: cfg, noise: noise, recipe: recipe)
+
+                beacons.forEach { terrainNode.addChildNode($0) }
+                veg.forEach     { terrainNode.addChildNode($0) }
+                scenery.forEach { terrainNode.addChildNode($0) }
+
+                beaconSink(beacons)
+                obstacleSink(key, veg + beacons + scenery)
+            }
+        }
     }
 }
 
-// MARK: - Chunk mesh builder actor
+// MARK: - Background mesh builder (actor) — pure math only, with skirts and stitched UVs.
 
 actor ChunkMeshBuilder {
-    func build(originChunk: IVec2,
-               cfg: FirstPersonEngine.Config,
-               noise: NoiseFields,
-               recipe: BiomeRecipe) -> TerrainChunkData
-    {
-        let sp = Signposts.begin("BuildChunkData")
+    private let tilesX: Int
+    private let tilesZ: Int
+    private let tileSize: Float
+    private let heightScale: Float
+    private let recipe: BiomeRecipe
+    private let sampler: NoiseSampler
 
-        let tilesX = cfg.tilesX
-        let tilesZ = cfg.tilesZ
-        let tileSize = Float(cfg.tileSize)
+    init(tilesX: Int, tilesZ: Int, tileSize: Float, heightScale: Float, recipe: BiomeRecipe) {
+        self.tilesX = tilesX
+        self.tilesZ = tilesZ
+        self.tileSize = tileSize
+        self.heightScale = heightScale
+        self.recipe = recipe
+        self.sampler = NoiseSampler(recipe: recipe)
+    }
 
-        let originTileX = originChunk.x * tilesX
-        let originTileZ = originChunk.y * tilesZ
+    func build(originChunkX: Int, originChunkY: Int) -> TerrainChunkData {
+        let vertsX = tilesX + 1
+        let vertsZ = tilesZ + 1
 
-        let detailScale = SceneKitHelpers.grassRepeatsPerTile()
-        let heightAmp = Float(cfg.heightScale)
-        let ampH = heightAmp
-        let ampM = 1.0 as Float
+        let originTileX = originChunkX * tilesX
+        let originTileZ = originChunkY * tilesZ
 
-        let sampler = NoiseSampler(noise: noise, recipe: recipe)
+        @inline(__always) func vi(_ x: Int, _ z: Int) -> Int { z * vertsX + x }
 
-        // Grid vertices (tilesX+1)*(tilesZ+1)
-        let vxCount = tilesX + 1
-        let vzCount = tilesZ + 1
-        let vCount = vxCount * vzCount
+        var positions = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
+        var normals   = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
+        var colors    = [SIMD4<Float>](repeating: SIMD4(1, 1, 1, 1), count: vertsX * vertsZ)
+        var uvs       = [SIMD2<Float>](repeating: .zero, count: vertsX * vertsZ)
 
-        var positions: [SIMD3<Float>] = []
-        var normals: [SIMD3<Float>] = []
-        var uvs: [SIMD2<Float>] = []
+        let extX = vertsX + 2
+        let extZ = vertsZ + 2
+        @inline(__always) func evi(_ x: Int, _ z: Int) -> Int { z * extX + x }
 
-        positions.reserveCapacity(vCount + (tilesX + tilesZ) * 2 + 4 * 2)
-        normals.reserveCapacity(vCount + (tilesX + tilesZ) * 2 + 4 * 2)
-        uvs.reserveCapacity(vCount + (tilesX + tilesZ) * 2 + 4 * 2)
+        var baseHeights = [Double](repeating: 0, count: extX * extZ)
+        for ez in 0..<extZ {
+            for ex in 0..<extX {
+                let tx = originTileX + ex - 1
+                let tz = originTileZ + ez - 1
+                baseHeights[evi(ex, ez)] = sampler.sampleHeight(Double(tx), Double(tz))
+            }
+        }
 
-        // Sample heights into a buffer for normal computation.
-        var heights: [Float] = Array(repeating: 0, count: vCount)
+        let ampH = max(0.0001, recipe.height.amplitude)
 
-        func vi(_ x: Int, _ z: Int) -> Int { z * vxCount + x }
-
-        for z in 0...tilesZ {
-            for x in 0...tilesX {
+        for z in 0..<vertsZ {
+            for x in 0..<vertsX {
                 let tx = originTileX + x
                 let tz = originTileZ + z
-                var hN = sampler.heightNorm(tx, tz, ampH)
 
-                // Apply river carving so mesh matches TerrainMath.heightWorld.
-                let r = sampler.riverMask(tx, tz, ampM)
+                let wX = Float(tx) * tileSize
+                let wZ = Float(tz) * tileSize
+
+                let ex = x + 1
+                let ez = z + 1
+                let base = baseHeights[evi(ex, ez)]
+
+                var h = base
+                let r = sampler.riverMask(Double(tx), Double(tz))
                 if r > 0.55 {
-                    let t = min(1.0, (r - 0.55) / 0.25)
-                    hN *= (1.0 - 0.6 * t)
+                    let t = min(1.0, (r - 0.55) / 0.45)
+                    h *= (1.0 - 0.35 * t)
                 }
 
-                let h = hN * 1.0 // already scaled by ampH
-                heights[vi(x, z)] = h
+                let hN = Float(h / ampH)
+                let y  = hN * heightScale
 
-                let wx = (Float(originTileX + x) * tileSize)
-                let wz = (Float(originTileZ + z) * tileSize)
-                positions.append(SIMD3<Float>(wx, h, wz))
+                let idx = vi(x, z)
+                positions[idx] = SIMD3(wX, y, wZ)
 
-                // UV in tile space (for repeatable grass texture).
-                uvs.append(SIMD2<Float>(Float(tx) * detailScale, Float(tz) * detailScale))
+                let hL = baseHeights[evi(ex - 1, ez)]
+                let hR = baseHeights[evi(ex + 1, ez)]
+                let hD = baseHeights[evi(ex, ez - 1)]
+                let hU = baseHeights[evi(ex, ez + 1)]
+                let tXv = SIMD3(tileSize, Float(hR - hL) * heightScale, 0)
+                let tZv = SIMD3(0, Float(hU - hD) * heightScale, tileSize)
+                normals[idx] = simd_normalize(simd_cross(tZv, tXv))
+
+                colors[idx] = SIMD4(1, 1, 1, 1)
+
+                let detailScale: Float = 1.0 / (tileSize * 8.0)
+                uvs[idx] = SIMD2(wX * detailScale, wZ * detailScale)
             }
         }
 
-        // Normals: finite differences from heights.
-        for z in 0...tilesZ {
-            for x in 0...tilesX {
-                let xm = max(0, x - 1)
-                let xp = min(tilesX, x + 1)
-                let zm = max(0, z - 1)
-                let zp = min(tilesZ, z + 1)
-
-                let hx0 = heights[vi(xm, z)]
-                let hx1 = heights[vi(xp, z)]
-                let hz0 = heights[vi(x, zm)]
-                let hz1 = heights[vi(x, zp)]
-
-                let dx = (hx0 - hx1) / (Float(xp - xm) * tileSize)
-                let dz = (hz0 - hz1) / (Float(zp - zm) * tileSize)
-
-                let n = simd_normalize(SIMD3<Float>(dx, 2.0, dz))
-                normals.append(n)
-            }
-        }
-
-        // Indices for two triangles per tile.
         var indices: [UInt32] = []
         indices.reserveCapacity(tilesX * tilesZ * 6)
-
         for z in 0..<tilesZ {
             for x in 0..<tilesX {
-                let i0 = UInt32(vi(x, z))
+                let i0 = UInt32(vi(x,     z))
                 let i1 = UInt32(vi(x + 1, z))
-                let i2 = UInt32(vi(x, z + 1))
+                let i2 = UInt32(vi(x,     z + 1))
                 let i3 = UInt32(vi(x + 1, z + 1))
-
-                // Diagonal from (x+1,z) to (x,z+1)
-                indices.append(i0); indices.append(i2); indices.append(i1)
-                indices.append(i1); indices.append(i2); indices.append(i3)
+                indices.append(contentsOf: [i0, i2, i1,  i1, i2, i3])
             }
         }
 
-        // Skirt to hide seams between chunks (downwards extrusion).
-        let skirtDepth: Float = -8.0
+        let skirtDepth: Float = 0.20
+        var bottomIndex: [Int: Int] = [:]
 
-        func addSkirtVertex(from baseIndex: Int) -> Int {
-            let p = positions[baseIndex]
-            positions.append(SIMD3<Float>(p.x, p.y + skirtDepth, p.z))
-            normals.append(SIMD3<Float>(0, 1, 0))
-            uvs.append(uvs[baseIndex])
-            return positions.count - 1
+        @inline(__always)
+        func bottomOf(_ x: Int, _ z: Int, normalHint n: SIMD3<Float>) -> Int {
+            let top = vi(x, z)
+            if let id = bottomIndex[top] { return id }
+            let p = positions[top]
+            positions.append(SIMD3(p.x, p.y - skirtDepth, p.z))
+            normals.append(n)
+            colors.append(colors[top])
+            uvs.append(uvs[top])
+            let id = positions.count - 1
+            bottomIndex[top] = id
+            return id
         }
 
-        func addSkirtQuadsAlongEdge(_ edge: [(Int, Int)]) {
-            for (a, b) in edge {
-                let a0 = a
-                let b0 = b
-                let a1 = addSkirtVertex(from: a0)
-                let b1 = addSkirtVertex(from: b0)
-
-                let ia0 = UInt32(a0)
-                let ib0 = UInt32(b0)
-                let ia1 = UInt32(a1)
-                let ib1 = UInt32(b1)
-
-                // Two triangles for the quad.
-                indices.append(ia0); indices.append(ib0); indices.append(ia1)
-                indices.append(ia1); indices.append(ib0); indices.append(ib1)
+        if vertsZ > 1 {
+            let n = SIMD3<Float>(0, 0, -1)
+            for x in 0..<vertsX {
+                let topA = vi(x, 0)
+                let topB = vi(max(0, x-1), 0)
+                let botA = bottomOf(x, 0, normalHint: n)
+                let botB = bottomOf(max(0, x-1), 0, normalHint: n)
+                indices.append(contentsOf: [UInt32(topB), UInt32(botB), UInt32(topA),
+                                            UInt32(topA), UInt32(botB), UInt32(botA)])
+            }
+        }
+        if vertsZ > 1 {
+            let n = SIMD3<Float>(0, 0, 1)
+            let z = vertsZ - 1
+            for x in 0..<vertsX {
+                let topA = vi(x, z)
+                let topB = vi(max(0, x-1), z)
+                let botA = bottomOf(x, z, normalHint: n)
+                let botB = bottomOf(max(0, x-1), z, normalHint: n)
+                indices.append(contentsOf: [UInt32(topA), UInt32(botB), UInt32(topB),
+                                            UInt32(topA), UInt32(botA), UInt32(botB)])
+            }
+        }
+        if vertsX > 1 {
+            let n = SIMD3<Float>(-1, 0, 0)
+            for z in 0..<vertsZ {
+                let topA = vi(0, z)
+                let topB = vi(0, max(0, z-1))
+                let botA = bottomOf(0, z, normalHint: n)
+                let botB = bottomOf(0, max(0, z-1), normalHint: n)
+                indices.append(contentsOf: [UInt32(topB), UInt32(botB), UInt32(topA),
+                                            UInt32(topA), UInt32(botB), UInt32(botA)])
+            }
+        }
+        if vertsX > 1 {
+            let n = SIMD3<Float>(1, 0, 0)
+            let x = vertsX - 1
+            for z in 0..<vertsZ {
+                let topA = vi(x, z)
+                let topB = vi(x, max(0, z-1))
+                let botA = bottomOf(x, z, normalHint: n)
+                let botB = bottomOf(x, max(0, z-1), normalHint: n)
+                indices.append(contentsOf: [UInt32(topA), UInt32(botB), UInt32(topB),
+                                            UInt32(topA), UInt32(botA), UInt32(botB)])
             }
         }
 
-        // Edge vertex pairs.
-        var top: [(Int, Int)] = []
-        var bottom: [(Int, Int)] = []
-        var left: [(Int, Int)] = []
-        var right: [(Int, Int)] = []
-
-        top.reserveCapacity(tilesX)
-        bottom.reserveCapacity(tilesX)
-        left.reserveCapacity(tilesZ)
-        right.reserveCapacity(tilesZ)
-
-        for x in 0..<tilesX {
-            top.append((vi(x, 0), vi(x + 1, 0)))
-            bottom.append((vi(x, tilesZ), vi(x + 1, tilesZ)))
-        }
-        for z in 0..<tilesZ {
-            left.append((vi(0, z), vi(0, z + 1)))
-            right.append((vi(tilesX, z), vi(tilesX, z + 1)))
-        }
-
-        addSkirtQuadsAlongEdge(top)
-        addSkirtQuadsAlongEdge(bottom)
-        addSkirtQuadsAlongEdge(left)
-        addSkirtQuadsAlongEdge(right)
-
-        let out = TerrainChunkData(
-            originChunk: originChunk,
+        return TerrainChunkData(
+            originChunkX: originChunkX,
+            originChunkY: originChunkY,
             tilesX: tilesX,
             tilesZ: tilesZ,
-            tileSize: cfg.tileSize,
+            tileSize: tileSize,
             positions: positions,
             normals: normals,
+            colors: colors,
             uvs: uvs,
             indices: indices
         )
+    }
 
-        Signposts.end("BuildChunkData", sp)
-        return out
+    private final class NoiseSampler {
+        private let height: GKNoise
+        private let moisture: GKNoise
+        private let riverBase: GKNoise
+        private let warpX: GKNoise
+        private let warpY: GKNoise
+
+        private let ampH: Double
+        private let ampM: Double
+        private let scaleH: Double
+        private let scaleM: Double
+        private let scaleR: Double
+        private let warpScale: Double
+        private let warpAmp: Double
+
+        init(recipe: BiomeRecipe) {
+            let baseSeed32: Int32 = Int32(truncatingIfNeeded: recipe.seed64)
+
+            func makeSource(_ p: NoiseParams, seed salt: Int32 = 0) -> GKNoiseSource {
+                let s = baseSeed32 &+ salt
+                switch p.base.lowercased() {
+                case "ridged": return GKRidgedNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), lacunarity: 2.0, seed: s)
+                case "billow": return GKBillowNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), persistence: 0.5, lacunarity: 2.0, seed: s)
+                default:       return GKPerlinNoiseSource(frequency: 1.0, octaveCount: max(1, p.octaves), persistence: 0.55, lacunarity: 2.2, seed: s)
+                }
+            }
+
+            self.height = GKNoise(makeSource(recipe.height))
+            self.moisture = GKNoise(makeSource(recipe.moisture, seed: 101))
+            self.riverBase = GKNoise(GKRidgedNoiseSource(frequency: 1.0, octaveCount: 5, lacunarity: 2.0, seed: baseSeed32 &+ 202))
+            self.warpX = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 303))
+            self.warpY = GKNoise(GKPerlinNoiseSource(frequency: 1.0, octaveCount: 3, persistence: 0.5, lacunarity: 2.0, seed: baseSeed32 &+ 404))
+
+            self.ampH = recipe.height.amplitude
+            self.ampM = recipe.moisture.amplitude
+
+            self.scaleH = max(20.0, recipe.height.scale * 12.0)
+            self.scaleM = max(10.0, recipe.moisture.scale * 8.0)
+            self.scaleR = max(12.0, scaleH * 0.85)
+
+            self.warpScale = 12.0
+            self.warpAmp = 0.15 / scaleH
+        }
+
+        @inline(__always) private func n01(_ v: Double) -> Double { (v * 0.5) + 0.5 }
+
+        private func warp(_ x: Double, _ y: Double) -> (Double, Double) {
+            let wx = Double(warpX.value(atPosition: vector_float2(Float(x/warpScale), Float(y/warpScale))))
+            let wy = Double(warpY.value(atPosition: vector_float2(Float((x+1234)/warpScale), Float((y-987)/warpScale))))
+            return (x + wx * warpAmp, y + wy * warpAmp)
+        }
+
+        func sampleHeight(_ x: Double, _ y: Double) -> Double {
+            let (u, v) = warp(x, y)
+            let v0 = Double(height.value(atPosition: vector_float2(Float(u/scaleH), Float(v/scaleH))))
+            let v1 = Double(height.value(atPosition: vector_float2(Float((u+0.73)/scaleH), Float((v-0.42)/scaleH))))
+            let v2 = Double(height.value(atPosition: vector_float2(Float((u-0.61)/scaleH), Float((v+0.37)/scaleH))))
+            let v3 = Double(height.value(atPosition: vector_float2(Float((u+0.21)/scaleH), Float((v+0.58)/scaleH))))
+            let hRaw = (v0 * 0.46 + v1 * 0.24 + v2 * 0.18 + v3 * 0.12)
+            let h = pow(n01(hRaw), 1.35)
+            return h * ampH
+        }
+
+        func sampleMoisture(_ x: Double, _ y: Double) -> Double {
+            let (u, v) = warp(x, y)
+            let m = Double(moisture.value(atPosition: vector_float2(Float(u/scaleM), Float(v/scaleM))))
+            return n01(m) * ampM
+        }
+
+        func riverMask(_ x: Double, _ y: Double) -> Double {
+            let (u, v) = warp(x, y)
+            let r = Double(riverBase.value(atPosition: vector_float2(Float(u/scaleR), Float(v/scaleR))))
+            let valley = 1.0 - n01(r)
+            let t = max(0.0, valley - 0.40) / 0.60
+            return pow(t, 2.2)
+        }
+
+        func slope(_ x: Double, _ y: Double) -> Double {
+            let s = 0.75
+            let c = sampleHeight(x, y)
+            let dx = sampleHeight(x + s, y) - c
+            let dy = sampleHeight(x, y + s) - c
+            return sqrt(dx*dx + dy*dy)
+        }
     }
 }
