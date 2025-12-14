@@ -75,14 +75,14 @@ extension FirstPersonEngine {
 
         if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: true),
            let m = sky.geometry?.firstMaterial {
-            m.setValue(sunW, forKey: "sunDirWorld")
-            m.setValue(tint, forKey: "sunTint")
+            m.setValue(NSValue(scnVector3: sunW), forKey: "sunDirWorld")
+            m.setValue(NSValue(scnVector3: tint), forKey: "sunTint")
         }
 
         if let dome = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true),
            let m = dome.geometry?.firstMaterial {
-            m.setValue(sunW, forKey: "sunDirWorld")
-            m.setValue(tint, forKey: "sunTint")
+            m.setValue(NSValue(scnVector3: sunW), forKey: "sunDirWorld")
+            m.setValue(NSValue(scnVector3: tint), forKey: "sunTint")
         }
     }
 
