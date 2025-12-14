@@ -57,8 +57,9 @@ struct CloudUniforms {
 };
 struct ShadowUniforms {
     float2 centerXZ;
-    float  halfSize;
-    float  pad0;
+    float halfSize;
+    float groundY;
+    float pad0;
 };
 struct Cluster {
     float3 pos;
