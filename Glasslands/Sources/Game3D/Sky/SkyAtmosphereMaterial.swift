@@ -24,10 +24,22 @@ enum SkyAtmosphereMaterial {
         float skyExposure;
         float horizonLift;
 
+        #pragma declaration
+        inline float3 safeNormalize(float3 v) {
+            float l = length(v);
+            return (l > 1.0e-6) ? (v / l) : float3(0.0, 1.0, 0.0);
+        }
+
         #pragma body
 
-        float3 V = normalize(-_surface.view); // inside-out skydome
-        float3 S = normalize(sunDirWorld);
+        // In SceneKit shader modifiers, _surface.position is in view space (camera at origin).
+        // Convert the view direction into model space so the horizon haze stays stable against camera pitch.
+        float3 Vv = safeNormalize(_surface.position);
+        float3 V  = safeNormalize((scn_node.inverseModelViewTransform * float4(Vv, 0.0)).xyz);
+
+        // Convert world sun direction into the same space as V.
+        float3 S  = safeNormalize((scn_node.inverseModelTransform * float4(sunDirWorld, 0.0)).xyz);
+
         float mu = clamp(dot(V, S), -1.0, 1.0);
 
         // Coefficients (approximate, in 1/m)
