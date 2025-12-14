@@ -116,10 +116,11 @@ extension FirstPersonEngine {
 @MainActor
 extension FirstPersonEngine {
 
+    @MainActor
     func removeVolumetricDomeIfPresent() {
-        if let dome = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: false) {
-            dome.removeFromParentNode()
-        }
+        // Volumetric dome is now the primary cloud renderer (single Metal draw).
+        // Keeping it avoids the billboard puff overdraw path entirely.
+        return
     }
 
     func installVolumetricCloudsIfMissing(baseY: CGFloat, topY: CGFloat, coverage: CGFloat) {

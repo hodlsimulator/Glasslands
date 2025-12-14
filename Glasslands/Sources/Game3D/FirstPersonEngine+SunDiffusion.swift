@@ -383,6 +383,13 @@ extension FirstPersonEngine {
     @MainActor
     func updateSunDiffusion() {
         guard let view = scnView else { return }
+        let pov = (view.pointOfView ?? camNode).presentation
+        let look = -pov.simdWorldFront
+        if look.y > 0.70 {
+            // When the camera is pitched well above the horizon, terrain contribution is minimal.
+            // Skipping the shadow-map encode prevents cloud-shadow compute from competing with sky rendering.
+            return
+        }
         let S = SunDiffusionState.shared
         S.ensureGPU(view: view)
         

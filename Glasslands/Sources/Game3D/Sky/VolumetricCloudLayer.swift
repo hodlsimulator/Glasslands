@@ -4,12 +4,11 @@
 //
 //  Created by . . on 10/5/25.
 //
-//  Inside-out sphere that runs the volumetric vapour program.
-//  Excluded from lighting to keep the sun’s shadow frustum tight.
+//  A single inside-out sphere that renders volumetric clouds with SkyVolumetricClouds.metal.
 //
 
 import SceneKit
-import UIKit
+import CoreGraphics
 
 enum VolumetricCloudLayer {
 
@@ -20,38 +19,36 @@ enum VolumetricCloudLayer {
         topY: CGFloat,
         coverage: CGFloat
     ) -> SCNNode {
-
-        // Geometry
-        let sphere = SCNSphere(radius: max(10, radius * 0.98))
+        let sphere = SCNSphere(radius: radius)
         sphere.segmentCount = 96
 
-        // Material + uniforms
-        let mat = VolumetricCloudProgram.makeMaterial()
-        mat.setValue(baseY, forKey: "baseY")
-        mat.setValue(topY, forKey: "topY")
-
-        // Ensure a fuller sky even if callers pass a low coverage.
-        // (Keeps performance stable; no extra draw calls.)
-        let targetCoverage: CGFloat = max(coverage, 0.74)
-        mat.setValue(targetCoverage, forKey: "coverage")
-
-        // Slightly denser/fluffier than before (safe on iOS tile GPUs)
-        mat.setValue(0.60 as CGFloat,  forKey: "mieG")
-        mat.setValue(2.10 as CGFloat,  forKey: "powderK")
-        mat.setValue(1.25 as CGFloat,  forKey: "densityMul")   // was 1.15
-        mat.setValue(0.85 as CGFloat,  forKey: "stepMul")
-        mat.setValue(1.08 as CGFloat,  forKey: "detailMul")    // was 1.10
-        mat.setValue(0.0043 as CGFloat, forKey: "puffScale")   // was 0.0045
-        mat.setValue(0.74 as CGFloat,  forKey: "puffStrength") // was 0.65
-
+        let mat = VolumetricCloudMaterial.makeMaterial()
         sphere.firstMaterial = mat
 
-        // Node
         let node = SCNNode(geometry: sphere)
         node.name = "VolumetricCloudLayer"
         node.castsShadow = false
-        node.categoryBitMask = 0        // exclude from lights
-        node.renderingOrder = -9_990
+
+        // Must draw after the sky atmosphere, before world.
+        node.renderingOrder = -190_000
+
+        // Store defaults in the uniform store so the Metal program has sane values immediately.
+        // configure(...) clamps internally; the remaining values are preserved by re-using snapshot defaults.
+        let snap = VolCloudUniformsStore.shared.snapshot()
+        VolCloudUniformsStore.shared.configure(
+            baseY: Float(baseY),
+            topY: Float(topY),
+            coverage: Float(coverage),
+            densityMul: snap.params1.z,
+            stepMul: snap.params1.w,
+            horizonLift: snap.params2.z,
+            detailMul: snap.params2.w,
+            puffScale: snap.params3.w,
+            puffStrength: snap.params4.x,
+            macroScale: snap.params4.z,
+            macroThreshold: snap.params4.w
+        )
+
         return node
     }
 }
