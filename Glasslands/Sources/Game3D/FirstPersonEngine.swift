@@ -170,6 +170,9 @@ final class FirstPersonEngine: NSObject {
                 // Register billboards for conveyor/orientation, then apply the tuned (bright + cheaper) uniforms.
                 self.enableVolumetricCloudImpostors(false)
                 self.applyCloudSunUniforms()
+
+                // Pre-compile sky + cloud shaders/materials so the first pan doesn’t hitch.
+                self.prewarmSkyAndSun()
             }
         }
     }

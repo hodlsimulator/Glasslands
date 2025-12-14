@@ -247,7 +247,60 @@ extension FirstPersonEngine {
 
     @MainActor
     func prewarmSkyAndSun() {
-        // Sun diffusion prewarm is handled separately and is idempotent.
+        // Sun diffusion prewarm is idempotent.
         prewarmSunDiffusion()
+
+        // Pre-compile sky + cloud shaders/materials on a background thread so the first
+        // real-time camera pan doesn’t hitch when SceneKit lazily compiles pipelines.
+        guard let view = scnView else { return }
+
+        var objects: [Any] = []
+        objects.reserveCapacity(16)
+
+        objects.append(scene)
+        objects.append(skyAnchor)
+
+        if let sky = skyAnchor.childNode(withName: "SkyAtmosphere", recursively: true) {
+            objects.append(sky)
+        }
+        if let dome = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true) {
+            objects.append(dome)
+        }
+        if let sun = sunDiscNode {
+            objects.append(sun)
+        }
+        if let layer = cloudLayerNode ?? skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) {
+            objects.append(layer)
+        }
+
+        // Also include unique materials to force shader-modifier compilation.
+        var mats: [SCNMaterial] = []
+        mats.reserveCapacity(64)
+        var seen = Set<ObjectIdentifier>()
+
+        func harvest(from node: SCNNode) {
+            if let g = node.geometry {
+                for m in g.materials {
+                    let id = ObjectIdentifier(m)
+                    if seen.insert(id).inserted {
+                        mats.append(m)
+                    }
+                }
+            }
+            for c in node.childNodes {
+                harvest(from: c)
+            }
+        }
+
+        for o in objects {
+            if let n = o as? SCNNode {
+                harvest(from: n)
+            }
+        }
+        objects.append(contentsOf: mats)
+
+        view.prepare(objects) { _ in
+            // Intentionally ignored; preparation is best-effort.
+        }
     }
 }

@@ -56,6 +56,13 @@ private final class SunDiffusionState {
     // Dummy buffer for clusters==0 (Metal validation)
     private var emptyClusterBuf: MTLBuffer?
 
+    // Reused buffers (avoid per-encode allocations).
+    private var uniformsBuf: MTLBuffer?
+    private var shadowBuf: MTLBuffer?
+    private var clustersBuf: MTLBuffer?
+    private var nClustersBuf: MTLBuffer?
+    private var clustersCapacity: Int = 0
+
     // In-flight throttle
     fileprivate var encodeInFlight = false
 
@@ -94,6 +101,16 @@ private final class SunDiffusionState {
                 emptyClusterBuf = d.makeBuffer(bytes: &zero,
                                                length: MemoryLayout<ClusterRec>.stride,
                                                options: [])
+
+
+                // Allocate persistent buffers once (shared + write-combined for cheap CPU updates).
+                uniformsBuf = d.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
+                shadowBuf   = d.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
+                nClustersBuf = d.makeBuffer(length: MemoryLayout<UInt32>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
+
+                // Default cluster capacity (grown if needed).
+                clustersCapacity = 128
+                clustersBuf = d.makeBuffer(length: clustersCapacity * MemoryLayout<ClusterRec>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
             }
         }
 
@@ -189,30 +206,58 @@ private final class SunDiffusionState {
         enc.setComputePipelineState(pipe)
         enc.setTexture(tex, index: 0)
 
+
+        // Buffers are created in ensureGPU but can be nil if allocation failed.
+        if uniformsBuf == nil {
+            uniformsBuf = device.makeBuffer(length: MemoryLayout<CloudUniforms>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
+        }
+        if shadowBuf == nil {
+            shadowBuf = device.makeBuffer(length: MemoryLayout<ShadowUniforms>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
+        }
+        if nClustersBuf == nil {
+            nClustersBuf = device.makeBuffer(length: MemoryLayout<UInt32>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
+        }
+        if clustersBuf == nil {
+            clustersCapacity = max(1, clustersCapacity)
+            clustersBuf = device.makeBuffer(length: clustersCapacity * MemoryLayout<ClusterRec>.stride, options: [.storageModeShared, .cpuCacheModeWriteCombined])
+        }
         var U = u
-        let ubuf = device.makeBuffer(bytes: &U,
-                                     length: MemoryLayout<CloudUniforms>.stride,
-                                     options: [])
-        enc.setBuffer(ubuf, offset: 0, index: 0)
-
+        if let ubuf = uniformsBuf {
+            ubuf.contents().copyMemory(from: &U, byteCount: MemoryLayout<CloudUniforms>.stride)
+            enc.setBuffer(ubuf, offset: 0, index: 0)
+        }
         var SU = ShadowUniforms(centerXZ: centre, halfSize: max(1, half), groundY: groundY)
-        let sbuf = device.makeBuffer(bytes: &SU,
-                                     length: MemoryLayout<ShadowUniforms>.stride,
-                                     options: [])
-        enc.setBuffer(sbuf, offset: 0, index: 1)
-
+        if let sbuf = shadowBuf {
+            sbuf.contents().copyMemory(from: &SU, byteCount: MemoryLayout<ShadowUniforms>.stride)
+            enc.setBuffer(sbuf, offset: 0, index: 1)
+        }
         if let clusters, clusterBytes > 0, nClusters > 0 {
-            let cbuf = device.makeBuffer(bytes: clusters, length: clusterBytes, options: [])
-            enc.setBuffer(cbuf, offset: 0, index: 2)
+            // Grow the shared cluster buffer if needed.
+            if nClusters > clustersCapacity {
+                // Next power-of-two capacity keeps reallocations rare.
+                var cap = max(1, clustersCapacity)
+                while cap < nClusters { cap <<= 1 }
+                clustersCapacity = cap
+                clustersBuf = device.makeBuffer(
+                    length: clustersCapacity * MemoryLayout<ClusterRec>.stride,
+                    options: [.storageModeShared, .cpuCacheModeWriteCombined]
+                )
+            }
+
+            if let cbuf = clustersBuf {
+                cbuf.contents().copyMemory(from: clusters, byteCount: clusterBytes)
+                enc.setBuffer(cbuf, offset: 0, index: 2)
+            } else {
+                enc.setBuffer(emptyClusterBuf, offset: 0, index: 2)
+            }
         } else {
             enc.setBuffer(emptyClusterBuf, offset: 0, index: 2)
         }
-
         var n = UInt32(max(0, nClusters))
-        let nbuf = device.makeBuffer(bytes: &n,
-                                     length: MemoryLayout<UInt32>.stride,
-                                     options: [])
-        enc.setBuffer(nbuf, offset: 0, index: 3)
+        if let nbuf = nClustersBuf {
+            nbuf.contents().copyMemory(from: &n, byteCount: MemoryLayout<UInt32>.stride)
+            enc.setBuffer(nbuf, offset: 0, index: 3)
+        }
 
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         let ng = MTLSize(width: (tex.width  + 15) / 16,
