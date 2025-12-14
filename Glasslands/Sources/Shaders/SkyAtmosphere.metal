@@ -76,10 +76,16 @@ fragment half4 sky_fragment(VSOut in [[stage_in]],
     float  betaMScalar = 3.996e-6 * turbidity;
     float3 betaM = float3(betaMScalar);
 
-    // Simple optical depth model by elevation
-    float elev = clamp01((V.y * 0.5f) + 0.5f);  // 0 at horizon, 1 at zenith
-    float hr = mix(2.5f, 0.8f, elev);           // Rayleigh path length (km-ish proxy)
-    float hm = mix(1.2f, 0.3f, elev);           // Mie path length
+    // Elevation above horizon: 0=horizon, 1=zenith.
+    // Shape the ramp so haze collapses towards the horizon (clean zenith).
+    float elev = clamp01(V.y);
+    float e    = pow(elev, 0.35f);
+
+    // Optical depth proxies.
+    // - Rayleigh stays present up high for a deep blue.
+    // - Mie collapses hard at zenith so the top sky stays clear.
+    float hr = mix(3.0f, 1.0f, e);
+    float hm = mix(6.5f, 0.06f, e);
 
     float3 Tr = exp(-betaR * hr * 1.0e4);       // transmittance
     float3 Tm = exp(-betaM * hm * 1.0e4);
@@ -90,14 +96,21 @@ fragment half4 sky_fragment(VSOut in [[stage_in]],
     float3 sunRGB = clamp(U.sunTint.rgb, 0.0f, 10.0f);
 
     // Scattered radiance (scaled; not physically exact, pleasing & fast)
+    // Reduce Mie contribution as elevation rises (keeps zenith clean).
+    float mieHeight = mix(1.0f, 0.12f, e);
+
     float3 Lr = sunRGB * PR * (1.0f - Tr);
-    float3 Lm = sunRGB * PM * (1.0f - Tm) * 0.9f;
+    float3 Lm = sunRGB * PM * (1.0f - Tm) * 0.9f * mieHeight;
 
     float3 sky = Lr + Lm;
 
-    // Horizon lift for readability + slight blue bias near zenith
-    float horizon = pow(1.0f - elev, 2.0f) * horizonK * 0.6f;
-    sky += float3(0.05f, 0.08f, 0.16f) * horizon;
+    // Horizon haze band: bright + slightly desaturated, confined low.
+    // horizonK becomes a strength knob (0..1).
+    float hazeBand = pow(1.0f - elev, 6.0f);
+    float hazeK    = hazeBand * horizonK;
+    float turb01   = clamp01((turbidity - 1.0f) / 9.0f);
+    float hazeAmp  = (0.10f + 0.22f * turb01);
+    sky += float3(0.85f, 0.90f, 1.00f) * (hazeK * hazeAmp);
 
     // Tone scale
     sky = 1.0f - exp(-sky * exposure);
