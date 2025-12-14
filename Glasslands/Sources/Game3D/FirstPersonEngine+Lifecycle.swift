@@ -187,7 +187,7 @@ extension FirstPersonEngine {
         skyNode.name = "SkyAtmosphere"
         skyNode.castsShadow = false
         skyNode.renderingOrder = -200_000
-        skyNode.categoryBitMask = 0
+        skyNode.categoryBitMask = 1
         skyAnchor.addChildNode(skyNode)
         skyAnchor.simdPosition = yawNode.presentation.simdWorldPosition
 
