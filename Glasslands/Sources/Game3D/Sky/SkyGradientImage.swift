@@ -22,7 +22,7 @@ enum SkyGradientImage {
             let cgTop = top.cgColor
             let cgBottom = bottom.cgColor
             let colors = [cgTop, cgBottom] as CFArray
-            let locs: [CGFloat] = [1.0, 0.0]
+            let locs: [CGFloat] = [0.0, 1.0]
             let space = CGColorSpaceCreateDeviceRGB()
             guard let grad = CGGradient(colorsSpace: space, colors: colors, locations: locs) else { return }
             let p0 = CGPoint(x: size.width / 2.0, y: 0)
