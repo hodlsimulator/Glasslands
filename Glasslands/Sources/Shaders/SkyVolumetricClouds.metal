@@ -13,6 +13,12 @@ using namespace metal;
 
 #include <SceneKit/scn_metal>
 
+// SceneKit supplies `scn_node` as an auto-generated constant buffer.
+// Declare only the fields required by this shader.
+struct GLNodeBuffer {
+    float4x4 modelTransform;
+};
+
 static constant float kPI = 3.14159265358979323846f;
 
 struct GLCloudUniforms {
@@ -37,7 +43,7 @@ struct GLVSOut {
 
 vertex GLVSOut gl_vapour_vertex(GLVSIn vin [[stage_in]],
                                 constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-                                constant SCNNodeBuffer&  scn_node  [[buffer(1)]]) {
+                                constant GLNodeBuffer& scn_node [[buffer(1)]]) {
     GLVSOut o;
 
     float4 world = scn_node.modelTransform * float4(vin.position, 1.0);
@@ -207,8 +213,8 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U) {
 // -------- fragment (sky + clouds) --------
 fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                                   constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-                                  constant SCNNodeBuffer&  scn_node  [[buffer(1)]],
-                                  constant GLCloudUniforms& U         [[buffer(2)]]) {
+                                  constant GLNodeBuffer& scn_node [[buffer(1)]],
+                                  constant GLCloudUniforms& U [[buffer(2)]]) {
 
     float4 camW4 = scn_frame.inverseViewTransform * float4(0, 0, 0, 1);
     float3 camPos = camW4.xyz / camW4.w;
