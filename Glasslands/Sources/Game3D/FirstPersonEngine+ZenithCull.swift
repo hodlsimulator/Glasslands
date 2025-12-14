@@ -16,23 +16,8 @@ extension FirstPersonEngine {
 
     @MainActor
     func updateZenithCull() {
-        // No billboard layer -> nothing to cull.
-        guard cloudLayerNode != nil else { return }
-
-        let pov = (scnView?.pointOfView ?? camNode).presentation
-        let forwardW = simd_normalize(pov.simdWorldFront)
-
-        // Looking up when camera forward points significantly towards +Y.
-        let lookingUp = forwardW.y > 0.55
-
-        if lookingUp == ZenithCullState.wasLookingUp {
-            return
-        }
-        ZenithCullState.wasLookingUp = lookingUp
-
-        let readsDepth = !lookingUp
-        for n in cloudBillboardNodes {
-            n.geometry?.firstMaterial?.readsFromDepthBuffer = readsDepth
-        }
+        // Depth reads for clouds are forced OFF (see applyCloudSunUniforms()).
+        // Leaving this as a no-op prevents iOS tile resolve stalls and avoids pitch-dependent flicker.
+        return
     }
 }

@@ -110,6 +110,13 @@ extension FirstPersonEngine {
         layer.enumerateChildNodes { node, _ in
             guard let plane = node.geometry as? SCNPlane, let mat = plane.firstMaterial else { return }
 
+            // Clouds are a sky element and always sit behind terrain. Rendering them before the world (and
+            // with depth reads disabled) avoids the tile-resolve stalls that show up as "lag" on iOS GPUs.
+            // Terrain (opaque) will overwrite them later in the frame.
+            node.renderingOrder = -15_000
+            mat.readsFromDepthBuffer = false
+            mat.writesToDepthBuffer = false
+
             mat.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: CloudImpostorProgram.kSunDir)
             mat.setValue(NSNumber(value: densityMul), forKey: CloudImpostorProgram.kDensityMul)
             mat.setValue(NSNumber(value: thickness), forKey: CloudImpostorProgram.kThickness)

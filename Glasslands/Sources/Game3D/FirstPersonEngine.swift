@@ -166,7 +166,10 @@ final class FirstPersonEngine: NSObject {
                 }
                 self.cloudClusterCentroidLocal.removeAll(keepingCapacity: true)
 
-                self.enableVolumetricCloudImpostors(true)
+                // Materials are already volumetric (created by CloudBillboardFactory).
+                // Register billboards for conveyor/orientation, then apply the tuned (bright + cheaper) uniforms.
+                self.enableVolumetricCloudImpostors(false)
+                self.applyCloudSunUniforms()
             }
         }
     }
