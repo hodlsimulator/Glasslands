@@ -259,10 +259,9 @@ final class FirstPersonEngine: NSObject {
         yawNode.simdPosition = next
         skyAnchor.simdPosition = next
 
-        // Stream world (only when translating)
-        if movedXZ {
-            chunker.updateVisible(center: next)
-        }
+        // Stream world continuously. The initial preload ring must keep filling even when the
+        // player is stationary (e.g. only looking around), otherwise most chunks never load.
+        chunker.updateVisible(center: next)
 
         // -------------------- CLOUD CONVEYOR (robust: re-scan groups + centroid fallback) --------------------
         if let layer = cloudLayerNode {
@@ -393,7 +392,8 @@ final class FirstPersonEngine: NSObject {
     // MARK: - World sampling
 
     func groundHeightFootprint(worldX x: Float, z: Float) -> Float {
-        if let y = groundHeightRaycast(worldX: x, z: z) { return y }
+        // Raycasts are noticeably expensive on mobile and can introduce camera-latency.
+        // The terrain is deterministic from noise, so sample the height-field directly.
         let r: Float = 0.35
         let h0 = TerrainMath.heightWorld(x: x,     z: z,     cfg: cfg, noise: noise)
         let h1 = TerrainMath.heightWorld(x: x - r, z: z - r, cfg: cfg, noise: noise)

@@ -34,7 +34,12 @@ extension FirstPersonEngine {
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
         beacons.removeAll()
         obstaclesByChunk.removeAll()
+
+        // Ensure no stale sky references keep doing work after a reset (they may no longer be in the scene graph).
+        cloudLayerNode = nil
         cloudBillboardNodes.removeAll()
+        cloudClusterGroups.removeAll()
+        cloudClusterCentroidLocal.removeAll()
         cloudRMin = 1
         cloudRMax = 1
 

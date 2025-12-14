@@ -35,11 +35,28 @@ enum TerrainMeshBuilder {
 
         var positions = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
         var normals   = [SIMD3<Float>](repeating: .zero, count: vertsX * vertsZ)
-        var colors    = [SIMD4<Float>](repeating: SIMD4(1,1,1,1), count: vertsX * vertsZ)
+        var colors    = [SIMD4<Float>](repeating: SIMD4(1, 1, 1, 1), count: vertsX * vertsZ)
         var uvs       = [SIMD2<Float>](repeating: .zero, count: vertsX * vertsZ)
 
         let sampler = NoiseSamplerSync(recipe: recipe)
-        let palette = HeightClassifier(recipe: recipe)
+
+        // Pre-sample base heights for the vertex grid + a 1-tile border so:
+        // - central-difference normals don't require extra height noise samples per vertex
+        // - border normals remain seamless across chunk boundaries
+        let extX = vertsX + 2
+        let extZ = vertsZ + 2
+        @inline(__always) func evi(_ x: Int, _ z: Int) -> Int { z * extX + x }
+
+        var baseHeights = [Double](repeating: 0, count: extX * extZ)
+        for ez in 0..<extZ {
+            for ex in 0..<extX {
+                let tx = originTileX + ex - 1
+                let tz = originTileZ + ez - 1
+                baseHeights[evi(ex, ez)] = sampler.sampleHeight(Double(tx), Double(tz))
+            }
+        }
+
+        let ampH = max(0.0001, recipe.height.amplitude)
 
         for z in 0..<vertsZ {
             for x in 0..<vertsX {
@@ -49,32 +66,41 @@ enum TerrainMeshBuilder {
                 let wX = Float(tx) * tileSize
                 let wZ = Float(tz) * tileSize
 
-                let hN = Float(sampler.heightNorm(Double(tx), Double(tz), ampH: recipe.height.amplitude))
+                let ex = x + 1
+                let ez = z + 1
+                let base = baseHeights[evi(ex, ez)]
+
+                // Apply river carving to match TerrainMath.heightN / NoiseSamplerSync.heightNorm.
+                var h = base
+                let r = sampler.riverMask(Double(tx), Double(tz))
+                if r > 0.55 {
+                    let t = min(1.0, (r - 0.55) / 0.45)
+                    h *= (1.0 - 0.35 * t)
+                }
+
+                let hN = Float(h / ampH)
                 let y  = hN * heightScale
 
                 let idx = vi(x, z)
                 positions[idx] = SIMD3(wX, y, wZ)
 
-                // Central-difference normal in *global* tile space for seamless borders
-                let hL = sampler.sampleHeight(Double(tx - 1), Double(tz))
-                let hR = sampler.sampleHeight(Double(tx + 1), Double(tz))
-                let hD = sampler.sampleHeight(Double(tx), Double(tz - 1))
-                let hU = sampler.sampleHeight(Double(tx), Double(tz + 1))
+                // Central-difference normal in *global* tile space for seamless borders.
+                let hL = baseHeights[evi(ex - 1, ez)]
+                let hR = baseHeights[evi(ex + 1, ez)]
+                let hD = baseHeights[evi(ex, ez - 1)]
+                let hU = baseHeights[evi(ex, ez + 1)]
                 let tXv = SIMD3(tileSize, Float(hR - hL) * heightScale, 0)
                 let tZv = SIMD3(0, Float(hU - hD) * heightScale, tileSize)
                 normals[idx] = simd_normalize(simd_cross(tZv, tXv))
 
-                let slope  = Float(sampler.slope(Double(tx), Double(tz)))
-                let river  = Float(sampler.riverMask(Double(tx), Double(tz)))
-                let moist  = Float(sampler.sampleMoisture(Double(tx), Double(tz)) / max(0.0001, recipe.moisture.amplitude))
-                colors[idx] = palette.color(yNorm: hN, slope: slope, riverMask: river, moisture01: moist)
+                // Vertex colours are not used by the current terrain material/shader path.
+                colors[idx] = SIMD4(1, 1, 1, 1)
 
-                // World-space UVs so detail texture continues across chunks
+                // World-space UVs so detail texture continues across chunks.
                 let detailScale: Float = 1.0 / (tileSize * 8.0)
                 uvs[idx] = SIMD2(wX * detailScale, wZ * detailScale)
             }
         }
-
         // Top surface indices
         var indices: [UInt32] = []
         indices.reserveCapacity(tilesX * tilesZ * 6)
