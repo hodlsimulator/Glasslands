@@ -10,6 +10,10 @@
 //  instead of hundreds of raymarched billboards.
 //  Uniforms are streamed from VolCloudUniformsStore into the shader buffer.
 //
+//  If the Metal program cannot be constructed (e.g. the .metal file is not
+//  present in the default library), fall back to a lightweight textured mask
+//  so clouds are still visible without reintroducing billboard lag.
+//
 
 import SceneKit
 import UIKit
@@ -33,8 +37,7 @@ enum VolumetricCloudProgram {
         }
 
         // Critical: verify the functions exist in the library.
-        // If they don't, SceneKit may still accept the SCNProgram and then fail at draw time,
-        // which commonly manifests as an opaque black layer.
+        // If they don't, SceneKit may still accept the SCNProgram and then fail at draw time.
         guard lib.makeFunction(name: vertexFnName) != nil else {
             print("VolumetricCloudProgram: missing Metal function \(vertexFnName)")
             print("VolumetricCloudProgram: check SkyVolumetricClouds.metal is in the target’s Compile Sources")
@@ -76,6 +79,30 @@ enum VolumetricCloudProgram {
         return try? device.makeDefaultLibrary(bundle: .main)
     }
 
+    // MARK: - Fallback textured mask
+
+    @MainActor
+    private static var fallbackMaskCache: UIImage?
+
+    @MainActor
+    private static func fallbackCloudMask() -> UIImage {
+        if let img = fallbackMaskCache { return img }
+
+        // Low-res equirectangular alpha mask (soft by design).
+        // Kept intentionally small to avoid start-up hitches on mid-range devices.
+        let opts = VolumetricCloudCoverage.Options(
+            width: 384,
+            height: 192,
+            coverage: 0.52,
+            seed: 0xC10D5,
+            zenithCapScale: 0.25
+        )
+
+        let img = VolumetricCloudCoverage.makeImage(opts)
+        fallbackMaskCache = img
+        return img
+    }
+
     @MainActor
     static func makeMaterial() -> SCNMaterial {
         let m = SCNMaterial()
@@ -96,8 +123,23 @@ enum VolumetricCloudProgram {
         m.transparent.contents = UIColor.white
 
         guard let p = program else {
-            // If the program isn't valid, make the layer disappear rather than drawing black.
-            m.transparency = 0.0
+            // Fallback: a single textured layer (still one draw), no billboards.
+            m.program = nil
+
+            m.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
+            m.emission.contents = UIColor(white: 1.0, alpha: 1.0)
+            m.emission.intensity = 0.22
+
+            let mask = fallbackCloudMask()
+            m.transparent.contents = mask
+            m.transparent.wrapS = .repeat
+            m.transparent.wrapT = .clamp
+            m.transparent.minificationFilter = .linear
+            m.transparent.magnificationFilter = .linear
+            m.transparent.mipFilter = .linear
+
+            // Subtle by default; keeps the look without making the sky "milky".
+            m.transparency = 0.55
             return m
         }
 
