@@ -116,7 +116,7 @@ final class FirstPersonEngine: NSObject {
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.isOpaque = true
-
+        
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
             // Turn off EDR: cheaper color attachment on iOS GPUs.
@@ -125,29 +125,34 @@ final class FirstPersonEngine: NSObject {
             metal.pixelFormat = .bgra8Unorm_srgb
             metal.maximumDrawableCount = 3
         }
-
+        
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
-
+        
         buildLighting()
         buildSky()
         apply(recipe: recipe, force: true)
-
+        
         // No dome; start with billboard layer then enable volumetric impostors.
         removeVolumetricDomeIfPresent()
-        Task { [weak self] in
+        let cloudRadius = CGFloat(cfg.skyDistance)
+        let cloudSeed = self.cloudSeed
+        let cloudInitialYaw = self.cloudInitialYaw
+        
+        Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-
+            
             let root = await CloudBillboardLayer.makeAsync(
-                radius: CGFloat(self.cfg.skyDistance),
-                clusterCount: 84,
-                seed: self.cloudSeed
+                radius: cloudRadius,
+                clusterCount: 72,
+                seed: cloudSeed,
+                renderPuffs: true
             )
-
+            
             await MainActor.run {
-                root.eulerAngles.y = self.cloudInitialYaw
+                root.eulerAngles.y = cloudInitialYaw
                 self.skyAnchor.addChildNode(root)
                 self.cloudLayerNode = root
-
+                
                 // The cloud conveyor (wind wrap + parallax) relies on sensible radial bounds.
                 // These are derived from the cluster group positions. If left at the default
                 // (1,1), the wrap path will incorrectly recycle far clouds every frame.
@@ -165,12 +170,12 @@ final class FirstPersonEngine: NSObject {
                     self.cloudRMax = max(self.cloudRMin, rMax)
                 }
                 self.cloudClusterCentroidLocal.removeAll(keepingCapacity: true)
-
+                
                 // Materials are already volumetric (created by CloudBillboardFactory).
                 // Register billboards for conveyor/orientation, then apply the tuned (bright + cheaper) uniforms.
                 self.enableVolumetricCloudImpostors(false)
                 self.applyCloudSunUniforms()
-
+                
                 // Pre-compile sky + cloud shaders/materials so the first pan doesn’t hitch.
                 self.prewarmSkyAndSun()
             }

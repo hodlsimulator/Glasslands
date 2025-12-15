@@ -199,14 +199,11 @@ extension FirstPersonEngine {
         scene.lightingEnvironment.contents = nil
         scene.lightingEnvironment.intensity = 0.0
 
-        // True volumetric vapour (no billboard sprites = no circles)
-        let vol = VolumetricCloudLayer.make(
-            radius: CGFloat(cfg.skyDistance),
-            baseY: 400, topY: 1400, coverage: 0.50
-        )
-        skyAnchor.addChildNode(vol)
+        // Clouds are provided by the billboard cumulus layer (raymarched impostor puffs).
+        // Make sure no volumetric dome is lingering, as it can cover the entire sky.
+        removeVolumetricDomeIfPresent()
 
-        // Ensure any leftover billboard layer is gone/disabled
+        // Ensure any leftover billboard layer is gone/disabled before the async rebuild.
         scene.rootNode.childNodes
             .filter { $0.name == "CumulusBillboardLayer" }
             .forEach { $0.removeFromParentNode() }

@@ -118,9 +118,18 @@ extension FirstPersonEngine {
 
     @MainActor
     func removeVolumetricDomeIfPresent() {
-        // Volumetric dome is now the primary cloud renderer (single Metal draw).
-        // Keeping it avoids the billboard puff overdraw path entirely.
-        return
+        // The current sky stack uses billboard cumulus (raymarched impostor puffs).
+        // Any leftover volumetric dome can cover the whole sky and is a common source
+        // of the "magenta sky" fallback when its shader path fails to compile.
+        //
+        // Keep this removal conservative and name-based so it is safe across resets.
+        if let dome = skyAnchor.childNode(withName: "VolumetricCloudLayer", recursively: true) {
+            dome.removeFromParentNode()
+        }
+
+        scene.rootNode.childNodes
+            .filter { $0.name == "VolumetricCloudLayer" }
+            .forEach { $0.removeFromParentNode() }
     }
 
     func installVolumetricCloudsIfMissing(baseY: CGFloat, topY: CGFloat, coverage: CGFloat) {

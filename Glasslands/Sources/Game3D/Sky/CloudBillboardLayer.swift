@@ -6,9 +6,12 @@
 //
 //  Billboard cloud cluster builder.
 //
-//  Key change:
-//  - Default build is "shadow proxies" (cluster nodes only, no puff planes).
-//    Visual clouds come from VolumetricCloudLayer (single Metal draw).
+//  This layer can build either:
+//  - Proxy clusters (no puff planes)
+//  - Full puff planes (volumetric impostor shader per puff)
+//
+//  In this branch, the default is to build puff planes so the cumulus clouds
+//  are visible without relying on the volumetric dome path.
 //
 
 import SceneKit
@@ -24,37 +27,29 @@ struct CloudBillboardLayer {
         var minAltitudeY: Float
     }
 
-    // Default is shadow proxies.
-    // Setting UserDefaults key "clouds.renderPuffs" = true restores the old heavy render path.
+    /// Builds the cumulus cloud layer.
+    /// - Note: `renderPuffs` controls whether per-cluster puff planes are created.
+    ///         Puff planes use `CloudImpostorProgram` (raymarched impostor) via `CloudBillboardFactory`.
     static func makeAsync(
         radius: CGFloat,
-        clusterCount: Int = 92,
+        clusterCount: Int = 72,
         seed: UInt32 = 1,
         minAltitudeY: Float = 0.12,
-        renderPuffs: Bool = false
+        renderPuffs: Bool = true
     ) async -> SCNNode {
 
-        let wantsPuffs: Bool = {
-            if UserDefaults.standard.object(forKey: "clouds.renderPuffs") != nil {
-                return UserDefaults.standard.bool(forKey: "clouds.renderPuffs")
-            }
-            return renderPuffs
-        }()
+        let wantsPuffs = renderPuffs
 
-        // Only generate sprite atlases if puff planes are actually being built.
-        let atlasImage: UIImage? = {
-            guard wantsPuffs else { return nil }
-            return nil
-        }()
-
-        let atlas: Any? = wantsPuffs ? await CloudSpriteTexture.makeAtlas(size: 512, count: 8) : nil
-        let firstAtlasImage: UIImage? = (atlas as? (any _CloudAtlasCarrier))?.images.first
-        let factory = CloudBillboardFactory.initWithAtlas(firstAtlasImage ?? atlasImage)
+        // Puff planes use CloudImpostorProgram and do not need sprite atlases.
+        let factory = CloudBillboardFactory.initWithAtlas(nil)
 
         let p = Params(radius: radius, clusterCount: clusterCount, seed: seed, minAltitudeY: minAltitudeY)
 
         let root = SCNNode()
         root.name = "CumulusBillboardLayer"
+        root.castsShadow = false
+        root.renderingOrder = -10_000
+        root.categoryBitMask = 0x0000_0010
 
         let coverage: Float = {
             let v = UserDefaults.standard.float(forKey: "clouds.coverage")
@@ -155,10 +150,4 @@ struct CloudBillboardLayer {
 
         return root
     }
-}
-
-// Local protocol purely to avoid hard-coding the CloudSpriteTexture atlas type.
-// CloudSpriteTexture.makeAtlas(...) in this project returns an object with `images: [UIImage]`.
-private protocol _CloudAtlasCarrier {
-    var images: [UIImage] { get }
 }
