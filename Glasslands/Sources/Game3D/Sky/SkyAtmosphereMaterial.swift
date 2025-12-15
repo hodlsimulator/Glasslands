@@ -4,9 +4,8 @@
 //
 //  Created by . . on 10/7/25.
 //
-//  Physics-inspired sky (Rayleigh + Mie) as a fragment shader-modifier.
-//  Single-scatter + a cheap horizon-haze band so the horizon reads milky
-//  while the zenith stays clean.
+//  Lightweight sky dome: simple gradient + horizon haze + sun highlight.
+//  Designed to be stable (no horizon seam) and cheap on-device.
 //
 
 import SceneKit
@@ -17,9 +16,6 @@ enum SkyAtmosphereMaterial {
     @MainActor
     static func make() -> SCNMaterial {
 
-        // Simple single-scatter approximation.
-        // This version avoids the model-space transform path that can collapse into black
-        // if the modifier variables/matrices end up invalid on-device.
         let frag = """
         #pragma arguments
         float3 sunDirWorld;
@@ -35,54 +31,51 @@ enum SkyAtmosphereMaterial {
             return (l > 1.0e-6) ? (v / l) : float3(0.0, 1.0, 0.0);
         }
 
+        inline float sat(float x) { return clamp(x, 0.0, 1.0); }
+
         #pragma body
-
-        // In SceneKit shader modifiers, _surface.position is in view space (camera at origin).
-        // Normalising it gives a view ray direction.
         float3 V = safeNormalize(_surface.position);
-
-        // Sun direction is provided in world space; normalise defensively.
         float3 S = safeNormalize(sunDirWorld);
 
-        float mu = clamp(dot(V, S), -1.0, 1.0);
+        // Map view elevation smoothly into a zenith factor (0 near horizon, 1 at zenith).
+        // Using smoothstep avoids a hard seam/band around V.y == 0.
+        float tSky = sat(V.y * 0.5 + 0.5);
+        float tZen = smoothstep(0.47, 1.0, tSky);
 
-        // Mie phase function parameter.
-        float g = clamp(mieG, 0.0, 0.99);
-        float g2 = g * g;
+        // Base gradient (sRGB-ish constants; final output remains SDR 0..1).
+        float3 horizonCol = float3(0.88, 0.93, 0.99);
+        float3 zenithCol  = float3(0.30, 0.56, 0.96);
 
-        // Rayleigh coefficients (approx).
-        float3 betaR = float3(5.8e-6, 13.5e-6, 33.1e-6);
+        float3 sky = mix(horizonCol, zenithCol, pow(tZen, 0.85));
 
-        // Mie coefficients scaled by turbidity.
-        float3 betaM = float3(3.996e-6 * clamp(turbidity, 1.0, 10.0));
+        // Milky horizon haze, fading out towards zenith.
+        float haze = pow(1.0 - tZen, 2.8);
 
-        // Approximate optical depth by elevation.
-        float elev = clamp(V.y, 0.0, 1.0);
-        float e = pow(elev, 0.35);
+        float lift = sat(horizonLift);
+        float turb = sat((clamp(turbidity, 1.0, 10.0) - 1.0) / 9.0);
 
-        float rayHeight = mix(3.0, 1.0, e);
-        float mieHeight = mix(6.5, 0.06, e);
+        float3 hazeCol = float3(0.96, 0.97, 1.00);
+        float hazeAmt = (0.28 + 0.22 * lift) + turb * 0.10;
+        sky = mix(sky, hazeCol, haze * hazeAmt);
 
-        float3 Tr = exp(-betaR * rayHeight * 1.0e4);
-        float3 Tm = exp(-betaM * mieHeight * 1.0e4);
+        // Sun highlight (warm), controlled a little by mieG (higher g = tighter forward peak).
+        float mu = sat(dot(V, S));
+        float g = clamp(mieG, 0.0, 0.95);
 
-        // Phase terms (constants chosen for decent-looking results).
-        float PR = 0.05968310365946075 * (1.0 + mu * mu);
-        float PM = 0.1193662073189215 * ((1.0 - g2) / pow(1.0 + g2 - 2.0 * g * mu, 1.5));
+        float corePow = mix(520.0, 900.0, g);
+        float haloPow = mix(22.0, 55.0, g);
 
-        float3 sunRGB = clamp(sunTint, 0.0, 10.0);
+        float sunCore = pow(mu, corePow);
+        float sunHalo = pow(mu, haloPow) * 0.18;
 
-        float3 sky = sunRGB * (PR * (1.0 - Tr) + 0.9 * PM * mieHeight * (1.0 - Tm));
+        sky += float3(1.00, 0.96, 0.88) * (sunCore * 1.15 + sunHalo);
 
-        // Simple horizon haze + optional lift.
-        float horizon = 1.0 - elev;
-        float haze = pow(horizon, 5.0);
+        float3 tint = clamp(sunTint, 0.0, 10.0);
+        sky *= tint;
 
-        float lift = clamp(horizonLift, 0.0, 1.0);
-        sky += haze * float3(0.03, 0.04, 0.06) * (0.6 + 0.4 * lift);
-
-        // Tone mapping. skyExposure <= 0 yields black by design.
-        sky = 1.0 - exp(-sky * max(skyExposure, 0.0));
+        // Tone map (single exp is fine here; much cheaper than multiple optical-depth exp calls).
+        float e = max(skyExposure, 0.0);
+        sky = 1.0 - exp(-sky * e);
 
         _output.color = float4(clamp(sky, 0.0, 1.0), 1.0);
         """
@@ -92,28 +85,22 @@ enum SkyAtmosphereMaterial {
         m.isDoubleSided = false
         m.cullMode = .front
 
-        // Treat as opaque to avoid transparency sorting overhead.
+        // Sky is a background pass: opaque, no depth interactions.
         m.blendMode = .replace
         m.transparencyMode = .aOne
-
-        // Sky should not participate in depth.
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
-
         m.isLitPerPixel = false
+
         m.shaderModifiers = [.fragment: frag]
 
-        // Defaults (kept non-zero to avoid black output).
+        // Defaults (non-zero exposure; otherwise sky can go black).
         m.setValue(NSValue(scnVector3: SCNVector3(0, 1, 0)), forKey: "sunDirWorld")
-        m.setValue(NSValue(scnVector3: SCNVector3(1.0, 0.97, 0.92)), forKey: "sunTint")
-
-        m.setValue(NSNumber(value: Float(3.5)), forKey: "turbidity")
-        m.setValue(NSNumber(value: Float(0.76)), forKey: "mieG")
-
-        // Non-zero exposure is critical; zero here makes the sky black.
-        m.setValue(NSNumber(value: Float(2.8)), forKey: "skyExposure")
-
-        m.setValue(NSNumber(value: Float(0.15)), forKey: "horizonLift")
+        m.setValue(NSValue(scnVector3: SCNVector3(1.0, 1.0, 1.0)), forKey: "sunTint")
+        m.setValue(NSNumber(value: Float(3.0)), forKey: "turbidity")
+        m.setValue(NSNumber(value: Float(0.70)), forKey: "mieG")
+        m.setValue(NSNumber(value: Float(1.10)), forKey: "skyExposure")
+        m.setValue(NSNumber(value: Float(0.35)), forKey: "horizonLift")
 
         return m
     }
