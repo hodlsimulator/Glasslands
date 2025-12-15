@@ -5,7 +5,7 @@
 //  Created by . . on 10/7/25.
 //
 //  Lightweight sky dome: simple gradient + horizon haze + sun highlight.
-//  Designed to be stable (no horizon seam) and cheap on-device.
+//  No horizon seam; keeps the sky blue by not applying cloud sun-tint to the entire dome.
 //
 
 import SceneKit
@@ -37,28 +37,25 @@ enum SkyAtmosphereMaterial {
         float3 V = safeNormalize(_surface.position);
         float3 S = safeNormalize(sunDirWorld);
 
-        // Map view elevation smoothly into a zenith factor (0 near horizon, 1 at zenith).
-        // Using smoothstep avoids a hard seam/band around V.y == 0.
+        // View elevation mapped into a smooth 0..1 zenith factor (0 near horizon, 1 at zenith).
         float tSky = sat(V.y * 0.5 + 0.5);
         float tZen = smoothstep(0.47, 1.0, tSky);
 
-        // Base gradient (sRGB-ish constants; final output remains SDR 0..1).
-        float3 horizonCol = float3(0.88, 0.93, 0.99);
-        float3 zenithCol  = float3(0.30, 0.56, 0.96);
-
-        float3 sky = mix(horizonCol, zenithCol, pow(tZen, 0.85));
-
-        // Milky horizon haze, fading out towards zenith.
-        float haze = pow(1.0 - tZen, 2.8);
+        // Base gradient: deliberately bluer and less "milky" than the previous pass.
+        float3 horizonCol = float3(0.58, 0.78, 0.98);
+        float3 zenithCol  = float3(0.05, 0.30, 0.90);
+        float3 sky = mix(horizonCol, zenithCol, pow(tZen, 0.65));
 
         float lift = sat(horizonLift);
         float turb = sat((clamp(turbidity, 1.0, 10.0) - 1.0) / 9.0);
 
-        float3 hazeCol = float3(0.96, 0.97, 1.00);
-        float hazeAmt = (0.28 + 0.22 * lift) + turb * 0.10;
+        // Horizon haze: bright but still slightly blue.
+        float haze = pow(1.0 - tZen, 2.4);
+        float3 hazeCol = float3(0.80, 0.88, 0.99);
+        float hazeAmt = (0.16 + 0.18 * lift) + turb * 0.08;
         sky = mix(sky, hazeCol, haze * hazeAmt);
 
-        // Sun highlight (warm), controlled a little by mieG (higher g = tighter forward peak).
+        // Sun highlight: use sunTint ONLY for the highlight so cloud tint doesn't grey-out the whole sky.
         float mu = sat(dot(V, S));
         float g = clamp(mieG, 0.0, 0.95);
 
@@ -68,12 +65,15 @@ enum SkyAtmosphereMaterial {
         float sunCore = pow(mu, corePow);
         float sunHalo = pow(mu, haloPow) * 0.18;
 
-        sky += float3(1.00, 0.96, 0.88) * (sunCore * 1.15 + sunHalo);
-
         float3 tint = clamp(sunTint, 0.0, 10.0);
-        sky *= tint;
+        float maxC = max(tint.x, max(tint.y, tint.z));
+        float3 tintHue = (maxC > 1.0e-5) ? (tint / maxC) : float3(1.0, 1.0, 1.0);
+        float sunGain = maxC;
 
-        // Tone map (single exp is fine here; much cheaper than multiple optical-depth exp calls).
+        float3 sunCol = float3(1.00, 0.96, 0.88) * tintHue;
+        sky += sunCol * (sunCore * 1.10 + sunHalo * 0.22) * sunGain;
+
+        // Simple exposure tone-map.
         float e = max(skyExposure, 0.0);
         sky = 1.0 - exp(-sky * e);
 
@@ -85,7 +85,6 @@ enum SkyAtmosphereMaterial {
         m.isDoubleSided = false
         m.cullMode = .front
 
-        // Sky is a background pass: opaque, no depth interactions.
         m.blendMode = .replace
         m.transparencyMode = .aOne
         m.readsFromDepthBuffer = false
@@ -94,13 +93,13 @@ enum SkyAtmosphereMaterial {
 
         m.shaderModifiers = [.fragment: frag]
 
-        // Defaults (non-zero exposure; otherwise sky can go black).
+        // Defaults (sunDirWorld + sunTint are overridden by applySkySunUniforms()).
         m.setValue(NSValue(scnVector3: SCNVector3(0, 1, 0)), forKey: "sunDirWorld")
         m.setValue(NSValue(scnVector3: SCNVector3(1.0, 1.0, 1.0)), forKey: "sunTint")
         m.setValue(NSNumber(value: Float(3.0)), forKey: "turbidity")
         m.setValue(NSNumber(value: Float(0.70)), forKey: "mieG")
-        m.setValue(NSNumber(value: Float(1.10)), forKey: "skyExposure")
-        m.setValue(NSNumber(value: Float(0.35)), forKey: "horizonLift")
+        m.setValue(NSNumber(value: Float(1.25)), forKey: "skyExposure")
+        m.setValue(NSNumber(value: Float(0.30)), forKey: "horizonLift")
 
         return m
     }
