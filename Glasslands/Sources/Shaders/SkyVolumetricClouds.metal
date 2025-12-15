@@ -5,7 +5,8 @@
 //  Created by . . on 10/5/25.
 //
 //  True volumetric vapour with zenith-aware quality and coarse empty-space skipping.
-//  RGB is premultiplied pure white; alpha carries sun-only shading.
+//  Outputs an opaque sky+cloud colour (alpha = 1) so SceneKit can render it as an
+//  opaque background pass (avoids transparent sorting + depth resolves).
 //
 
 #include <metal_stdlib>
@@ -33,7 +34,7 @@ struct GLCloudUniforms {
 };
 
 struct GLVSIn {
-    float3 position [[ attribute(SCNVertexSemanticPosition) ]];
+    float3 position [[attribute(SCNVertexSemanticPosition)]];
 };
 
 struct GLVSOut {
@@ -42,20 +43,19 @@ struct GLVSOut {
 };
 
 vertex GLVSOut gl_vapour_vertex(GLVSIn vin [[stage_in]],
-                                constant SCNSceneBuffer& scn_frame [[buffer(0)]],
-                                constant GLNodeBuffer& scn_node [[buffer(1)]]) {
+                               constant SCNSceneBuffer& scn_frame [[buffer(0)]],
+                               constant GLNodeBuffer& scn_node [[buffer(1)]])
+{
     GLVSOut o;
-
     float4 world = scn_node.modelTransform * float4(vin.position, 1.0);
     float4 view  = scn_frame.viewTransform * world;
-
-    o.position = scn_frame.projectionTransform * view;
-    o.worldPos = world.xyz;
-
+    o.position   = scn_frame.projectionTransform * view;
+    o.worldPos   = world.xyz;
     return o;
 }
 
 // -------- small helpers --------
+
 inline float h1(float n) {
     return fract(sin(n) * 43758.5453123f);
 }
@@ -136,37 +136,42 @@ inline float phaseHG(float mu, float g) {
 }
 
 // -------- coarse macro gate (cheap empty-space skip) --------
+
 inline float coarseMacroMask(float2 advXY, constant GLCloudUniforms& U) {
     float macroScale = max(1e-6, U.params4.z);
+
     float2 domOff = float2(U.params3.x, U.params3.y);
-    float domRot = U.params3.z;
+    float domRot  = U.params3.z;
+
     float time = U.params0.x;
     float2 wind = float2(U.params0.y, U.params0.z);
 
     float ca = cos(domRot), sa = sin(domRot);
-    float2 xz = advXY + domOff;
+    float2 xz  = advXY + domOff;
     float2 xzr = float2(xz.x * ca - xz.y * sa, xz.x * sa + xz.y * ca);
-    float2 adv = xzr + wind * (time * 0.0018);
 
+    float2 adv = xzr + wind * (time * 0.0018);
     float n = noise3(float3(adv * macroScale * 0.6, 3.1));
+
     float thr = clamp(U.params4.w, 0.0, 1.0);
     return smoothstep(thr - 0.18, thr + 0.18, n);
 }
 
-// -------- full density (keeps your shape/look) --------
+// -------- full density --------
+
 inline float densityAt(float3 wp, constant GLCloudUniforms& U) {
     float time = U.params0.x;
     float2 wind = float2(U.params0.y, U.params0.z);
 
     float baseY = U.params0.w;
-    float topY = U.params1.x;
+    float topY  = U.params1.x;
 
     float coverage = clamp(U.params1.y, 0.05, 0.98);
     float detailMul = U.params2.w;
     float horizonLift = U.params2.z;
 
     float2 domOff = float2(U.params3.x, U.params3.y);
-    float domRot = U.params3.z;
+    float domRot  = U.params3.z;
 
     float puffScale = max(1e-4, U.params3.w);
     float puffStrength = clamp(U.params4.x, 0.0, 1.5);
@@ -177,7 +182,7 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U) {
     float h01 = hProfile(wp.y, baseY, topY);
 
     float ca = cos(domRot), sa = sin(domRot);
-    float2 xz = wp.xz + domOff;
+    float2 xz  = wp.xz + domOff;
     float2 xzr = float2(xz.x * ca - xz.y * sa, xz.x * sa + xz.y * ca);
 
     float adv = mix(0.55, 1.55, h01);
@@ -200,37 +205,38 @@ inline float densityAt(float3 wp, constant GLCloudUniforms& U) {
     float coverInv = 1.0 - coverage;
     float thLo = clamp(coverInv - 0.20, 0.0, 1.0);
     float thHi = clamp(coverInv + 0.28, 0.0, 1.2);
-
     float t = smoothstep(thLo, thHi, shape);
+
     float dens = pow(clamp(t, 0.0, 1.0), 0.85);
-
     dens *= macroMask;
-    dens *= hProfile(wp.y + horizonLift * 120.0, baseY, topY);
 
+    dens *= hProfile(wp.y + horizonLift * 120.0, baseY, topY);
     return dens;
 }
 
 // -------- fragment (sky + clouds) --------
+
 fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
                                   constant SCNSceneBuffer& scn_frame [[buffer(0)]],
                                   constant GLNodeBuffer& scn_node [[buffer(1)]],
-                                  constant GLCloudUniforms& U [[buffer(2)]]) {
-
+                                  constant GLCloudUniforms& U [[buffer(2)]])
+{
+    // Camera position (world)
     float4 camW4 = scn_frame.inverseViewTransform * float4(0, 0, 0, 1);
     float3 camPos = camW4.xyz / camW4.w;
 
+    // View ray direction
     float3 V = normalize(in.worldPos - camPos);
 
     float3 sunDir = normalize(U.sunDirWorld.xyz);
     float3 tint   = U.sunTint.xyz;
 
-    // Sky base (matches your SkyAtmosphereMaterial palette)
+    // Sky base (fast, matches project palette closely enough)
     float muSky = clamp(V.y, -1.0f, 1.0f);
     float tSky  = clamp(muSky * 0.5f + 0.5f, 0.0f, 1.0f);
 
     float3 horizon = float3(0.55, 0.75, 0.95);
     float3 zenith  = float3(0.14, 0.34, 0.88);
-
     float3 sky = mix(horizon, zenith, tSky);
 
     float s = clamp(dot(V, sunDir), 0.0f, 1.0f);
@@ -241,7 +247,7 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float exposure = 0.85f;
     sky = float3(1.0) - exp(-sky * exposure);
 
-    // Cloud slab intersection
+    // Cloud slab intersection (world space)
     float baseY = U.params0.w;
     float topY  = U.params1.x;
 
@@ -258,8 +264,9 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     }
 
     float Lm = tExt - tEnt;
-    float distLOD = clamp(Lm / 4000.0, 0.0, 1.4);
 
+    // Sample budget shaping
+    float distLOD = clamp(Lm / 4000.0, 0.0, 1.4);
     float stepMul = clamp(U.params1.w, 0.60, 1.40);
 
     int Nbase = int(round(mix(10.0, 18.0, 1.0 - distLOD * 0.6)));
@@ -268,26 +275,32 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     float qualMul = mix(1.0, 0.34, vUp);
 
     bool doSunVis = (vUp < 0.60);
-    int refineMax = (vUp < 0.30 ? 1 : 0);
 
     int N = clamp(int(round(float(Nbase) * stepMul * qualMul)), 6, 18);
-
     float dt = Lm / float(N);
 
+    // Stable per-pixel jitter (cuts banding)
     float2 st = float2(in.position.x, in.position.y);
     float j = fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453);
 
     float t = tEnt + (0.25 + 0.5 * j) * dt;
 
     half3 S = half3(sunDir);
+
     half mu = half(clamp(dot(V, float3(S)), -1.0, 1.0));
     half g  = half(clamp(U.params2.x, 0.0, 0.95));
+
+    // Extinction coefficient
+    half sigma = half(max(0.0f, U.params1.z) * 0.028f);
+
+    // Phase-based gain
+    half ph = half(phaseHG(float(mu), float(g)));
+    half gain = half(clamp(1.85f * float(ph), 0.0f, 2.0f));
 
     half T = half(1.0);
 
     half rhoGate = half(mix(0.0032, 0.0060, vUp));
     half skipMul = half(mix(1.55, 1.90, vUp));
-    half refineMul = half(0.40);
 
     float2 advXY0 = (camPos + V * tEnt).xz;
     float coarse0 = coarseMacroMask(advXY0, U);
@@ -295,9 +308,7 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
     for (int i = 0; i < N && T > half(0.004); ++i) {
         float3 sp = camPos + V * t;
 
-        float coarse = coarse0;
-        coarse = mix(coarse, coarseMacroMask(sp.xz, U), 0.35);
-
+        float coarse = mix(coarse0, coarseMacroMask(sp.xz, U), 0.35);
         if (coarse < 0.10) {
             t += dt * float(skipMul);
             continue;
@@ -309,6 +320,7 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
             continue;
         }
 
+        // Cheap sun visibility (one extra density sample along sun direction)
         if (doSunVis) {
             float dL = (topY - baseY) * 0.22;
             float3 lp = sp + float3(S) * dL;
@@ -318,29 +330,15 @@ fragment half4 gl_vapour_fragment(GLVSOut in [[stage_in]],
             rho = half(min(1.0f, float(rho) * (1.0f - 0.6f * float(aL))));
         }
 
-        half td = half(dt) * refineMul;
-
-        for (int k = 0; k < refineMax && T > half(0.004); ++k) {
-            float3 sp2 = sp + V * (float(td) * float(k));
-
-            half rho2 = half(densityAt(sp2, U));
-            half sigma = half(max(0.0f, U.params1.z) * 0.028);
-
-            half aStep = half(1.0) - half(exp(-float(rho2) * float(sigma) * float(td)));
-
-            half ph = half(phaseHG(float(mu), float(g)));
-            half gain = half(clamp(1.85 * float(ph), 0.0, 2.0));
-
-            T *= (half(1.0) - aStep * gain);
-            if (T <= half(0.004)) break;
-        }
+        // *** FIX: always accumulate extinction so clouds can appear ***
+        half aStep = half(1.0) - half(exp(-float(rho) * float(sigma) * dt));
+        half atten = max(half(0.0), half(1.0) - aStep * gain);
+        T *= atten;
 
         t += dt;
     }
 
     float a = clamp(1.0 - float(T), 0.0, 1.0);
-
-    // Mix sky + clouds, output opaque so it never falls back to black.
     float3 col = mix(sky, float3(1.0), a);
 
     return half4(half3(col), half(1.0));

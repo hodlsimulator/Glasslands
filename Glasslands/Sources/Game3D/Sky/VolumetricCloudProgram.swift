@@ -10,9 +10,8 @@
 //  instead of hundreds of raymarched billboards.
 //  Uniforms are streamed from VolCloudUniformsStore into the shader buffer.
 //
-//  If the Metal program cannot be constructed (e.g. the .metal file is not
-//  present in the default library), fall back to a lightweight textured mask
-//  so clouds are still visible without reintroducing billboard lag.
+//  If the Metal program cannot be constructed, fall back to a lightweight
+//  shader-modifier using a precomputed equirect alpha mask (still one draw).
 //
 
 import SceneKit
@@ -36,17 +35,13 @@ enum VolumetricCloudProgram {
             return nil
         }
 
-        // Critical: verify the functions exist in the library.
-        // If they don't, SceneKit may still accept the SCNProgram and then fail at draw time.
         guard lib.makeFunction(name: vertexFnName) != nil else {
             print("VolumetricCloudProgram: missing Metal function \(vertexFnName)")
-            print("VolumetricCloudProgram: check SkyVolumetricClouds.metal is in the target’s Compile Sources")
             return nil
         }
 
         guard lib.makeFunction(name: fragmentFnName) != nil else {
             print("VolumetricCloudProgram: missing Metal function \(fragmentFnName)")
-            print("VolumetricCloudProgram: check SkyVolumetricClouds.metal is in the target’s Compile Sources")
             return nil
         }
 
@@ -56,7 +51,6 @@ enum VolumetricCloudProgram {
         p.fragmentFunctionName = fragmentFnName
         p.delegate = ProgramDelegate.shared
 
-        // Bind uniforms each frame. Supports both historical names ("U") and the newer ("uCloudsGL").
         let bindUniforms: SCNBufferBindingBlock = { bufferStream, _, _, _ in
             var u = VolCloudUniformsStore.shared.snapshot()
             withUnsafeBytes(of: &u) { raw in
@@ -73,13 +67,11 @@ enum VolumetricCloudProgram {
 
     @MainActor
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
-        if let lib = device.makeDefaultLibrary() {
-            return lib
-        }
+        if let lib = device.makeDefaultLibrary() { return lib }
         return try? device.makeDefaultLibrary(bundle: .main)
     }
 
-    // MARK: - Fallback textured mask
+    // MARK: - Fallback mask (one draw, opaque)
 
     @MainActor
     private static var fallbackMaskCache: UIImage?
@@ -88,8 +80,6 @@ enum VolumetricCloudProgram {
     private static func fallbackCloudMask() -> UIImage {
         if let img = fallbackMaskCache { return img }
 
-        // Low-res equirectangular alpha mask (soft by design).
-        // Kept intentionally small to avoid start-up hitches on mid-range devices.
         let opts = VolumetricCloudCoverage.Options(
             width: 384,
             height: 192,
@@ -104,46 +94,111 @@ enum VolumetricCloudProgram {
     }
 
     @MainActor
-    static func makeMaterial() -> SCNMaterial {
+    private static func makeFallbackMaterial() -> SCNMaterial {
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = false
         m.cullMode = .front
 
-        // Clouds are an overlay; alpha blending is expected.
-        m.blendMode = .alpha
+        // Render as an opaque background pass.
+        m.blendMode = .replace
         m.transparencyMode = .aOne
 
-        // Keep this from interfering with the depth buffer.
         m.readsFromDepthBuffer = false
         m.writesToDepthBuffer = false
 
         m.isLitPerPixel = false
-        m.diffuse.contents = UIColor.white
-        m.transparent.contents = UIColor.white
 
-        guard let p = program else {
-            // Fallback: a single textured layer (still one draw), no billboards.
-            m.program = nil
+        let maskImage = fallbackCloudMask()
+        let maskProp = SCNMaterialProperty(contents: maskImage)
+        maskProp.wrapS = .repeat
+        maskProp.wrapT = .clamp
+        maskProp.minificationFilter = .linear
+        maskProp.magnificationFilter = .linear
+        maskProp.mipFilter = .linear
 
-            m.diffuse.contents = UIColor(white: 1.0, alpha: 1.0)
-            m.emission.contents = UIColor(white: 1.0, alpha: 1.0)
-            m.emission.intensity = 0.22
+        let frag = """
+        #pragma arguments
+        sampler2D cloudMask;
+        float3 sunDirWorld;
+        float3 sunTint;
 
-            let mask = fallbackCloudMask()
-            m.transparent.contents = mask
-            m.transparent.wrapS = .repeat
-            m.transparent.wrapT = .clamp
-            m.transparent.minificationFilter = .linear
-            m.transparent.magnificationFilter = .linear
-            m.transparent.mipFilter = .linear
+        #pragma declaration
+        inline float3 safeNormalize(float3 v) {
+            float l = length(v);
+            return (l > 1.0e-6) ? (v / l) : float3(0.0, 1.0, 0.0);
+        }
+        static const float PI = 3.14159265358979323846;
 
-            // Subtle by default; keeps the look without making the sky "milky".
-            m.transparency = 0.55
-            return m
+        inline float2 equirectUV(float3 dir) {
+            dir = safeNormalize(dir);
+            float lon = atan2(dir.x, dir.z);
+            float lat = asin(clamp(dir.y, -1.0, 1.0));
+            float u = lon / (2.0 * PI) + 0.5;
+            float v = 0.5 - (lat / PI);
+            return float2(u, v);
         }
 
+        #pragma body
+        float3 V = safeNormalize(_surface.position);
+        float3 S = safeNormalize(sunDirWorld);
+        float3 tint = clamp(sunTint, 0.0, 10.0);
+
+        // Sky base (cheap gradient + sun highlight, same palette as Metal path).
+        float tSky = clamp(V.y * 0.5 + 0.5, 0.0, 1.0);
+        float3 horizon = float3(0.55, 0.75, 0.95);
+        float3 zenith  = float3(0.14, 0.34, 0.88);
+        float3 sky = mix(horizon, zenith, tSky);
+
+        float s = clamp(dot(V, S), 0.0, 1.0);
+        sky += float3(1.0, 0.95, 0.85) * pow(s, 350.0) * 1.2;
+
+        sky *= tint;
+
+        float exposure = 0.85;
+        sky = 1.0 - exp(-sky * exposure);
+
+        // Cloud mask sample (alpha drives coverage).
+        float2 uv = equirectUV(V);
+        float a = texture2D(cloudMask, uv).a;
+
+        // Keep it subtle; avoid overcast sheets.
+        a = smoothstep(0.35, 0.85, a) * 0.65;
+
+        float3 col = mix(sky, float3(1.0), a);
+        _output.color = float4(clamp(col, 0.0, 1.0), 1.0);
+        """
+
+        m.shaderModifiers = [.fragment: frag]
+
+        m.setValue(maskProp, forKey: "cloudMask")
+        m.setValue(NSValue(scnVector3: SCNVector3(0, 1, 0)), forKey: "sunDirWorld")
+        m.setValue(NSValue(scnVector3: SCNVector3(1.0, 0.97, 0.92)), forKey: "sunTint")
+
+        return m
+    }
+
+    @MainActor
+    static func makeMaterial() -> SCNMaterial {
+        guard let p = program else {
+            return makeFallbackMaterial()
+        }
+
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.isDoubleSided = false
+        m.cullMode = .front
+
+        // Opaque pass (cheapest) — shader returns alpha=1.
+        m.blendMode = .replace
+        m.transparencyMode = .aOne
+
+        m.readsFromDepthBuffer = false
+        m.writesToDepthBuffer = false
+
+        m.isLitPerPixel = false
         m.program = p
+
         return m
     }
 
