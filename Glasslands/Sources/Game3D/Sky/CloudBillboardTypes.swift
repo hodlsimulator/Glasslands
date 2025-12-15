@@ -9,7 +9,7 @@
 
 import simd
 
-struct CloudPuffSpec: Sendable {
+nonisolated struct CloudPuffSpec: Sendable {
     var pos: simd_float3
     var size: Float
     var roll: Float
@@ -18,6 +18,6 @@ struct CloudPuffSpec: Sendable {
     var tint: simd_float3? // optional multiply tint; nil = white
 }
 
-struct CloudClusterSpec: Sendable {
+nonisolated struct CloudClusterSpec: Sendable {
     var puffs: [CloudPuffSpec]
 }

@@ -12,7 +12,7 @@
 import simd
 import Foundation
 
-enum CloudBillboardPlacement {
+nonisolated enum CloudBillboardPlacement {
 
     // MARK: - Helpers
 

@@ -14,7 +14,7 @@ import Foundation
 import CoreGraphics
 import simd
 
-struct CloudBillboardLayer {
+nonisolated struct CloudBillboardLayer {
 
     struct Params {
         var radius: CGFloat
