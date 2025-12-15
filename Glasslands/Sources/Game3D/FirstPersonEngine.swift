@@ -109,76 +109,91 @@ final class FirstPersonEngine: NSObject {
 
     // MARK: - Public API
 
-    @MainActor
-    func attach(to view: SCNView, recipe: BiomeRecipe) {
+    @MainActor func attach(to view: SCNView, recipe: BiomeRecipe) {
         scnView = view
         view.scene = scene
         view.antialiasingMode = .none
         view.isJitteringEnabled = false
         view.isOpaque = true
-        
+
         if let metal = view.layer as? CAMetalLayer {
             metal.isOpaque = true
-            // Turn off EDR: cheaper color attachment on iOS GPUs.
             metal.wantsExtendedDynamicRangeContent = false
             metal.colorspace = CGColorSpaceCreateDeviceRGB()
             metal.pixelFormat = .bgra8Unorm_srgb
             metal.maximumDrawableCount = 3
         }
-        
+
         scene.physicsWorld.gravity = SCNVector3(0, 0, 0)
-        
+
         buildLighting()
         buildSky()
         apply(recipe: recipe, force: true)
-        
-        // No dome; start with billboard layer then enable volumetric impostors.
+
         removeVolumetricDomeIfPresent()
+
         let cloudRadius = CGFloat(cfg.skyDistance)
         let cloudSeed = self.cloudSeed
         let cloudInitialYaw = self.cloudInitialYaw
-        
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-            
-            let root = await CloudBillboardLayer.makeAsync(
+
+        // Build Sendable specs off-thread (no SceneKit here).
+        let specsTask = Task.detached(priority: .userInitiated) {
+            CloudBillboardLayer.buildSpecs(
                 radius: cloudRadius,
                 clusterCount: 72,
                 seed: cloudSeed,
-                renderPuffs: true
+                minAltitudeY: 0.12
             )
-            
-            await MainActor.run {
-                root.eulerAngles.y = cloudInitialYaw
-                self.skyAnchor.addChildNode(root)
-                self.cloudLayerNode = root
-                
-                // The cloud conveyor (wind wrap + parallax) relies on sensible radial bounds.
-                // These are derived from the cluster group positions. If left at the default
-                // (1,1), the wrap path will incorrectly recycle far clouds every frame.
-                var rMin = Float.greatestFiniteMagnitude
-                var rMax: Float = 0
-                for g in root.childNodes {
-                    let r = simd_length(simd_float2(g.simdPosition.x, g.simdPosition.z))
-                    if r.isFinite {
-                        rMin = min(rMin, r)
-                        rMax = max(rMax, r)
-                    }
-                }
-                if rMax > 0, rMin.isFinite {
-                    self.cloudRMin = max(1, rMin)
-                    self.cloudRMax = max(self.cloudRMin, rMax)
-                }
-                self.cloudClusterCentroidLocal.removeAll(keepingCapacity: true)
-                
-                // Materials are already volumetric (created by CloudBillboardFactory).
-                // Register billboards for conveyor/orientation, then apply the tuned (bright + cheaper) uniforms.
-                self.enableVolumetricCloudImpostors(false)
-                self.applyCloudSunUniforms()
-                
-                // Pre-compile sky + cloud shaders/materials so the first pan doesn’t hitch.
-                self.prewarmSkyAndSun()
+        }
+
+        // Assemble SceneKit nodes on the MainActor (optionally time-sliced).
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let specs = await specsTask.value
+
+            if let existing = self.skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: false) {
+                existing.removeFromParentNode()
             }
+
+            let root = SCNNode()
+            root.name = "CumulusBillboardLayer"
+            root.castsShadow = false
+            root.renderingOrder = -10_000
+            root.categoryBitMask = 0x0000_0010
+            root.eulerAngles.y = cloudInitialYaw
+
+            self.skyAnchor.addChildNode(root)
+            self.cloudLayerNode = root
+
+            let factory = CloudBillboardFactory.initWithAtlas(nil)
+
+            var rMin = Float.greatestFiniteMagnitude
+            var rMax: Float = 0
+
+            for (i, spec) in specs.enumerated() {
+                let node = factory.makeNode(from: spec, renderPuffs: true)
+                root.addChildNode(node)
+
+                let r = simd_length(simd_float2(node.simdPosition.x, node.simdPosition.z))
+                if r.isFinite {
+                    rMin = min(rMin, r)
+                    rMax = max(rMax, r)
+                }
+
+                if (i & 7) == 0 { await Task.yield() }
+            }
+
+            if rMax > 0, rMin.isFinite {
+                self.cloudRMin = max(1, rMin)
+                self.cloudRMax = max(self.cloudRMin, rMax)
+            }
+
+            self.cloudClusterCentroidLocal.removeAll(keepingCapacity: true)
+
+            self.enableVolumetricCloudImpostors(false)
+            self.applyCloudSunUniforms()
+            self.prewarmSkyAndSun()
         }
     }
 

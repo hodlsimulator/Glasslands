@@ -6,17 +6,13 @@
 //
 //  Billboard cloud cluster builder.
 //
-//  This layer can build either:
-//  - Proxy clusters (no puff planes)
-//  - Full puff planes (volumetric impostor shader per puff)
-//
-//  In this branch, the default is to build puff planes so the cumulus clouds
-//  are visible without relying on the volumetric dome path.
+//  This file now builds *specs* (Sendable) off-thread.
+//  SceneKit node creation must happen on MainActor.
 //
 
-import SceneKit
+import Foundation
+import CoreGraphics
 import simd
-import UIKit
 
 struct CloudBillboardLayer {
 
@@ -27,29 +23,14 @@ struct CloudBillboardLayer {
         var minAltitudeY: Float
     }
 
-    /// Builds the cumulus cloud layer.
-    /// - Note: `renderPuffs` controls whether per-cluster puff planes are created.
-    ///         Puff planes use `CloudImpostorProgram` (raymarched impostor) via `CloudBillboardFactory`.
-    static func makeAsync(
+    static func buildSpecs(
         radius: CGFloat,
         clusterCount: Int = 72,
         seed: UInt32 = 1,
-        minAltitudeY: Float = 0.12,
-        renderPuffs: Bool = true
-    ) async -> SCNNode {
-
-        let wantsPuffs = renderPuffs
-
-        // Puff planes use CloudImpostorProgram and do not need sprite atlases.
-        let factory = CloudBillboardFactory.initWithAtlas(nil)
+        minAltitudeY: Float = 0.12
+    ) -> [CloudClusterSpec] {
 
         let p = Params(radius: radius, clusterCount: clusterCount, seed: seed, minAltitudeY: minAltitudeY)
-
-        let root = SCNNode()
-        root.name = "CumulusBillboardLayer"
-        root.castsShadow = false
-        root.renderingOrder = -10_000
-        root.categoryBitMask = 0x0000_0010
 
         let coverage: Float = {
             let v = UserDefaults.standard.float(forKey: "clouds.coverage")
@@ -67,8 +48,10 @@ struct CloudBillboardLayer {
         let rNearHole: Float = rNearMax * 0.12
         let rBridge0: Float = rNearMax * 1.03
         let rBridge1: Float = rBridge0 + max(900, Float(radius) * 0.46)
+
         let rMid0: Float = rBridge1 - 120
         let rMid1: Float = rMid0 + max(2400, Float(radius) * 1.15)
+
         let rFar0: Float = rMid1 + max(700, Float(radius) * 0.40)
         let rFar1: Float = rFar0 + max(3400, Float(radius) * 1.55)
 
@@ -117,6 +100,9 @@ struct CloudBillboardLayer {
         let tintFar  = simd_float3(0.985, 0.990, 1.00)
         let tintHzn  = simd_float3(0.970, 0.985, 1.00)
 
+        var specs: [CloudClusterSpec] = []
+        specs.reserveCapacity(N)
+
         func addBand(
             points: [simd_float2],
             baseY: Float,
@@ -136,9 +122,7 @@ struct CloudBillboardLayer {
                     seed: &s
                 )
                 rng &+= 0x9E3779B9
-
-                let node = factory.makeNode(from: spec, renderPuffs: wantsPuffs)
-                root.addChildNode(node)
+                specs.append(spec)
             }
         }
 
@@ -148,6 +132,6 @@ struct CloudBillboardLayer {
         addBand(points: farPts,  baseY: yFar,  scaleMul: 1.12, opacityMul: 0.92, tint: tintFar)
         addBand(points: hznPts,  baseY: yHzn,  scaleMul: 1.28, opacityMul: 0.82, tint: tintHzn)
 
-        return root
+        return specs
     }
 }
