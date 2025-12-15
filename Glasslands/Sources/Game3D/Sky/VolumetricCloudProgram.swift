@@ -20,6 +20,8 @@ import Metal
 
 enum VolumetricCloudProgram {
 
+    private static let trueVolumetricDefaultsKey = "clouds.trueVolumetric"
+
     private static let vertexFnName = "gl_vapour_vertex"
     private static let fragmentFnName = "gl_vapour_fragment"
 
@@ -69,6 +71,15 @@ enum VolumetricCloudProgram {
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
         if let lib = device.makeDefaultLibrary() { return lib }
         return try? device.makeDefaultLibrary(bundle: .main)
+    }
+
+    @MainActor
+    private static func wantsTrueVolumetric() -> Bool {
+        // Default is the lightweight mask path.
+        if UserDefaults.standard.object(forKey: trueVolumetricDefaultsKey) != nil {
+            return UserDefaults.standard.bool(forKey: trueVolumetricDefaultsKey)
+        }
+        return false
     }
 
     // MARK: - Fallback mask (one draw, opaque)
@@ -122,6 +133,10 @@ enum VolumetricCloudProgram {
         sampler2D cloudMask;
         float3 sunDirWorld;
         float3 sunTint;
+        float time;
+        float3 wind;
+        float3 domainOffset;
+        float domainRotate;
 
         #pragma declaration
         inline float3 safeNormalize(float3 v) {
@@ -139,33 +154,64 @@ enum VolumetricCloudProgram {
             return float2(u, v);
         }
 
+        inline float3 rotateY(float3 v, float angle) {
+            float c = cos(angle);
+            float s = sin(angle);
+            return float3(v.x * c - v.z * s, v.y, v.x * s + v.z * c);
+        }
+
         #pragma body
         float3 V = safeNormalize(_surface.position);
         float3 S = safeNormalize(sunDirWorld);
         float3 tint = clamp(sunTint, 0.0, 10.0);
 
-        // Sky base (cheap gradient + sun highlight, same palette as Metal path).
+        // Sky base (cheap gradient + sun highlight).
         float tSky = clamp(V.y * 0.5 + 0.5, 0.0, 1.0);
         float3 horizon = float3(0.55, 0.75, 0.95);
         float3 zenith  = float3(0.14, 0.34, 0.88);
         float3 sky = mix(horizon, zenith, tSky);
 
-        float s = clamp(dot(V, S), 0.0, 1.0);
-        sky += float3(1.0, 0.95, 0.85) * pow(s, 350.0) * 1.2;
+        float sSun = clamp(dot(V, S), 0.0, 1.0);
+        sky += float3(1.0, 0.95, 0.85) * pow(sSun, 350.0) * 1.2;
 
         sky *= tint;
 
         float exposure = 0.85;
         sky = 1.0 - exp(-sky * exposure);
 
-        // Cloud mask sample (alpha drives coverage).
-        float2 uv = equirectUV(V);
-        float a = texture2D(cloudMask, uv).a;
+        // Cloud sampling: a single equirect mask, animated by a cheap rotation + drift.
+        float2 w = wind.xy;
+        float wLen = length(w);
 
-        // Keep it subtle; avoid overcast sheets.
-        a = smoothstep(0.35, 0.85, a) * 0.65;
+        // 0.25 is a baseline drift so calm conditions still move a touch.
+        float spin = (time * 0.00035) * (0.25 + 0.75 * wLen);
+        float3 Vr = rotateY(V, spin + domainRotate);
 
-        float3 col = mix(sky, float3(1.0), a);
+        float2 uv = equirectUV(Vr);
+        uv += float2(w.x, -w.y) * (time * 0.000015) + domainOffset.xy * 0.00002;
+        uv.y = clamp(uv.y, 0.001, 0.999);
+
+        // Two taps from the same mask gives a slightly richer silhouette with minimal cost.
+        float a0 = texture2D(cloudMask, uv).a;
+        float2 uv2 = float2(uv.x * 1.45 + 0.17 + time * 0.000021, uv.y);
+        float a1 = texture2D(cloudMask, uv2).a;
+        float a = max(a0, a1 * 0.55);
+
+        // Sharpen slightly and raise overall visibility.
+        a = smoothstep(0.22, 0.74, a);
+        a *= 0.88;
+
+        // Mild horizon falloff avoids a hard ring without erasing low clouds.
+        float h = smoothstep(-0.10, 0.10, V.y);
+        a *= (0.65 + 0.35 * h);
+
+        // Cloud colour: cool base with a gentle warm highlight toward the sun.
+        float silver = pow(sSun, 6.0);
+        float3 cloudBase = float3(0.90, 0.92, 0.96);
+        float3 cloudSun  = float3(1.0, 0.99, 0.96) * mix(float3(1.0), tint, 0.25);
+        float3 cloudCol  = mix(cloudBase, cloudSun, silver);
+
+        float3 col = mix(sky, cloudCol, a);
         _output.color = float4(clamp(col, 0.0, 1.0), 1.0);
         """
 
@@ -174,16 +220,28 @@ enum VolumetricCloudProgram {
         m.setValue(maskProp, forKey: "cloudMask")
         m.setValue(NSValue(scnVector3: SCNVector3(0, 1, 0)), forKey: "sunDirWorld")
         m.setValue(NSValue(scnVector3: SCNVector3(1.0, 0.97, 0.92)), forKey: "sunTint")
+        m.setValue(NSNumber(value: 0.0), forKey: "time")
+        m.setValue(NSValue(scnVector3: SCNVector3(0.60, 0.20, 0.0)), forKey: "wind")
+        m.setValue(NSValue(scnVector3: SCNVector3(0.0, 0.0, 0.0)), forKey: "domainOffset")
+        m.setValue(NSNumber(value: 0.0), forKey: "domainRotate")
 
         return m
     }
 
     @MainActor
     static func makeMaterial() -> SCNMaterial {
-        guard let p = program else {
-            return makeFallbackMaterial()
+        if wantsTrueVolumetric() {
+            guard let p = program else {
+                return makeFallbackMaterial()
+            }
+            return makeTrueVolumetricMaterial(program: p)
         }
 
+        return makeFallbackMaterial()
+    }
+
+    @MainActor
+    private static func makeTrueVolumetricMaterial(program p: SCNProgram) -> SCNMaterial {
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = false
@@ -198,7 +256,6 @@ enum VolumetricCloudProgram {
 
         m.isLitPerPixel = false
         m.program = p
-
         return m
     }
 
