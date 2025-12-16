@@ -56,11 +56,9 @@ enum CloudImpostorProgram {
         float dither_depth;
         float densityMul;
 
+        #pragma declaration
         // --- Hash / noise ------------------------------------------------------
-
-        float hash11(float x) {
-            return fract(sin(x) * 43758.5453123);
-        }
+        float hash11(float x) { return fract(sin(x) * 43758.5453123); }
 
         float hash21(float2 p) {
             return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453123);
