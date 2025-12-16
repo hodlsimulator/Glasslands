@@ -50,8 +50,10 @@ enum CloudImpostorProgram {
     // Cached shader source (same for all materials; behaviour toggled via uniforms)
     private static let fragmentSource: String = {
         return """
-        #pragma arguments
+        #pragma transparent 
+        #pragma arguments 
         float cloud_z;
+
         float slab_half;
         float3 sun_dir;
         float shadow_only;
