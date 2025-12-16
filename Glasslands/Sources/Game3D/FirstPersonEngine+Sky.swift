@@ -126,7 +126,6 @@ extension FirstPersonEngine {
             mat.setValue(NSNumber(value: densityMul), forKey: CloudImpostorProgram.kDensityMul)
             mat.setValue(NSNumber(value: thickness), forKey: CloudImpostorProgram.kThickness)
             mat.setValue(NSNumber(value: phaseG), forKey: CloudImpostorProgram.kPhaseG)
-            mat.setValue(NSNumber(value: ambient), forKey: CloudImpostorProgram.kAmbient)
             mat.setValue(NSNumber(value: baseWhite), forKey: CloudImpostorProgram.kBaseWhite)
             mat.setValue(NSNumber(value: lightGain), forKey: CloudImpostorProgram.kLightGain)
             mat.setValue(NSNumber(value: quality), forKey: CloudImpostorProgram.kQuality)
