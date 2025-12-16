@@ -12,6 +12,7 @@
 
 import Foundation
 import SceneKit
+import CoreGraphics
 
 enum CloudImpostorProgram {
 
@@ -248,4 +249,33 @@ enum CloudImpostorProgram {
 
         return material
     }
+
+
+    // Compatibility overload for older call sites that still provide billboard size + quality + sun direction.
+    // Internally maps to the slab-based material builder.
+    @MainActor
+    static func makeMaterial(
+        halfWidth: CGFloat,
+        halfHeight: CGFloat,
+        quality: Double = 0.6,
+        sunDir: simd_float3 = simd_float3(0, 1, 0)
+    ) -> SCNMaterial {
+        // Map billboard size -> a reasonable slab thickness.
+        // This keeps the "volume" looking plausibly 3D without going insane on step count.
+        let baseHalf = Float(max(0.001, min(halfWidth, halfHeight)))
+        let slabHalf = max(0.6, min(baseHalf * 0.18, 450.0))
+
+        let m = makeMaterial(kind: .volumetricBillboard, slabHalf: slabHalf, shadowOnlyProxy: false)
+
+        // Seed a couple of uniforms so first frame isn't "all zeros" if update code runs later.
+        m.setValue(NSValue(simdFloat3: sunDir), forKey: kSunDir)
+        m.setValue(Float(1.0), forKey: kDensityMul)
+
+        // `quality` is accepted to keep API compatibility. If the shader later reads a quality uniform,
+        // this is the natural place to set it.
+        _ = quality
+
+        return m
+    }
+
 }

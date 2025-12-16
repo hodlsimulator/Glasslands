@@ -16,6 +16,6 @@ extension CloudBillboardMaterial {
     /// is set later by `enableVolumetricCloudImpostors(true)`.
     @MainActor
     static func makeCurrent() -> SCNMaterial {
-        makeVolumetricImpostor(defaultSlabHalf: 0.6)
+        makeVolumetricImpostor(slabHalf: 0.6)
     }
 }
