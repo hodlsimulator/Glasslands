@@ -195,7 +195,7 @@ enum CloudImpostorProgram {
         }
 
         float slabHalf = slab_half;
-        float3 camPos = _scn_frame.inverseViewTransform[3].xyz;
+        float3 camPos = scn_frame.inverseViewTransform[3].xyz;
         float3 worldPos = _surface.position;
 
         float3 viewDir = normalize(worldPos - camPos);
