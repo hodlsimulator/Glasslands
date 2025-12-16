@@ -397,6 +397,6 @@ enum CloudBillboardMaterial {
     // Back-compat shim if any older code calls this name.
     @MainActor
     static func makeAnalyticWhitePuff() -> SCNMaterial {
-        makeVolumetricImpostor(defaultSlabHalf: 0.6)
+        makeVolumetricImpostor(slabHalf: 0.6)
     }
 }
