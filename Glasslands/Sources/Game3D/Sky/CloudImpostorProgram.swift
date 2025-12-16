@@ -13,6 +13,7 @@
 import Foundation
 import SceneKit
 import CoreGraphics
+import simd
 
 enum CloudImpostorProgram {
 
@@ -24,10 +25,22 @@ enum CloudImpostorProgram {
     // Shader modifier argument keys
     static let kCloudZ = "cloud_z"
     static let kSlabHalf = "slab_half"
+    static let kDensityMul = "densityMul"
+    static let kThickness = "slab_half"
+    static let kPhaseG = "phaseG"
+    static let kAmbient = "ambient"
+    static let kBaseWhite = "baseWhite"
     static let kSunDir = "sun_dir"
     static let kShadowOnly = "shadow_only"
     static let kDitherDepth = "dither_depth"
 
+    static let kLightGain = "lightGain"
+    static let kQuality = "quality"
+    static let kPowderK = "powderK"
+    static let kEdgeLight = "edgeLight"
+    static let kBacklight = "backlight"
+    static let kEdgeFeather = "edgeFeather"
+    static let kHeightFade = "heightFade"
     // Behaviour toggles (UserDefaults)
     // Default is ON because it’s the fastest path on device.
     private static let kDefaultsDitherDepthWrite = "clouds.ditherDepthWrite"
@@ -41,6 +54,7 @@ enum CloudImpostorProgram {
         float3 sun_dir;
         float shadow_only;
         float dither_depth;
+        float densityMul;
 
         // --- Hash / noise ------------------------------------------------------
 
@@ -151,7 +165,7 @@ enum CloudImpostorProgram {
 
                 float3 p = mix(rayEnter, rayExit, t);
 
-                float dens = densityAt(p, cloudZ);
+                float dens = densityAt(p, cloudZ) * densityMul;
                 if (dens < 0.002) { continue; }
 
                 // Beer-Lambert-ish alpha per step
@@ -243,6 +257,7 @@ enum CloudImpostorProgram {
         // Defaults; engine can override at runtime.
         material.setValue(NSNumber(value: 0.0), forKey: kCloudZ)
         material.setValue(NSNumber(value: slabHalf), forKey: kSlabHalf)
+        material.setValue(NSNumber(value: 1.0), forKey: kDensityMul)
         material.setValue(SCNVector3(0.35, 0.9, 0.2), forKey: kSunDir)
         material.setValue(NSNumber(value: shadowOnlyProxy ? 1.0 : 0.0), forKey: kShadowOnly)
         material.setValue(NSNumber(value: wantsDitherDepth ? 1.0 : 0.0), forKey: kDitherDepth)
@@ -268,8 +283,8 @@ enum CloudImpostorProgram {
         let m = makeMaterial(kind: .volumetricBillboard, slabHalf: slabHalf, shadowOnlyProxy: false)
 
         // Seed a couple of uniforms so first frame isn't "all zeros" if update code runs later.
-        m.setValue(NSValue(simdFloat3: sunDir), forKey: kSunDir)
-        m.setValue(Float(1.0), forKey: kDensityMul)
+        m.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: kSunDir)
+        m.setValue(NSNumber(value: 1.0), forKey: kDensityMul)
 
         // `quality` is accepted to keep API compatibility. If the shader later reads a quality uniform,
         // this is the natural place to set it.
