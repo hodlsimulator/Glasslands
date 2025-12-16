@@ -182,6 +182,8 @@ enum CloudImpostorProgram {
             return float4(acc, alpha);
         }
 
+        #pragma body
+        
         // --- Body --------------------------------------------------------------
 
         float2 uv = _surface.diffuseTexcoord;
