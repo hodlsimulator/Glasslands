@@ -96,6 +96,7 @@ extension FirstPersonEngine {
 
         // Whiter (still SDR), a touch sharper, and cheaper (fewer raymarch steps).
         let densityMul: Float = 1.02
+        let thickness: Float = 4.5
         let phaseG: Float = 0.60
         let baseWhite: Float = 1.0
         let lightGain: Float = 3.35
@@ -120,18 +121,17 @@ extension FirstPersonEngine {
             mat.readsFromDepthBuffer = false
             mat.writesToDepthBuffer = false
 
-            // Blended (premultiplied) alpha path: restores soft edges + avoids the noisy hashed/dither look.
-            // Depth is disabled for clouds to avoid iOS tile resolve stalls.
-            mat.blendMode = .alpha
-            mat.transparencyMode = .aOne
-            mat.setValue(NSNumber(value: 0.0), forKey: CloudImpostorProgram.kDitherDepth)
-
+            // Keep blend/dither mode as configured by CloudImpostorProgram.makeMaterial(...).
+            // Forcing blended alpha here reintroduces the magenta/pink artefacts.
             mat.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: CloudImpostorProgram.kSunDir)
             mat.setValue(NSNumber(value: densityMul), forKey: CloudImpostorProgram.kDensityMul)
+            mat.setValue(NSNumber(value: thickness), forKey: CloudImpostorProgram.kThickness)
+
             mat.setValue(NSNumber(value: phaseG), forKey: CloudImpostorProgram.kPhaseG)
             mat.setValue(NSNumber(value: baseWhite), forKey: CloudImpostorProgram.kBaseWhite)
             mat.setValue(NSNumber(value: lightGain), forKey: CloudImpostorProgram.kLightGain)
             mat.setValue(NSNumber(value: quality), forKey: CloudImpostorProgram.kQuality)
+
             mat.setValue(NSNumber(value: powderK), forKey: CloudImpostorProgram.kPowderK)
             mat.setValue(NSNumber(value: edgeLight), forKey: CloudImpostorProgram.kEdgeLight)
             mat.setValue(NSNumber(value: backlight), forKey: CloudImpostorProgram.kBacklight)
