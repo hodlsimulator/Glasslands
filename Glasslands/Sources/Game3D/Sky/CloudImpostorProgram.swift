@@ -60,6 +60,11 @@ enum CloudImpostorProgram {
             "float shadow_only;",
             "float dither_depth;",
             "float densityMul;",
+            "float phaseG;",
+            "float baseWhite;",
+            "float lightGain;",
+            "float backlight;",
+            "float edgeFeather;",
             "",
             "#pragma declaration",
             "/* --- Hash / noise ------------------------------------------------------ */",
@@ -134,10 +139,17 @@ enum CloudImpostorProgram {
             "",
             "    /* Lighting (very cheap; no extra density samples) */",
             "    float mu = clamp(dot(-viewDir, sunDir), -1.0, 1.0);",
-            "    float phase = phaseHG(0.55, mu);",
-            "    float phaseSat = clamp(phase * 6.0, 0.0, 1.0);",
-            "    float bright = mix(0.15, 1.0, phaseSat);",
-            "    float3 col = mix(float3(1.0), float3(1.0, 0.95, 0.9), phaseSat) * bright;",
+            "    float g = clamp(phaseG, -0.2, 0.85);",
+            "    float phase = phaseHG(g, mu);",
+            "    float gain = max(0.01, lightGain);",
+            "    float phaseSat = clamp(phase * gain, 0.0, 1.0);",
+            "    float bw = clamp(baseWhite, 0.0, 2.0);",
+            "    float bright = mix(0.12, 1.0, phaseSat);",
+            "    float3 baseCol = float3(bw);",
+            "    float3 warmCol = float3(bw, bw * 0.95, bw * 0.90);",
+            "    float3 col = mix(baseCol, warmCol, phaseSat) * bright;",
+            "    /* Backlight when the sun is behind the view ray. */",
+            "    col *= (1.0 + max(0.0, backlight) * pow(clamp(-mu, 0.0, 1.0), 1.25));",
             "",
             "    /* Looking upward used to be worst-case; overhead gets fewer steps. */",
             "    float pitch = clamp(abs(viewDir.y), 0.0, 1.0);",
@@ -172,10 +184,14 @@ enum CloudImpostorProgram {
             "float2 uv = _surface.diffuseTexcoord;",
             "float2 p2 = uv * 2.0 - 1.0;",
             "",
-            "/* Circular mask: discard outside the puff */",
-            "if (dot(p2, p2) > 1.0) {",
+            "/* Circular mask + soft feather to hide the quad */",
+            "float r2 = dot(p2, p2);",
+            "if (r2 > 1.0) {",
             "    discard_fragment();",
             "}",
+            "float r = sqrt(r2);",
+            "float ef = clamp(edgeFeather, 0.001, 0.45);",
+            "float edgeMask = 1.0 - smoothstep(1.0 - ef, 1.0, r);",
             "",
             "float slabHalf = slab_half;",
             "",
@@ -197,6 +213,8 @@ enum CloudImpostorProgram {
             "float4 res = integrateCloud(rayEnter, rayExit, viewDir, sDir, cloud_z, slabHalf, uv, densityMul);",
             "float3 outCol = res.rgb;",
             "float a = clamp(res.a, 0.0, 1.0);",
+            "outCol *= edgeMask;",
+            "a *= edgeMask;",
             "",
             "if (shadow_only > 0.5) {",
             "    _output.color = float4(a, a, a, a);",
@@ -252,6 +270,13 @@ enum CloudImpostorProgram {
         material.setValue(SCNVector3(0.35, 0.9, 0.2), forKey: kSunDir)
         material.setValue(NSNumber(value: shadowOnlyProxy ? 1.0 : 0.0), forKey: kShadowOnly)
         material.setValue(NSNumber(value: wantsDitherDepth ? 1.0 : 0.0), forKey: kDitherDepth)
+
+        // Visual defaults (engine can override via applyCloudSunUniforms()).
+        material.setValue(NSNumber(value: 0.60), forKey: kPhaseG)
+        material.setValue(NSNumber(value: 1.0), forKey: kBaseWhite)
+        material.setValue(NSNumber(value: 3.35), forKey: kLightGain)
+        material.setValue(NSNumber(value: 0.45), forKey: kBacklight)
+        material.setValue(NSNumber(value: 0.26), forKey: kEdgeFeather)
 
         _ = kind
         return material
