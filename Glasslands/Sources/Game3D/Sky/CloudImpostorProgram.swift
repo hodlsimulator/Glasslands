@@ -30,7 +30,7 @@ enum CloudImpostorProgram {
     // Historical/compat keys (some call sites still set these)
     static let kThickness = "slab_half"
     static let kPhaseG = "phaseG"
-    static let kAmbient = "ambient"
+    // static let kAmbient = "ambient"
     static let kBaseWhite = "baseWhite"
     static let kSunDir = "sun_dir"
     static let kShadowOnly = "shadow_only"
