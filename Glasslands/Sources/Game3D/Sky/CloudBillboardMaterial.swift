@@ -336,40 +336,26 @@ enum CloudBillboardMaterial {
     """
 
     @MainActor
-    static func makeVolumetricImpostor(defaultSlabHalf: Float) -> SCNMaterial {
-        let m = SCNMaterial()
-        m.lightingModel = .constant
-        m.isDoubleSided = false
-        m.blendMode = .alpha
-        m.transparencyMode = .aOne
-        m.cullMode = .back
-        m.readsFromDepthBuffer = false
-        m.writesToDepthBuffer = false
-        m.diffuse.contents = UIColor.white
+    static func makeVolumetricImpostor(
+            slabHalf: Float,
+            shadowOnlyProxy: Bool = false
+        ) -> SCNMaterial {
+            CloudImpostorProgram.makeMaterial(
+                kind: .volumetricBillboard,
+                slabHalf: slabHalf,
+                shadowOnlyProxy: shadowOnlyProxy
+            )
+        }
 
-        m.shaderModifiers = [.fragment: fragSM]
-
-        // Safe defaults (overwritten every frame by syncFromVolStore)
-        m.setValue(0.0 as Float,             forKey: "u_time")
-        m.setValue(simd_float2(0.60, 0.20),  forKey: "u_wind")
-        m.setValue(simd_float2(0, 0),        forKey: "u_domainOff")
-        m.setValue(0.0 as Float,             forKey: "u_domainRot")
-        m.setValue(0.42 as Float,            forKey: "u_coverage")
-        m.setValue(1.10 as Float,            forKey: "u_densityMul")
-        m.setValue(0.70 as Float,            forKey: "u_stepMul")
-        m.setValue(0.10 as Float,            forKey: "u_horizonLift")
-        m.setValue(0.90 as Float,            forKey: "u_detailMul")
-        m.setValue(0.0048 as Float,          forKey: "u_puffScale")
-        m.setValue(0.62 as Float,            forKey: "u_puffStrength")
-        m.setValue(0.00035 as Float,         forKey: "u_macroScale")
-        m.setValue(0.58 as Float,            forKey: "u_macroThreshold")
-        m.setValue(simd_float3(0,1,0),       forKey: "u_sunDir")
-        m.setValue(defaultSlabHalf,          forKey: "u_slabHalf")
-
-        m.setValue(volumetricMarker, forKey: "vapourTag")
-        registry.add(m)
-        return m
-    }
+        static func makeShadow(
+            slabHalf: Float
+        ) -> SCNMaterial {
+            CloudImpostorProgram.makeMaterial(
+                kind: .shadowProxy,
+                slabHalf: slabHalf,
+                shadowOnlyProxy: true
+            )
+        }
 
     // Push current vapour uniforms into every impostor material.
     @MainActor
