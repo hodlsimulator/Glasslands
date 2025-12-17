@@ -155,7 +155,7 @@ enum CloudImpostorProgram {
             "    float pitch = clamp(abs(viewDir.y), 0.0, 1.0);",
             "    float overhead = smoothstep(0.55, 0.95, pitch);",
             "    float stepsF = mix(16.0, 10.0, overhead);",
-            "    const int MAX_STEPS = 16; int stepCount = clamp(int(stepsF + 0.5), 10, MAX_STEPS);",
+            "    const int MAX_STEPS = 16; int stepCount = int(clamp(stepsF + 0.5, 10.0, float(MAX_STEPS)));",
             "",
             "    /* Per-fragment jitter to hide banding when stepCount is reduced. */",
             "    float jitter = hash21(floor(uvForJitter * 512.0) + float2(cloudZ * 0.01, slabHalf * 19.0)) - 0.5;",

@@ -62,7 +62,7 @@ enum CloudBillboardMaterial {
     float distLOD   = clamp(Lm / 2500.0, 0.0, 1.2);
     float stepMul   = clamp(u_stepMul, 0.60, 1.35);
     int   baseSteps = int(round(mix(10.0, 18.0, 1.0 - distLOD*0.7)));
-    int   numSteps  = clamp(int(round(float(baseSteps) * stepMul)), 8, 24);
+    int   numSteps  = int(clamp(round(float(baseSteps) * stepMul), 8.0, 24.0));
     float dt        = Lm / float(numSteps);
 
     // Jitter
