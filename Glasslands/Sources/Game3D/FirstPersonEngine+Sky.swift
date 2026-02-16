@@ -13,6 +13,32 @@ import simd
 import UIKit
 import CoreGraphics
 
+private struct CloudUniformState {
+    let profile: String
+    let sunDir: simd_float3
+    let densityMul: Float
+    let thickness: Float
+    let phaseG: Float
+    let ambient: Float
+    let baseWhite: Float
+    let lightGain: Float
+    let quality: Float
+    let powderK: Float
+    let edgeLight: Float
+    let backlight: Float
+    let edgeFeather: Float
+    let heightFade: Float
+}
+
+private enum CloudUniformCache {
+    static var byEngine: [ObjectIdentifier: CloudUniformState] = [:]
+    static var didLogProfile = false
+    static var didLogComposite = false
+    static var writesSinceReport = 0
+    static var updateMsSinceReport: Double = 0
+    static var lastPerfLog: CFTimeInterval = CACurrentMediaTime()
+}
+
 extension FirstPersonEngine {
 
     @inline(__always)
@@ -94,22 +120,67 @@ extension FirstPersonEngine {
 
         let sunDir = simd_normalize(sunDirWorld)
 
-        // Whiter (still SDR), a touch sharper, and cheaper (fewer raymarch steps).
-        let densityMul: Float = 1.02
-        let thickness: Float = 4.5
-        let phaseG: Float = 0.60
-        let baseWhite: Float = 1.0
-        let lightGain: Float = 3.35
-        let quality: Float = 0.28
+        // Default profile is "good" (717da10 look). Set CLOUD_PROFILE=current to compare.
+        let densityMul: Float = useGoodProfile ? 0.94 : 0.98
+        let thickness: Float = useGoodProfile ? 4.5 : 4.5
+        let phaseG: Float = useGoodProfile ? 0.52 : 0.58
+        let ambient: Float = useGoodProfile ? 0.52 : 0.28
+        let baseWhite: Float = useGoodProfile ? 1.08 : 1.0
+        let lightGain: Float = useGoodProfile ? 2.25 : 3.0
+        let quality: Float = useGoodProfile ? 0.28 : 0.24
 
-        // Extra lighting controls (cheap, but makes the clouds read more like real vapour).
-        let powderK: Float = 0.85
-        let edgeLight: Float = 3.0
+        let powderK: Float = useGoodProfile ? 0.60 : 0.70
+        let edgeLight: Float = useGoodProfile ? 1.60 : 2.4
         let backlight: Float = Float(cloudSunBacklight)
 
-        // Lower feather = crisper cloud edge; still soft enough to hide the quad.
-        let edgeFeather: Float = 0.26
-        let heightFade: Float = 0.28
+        let edgeFeather: Float = useGoodProfile ? 0.34 : 0.30
+        let heightFade: Float = useGoodProfile ? 0.30 : 0.30
+
+        let state = CloudUniformState(
+            profile: useGoodProfile ? "good" : "current",
+            sunDir: sunDir,
+            densityMul: densityMul,
+            thickness: thickness,
+            phaseG: phaseG,
+            ambient: ambient,
+            baseWhite: baseWhite,
+            lightGain: lightGain,
+            quality: quality,
+            powderK: powderK,
+            edgeLight: edgeLight,
+            backlight: backlight,
+            edgeFeather: edgeFeather,
+            heightFade: heightFade
+        )
+
+        if ProcessInfo.processInfo.environment["CLOUD_DIAG"] == "1", !CloudUniformCache.didLogProfile {
+            CloudUniformCache.didLogProfile = true
+            print("[CLOUD_DIAG] cloudProfile=\(state.profile) densityMul=\(densityMul) thickness=\(thickness) phaseG=\(phaseG) ambient=\(ambient) baseWhite=\(baseWhite) lightGain=\(lightGain) quality=\(quality) powderK=\(powderK) edgeLight=\(edgeLight) backlight=\(backlight) edgeFeather=\(edgeFeather) heightFade=\(heightFade)")
+        }
+
+        let engineID = ObjectIdentifier(self)
+        if let last = CloudUniformCache.byEngine[engineID],
+           last.profile == state.profile,
+           simd_distance(last.sunDir, state.sunDir) < 0.0005,
+           abs(last.densityMul - state.densityMul) < 0.0005,
+           abs(last.thickness - state.thickness) < 0.0005,
+           abs(last.phaseG - state.phaseG) < 0.0005,
+           abs(last.ambient - state.ambient) < 0.0005,
+           abs(last.baseWhite - state.baseWhite) < 0.0005,
+           abs(last.lightGain - state.lightGain) < 0.0005,
+           abs(last.quality - state.quality) < 0.0005,
+           abs(last.powderK - state.powderK) < 0.0005,
+           abs(last.edgeLight - state.edgeLight) < 0.0005,
+           abs(last.backlight - state.backlight) < 0.0005,
+           abs(last.edgeFeather - state.edgeFeather) < 0.0005,
+           abs(last.heightFade - state.heightFade) < 0.0005 {
+            return
+        }
+
+        CloudUniformCache.byEngine[engineID] = state
+
+        let updateStart = CACurrentMediaTime()
+        var uniformWrites = 0
 
         layer.enumerateChildNodes { node, _ in
             guard let plane = node.geometry as? SCNPlane, let mat = plane.firstMaterial else { return }
@@ -124,19 +195,56 @@ extension FirstPersonEngine {
             // Keep blend/dither mode as configured by CloudImpostorProgram.makeMaterial(...).
             // Forcing blended alpha here reintroduces the magenta/pink artefacts.
             mat.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: CloudImpostorProgram.kSunDir)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: densityMul), forKey: CloudImpostorProgram.kDensityMul)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: thickness), forKey: CloudImpostorProgram.kThickness)
+            uniformWrites += 1
 
             mat.setValue(NSNumber(value: phaseG), forKey: CloudImpostorProgram.kPhaseG)
+            uniformWrites += 1
+            mat.setValue(NSNumber(value: ambient), forKey: CloudImpostorProgram.kAmbient)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: baseWhite), forKey: CloudImpostorProgram.kBaseWhite)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: lightGain), forKey: CloudImpostorProgram.kLightGain)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: quality), forKey: CloudImpostorProgram.kQuality)
+            uniformWrites += 1
 
             mat.setValue(NSNumber(value: powderK), forKey: CloudImpostorProgram.kPowderK)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: edgeLight), forKey: CloudImpostorProgram.kEdgeLight)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: backlight), forKey: CloudImpostorProgram.kBacklight)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: edgeFeather), forKey: CloudImpostorProgram.kEdgeFeather)
+            uniformWrites += 1
             mat.setValue(NSNumber(value: heightFade), forKey: CloudImpostorProgram.kHeightFade)
+            uniformWrites += 1
+
+            if ProcessInfo.processInfo.environment["CLOUD_DIAG"] == "1", !CloudUniformCache.didLogComposite {
+                CloudUniformCache.didLogComposite = true
+                let composite = ProcessInfo.processInfo.environment["CLOUD_COMPOSITE"]?.lowercased() ?? "blend(default)"
+                let premulAlpha = (mat.transparencyMode == .aOne)
+                print("[CLOUD_DIAG] composite=\(composite) blendMode=\(mat.blendMode.rawValue) depthWrite=\(mat.writesToDepthBuffer) premulAlpha=\(premulAlpha)")
+            }
+        }
+
+        let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
+        if ProcessInfo.processInfo.environment["CLOUD_DIAG"] == "1" {
+            CloudUniformCache.writesSinceReport += uniformWrites
+            CloudUniformCache.updateMsSinceReport += updateMs
+            let now = CACurrentMediaTime()
+            let dt = now - CloudUniformCache.lastPerfLog
+            if dt >= 1.0 {
+                let wps = Double(CloudUniformCache.writesSinceReport) / dt
+                let avgMs = CloudUniformCache.updateMsSinceReport / dt
+                print("[CLOUD_DIAG] uniformWritesPerSec=\(String(format: "%.1f", wps)) cloudUpdateMs=\(String(format: "%.3f", avgMs))")
+                CloudUniformCache.writesSinceReport = 0
+                CloudUniformCache.updateMsSinceReport = 0
+                CloudUniformCache.lastPerfLog = now
+            }
         }
     }
 

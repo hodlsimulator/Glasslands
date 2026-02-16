@@ -114,9 +114,9 @@ enum CloudImpostorProgram {
             "    float3 q = float3(pos.xy * 0.75, pos.z * 0.25) + float3(0.0, 0.0, cloudZ * 0.001);",
             "    float base = fbmFast(q * 0.85);",
             "    float ridged = 1.0 - abs(2.0 * noise3(q * 2.2 + float3(7.3, 1.1, 3.7)) - 1.0);",
-            "    float dens = smoothstep(0.33, 0.82, base) * smoothstep(0.12, 0.95, ridged);",
-            "    /* Kept to preserve the current puffy contrast (cheaper than extra ray steps). */",
-            "    dens = pow(dens, 1.35);",
+            "    float dens = smoothstep(0.30, 0.84, base) * smoothstep(0.10, 0.96, ridged);",
+            "    /* Softer contrast to reduce gritty stipple-like interior while keeping shape. */",
+            "    dens = pow(dens, 1.08);",
             "    return dens;",
             "}",
             "inline float phaseHG(float g, float mu) {",
@@ -242,11 +242,18 @@ enum CloudImpostorProgram {
         material.isDoubleSided = true
         material.readsFromDepthBuffer = true
 
+        let composite = ProcessInfo.processInfo.environment["CLOUD_COMPOSITE"]?.lowercased()
         let wantsDitherDepth: Bool = {
             if shadowOnlyProxy {
                 return false
             }
-            return (UserDefaults.standard.object(forKey: kDefaultsDitherDepthWrite) as? Bool) ?? true
+            if composite == "dither" {
+                return true
+            }
+            if composite == "blend" {
+                return false
+            }
+            return (UserDefaults.standard.object(forKey: kDefaultsDitherDepthWrite) as? Bool) ?? false
         }()
 
         if wantsDitherDepth {
