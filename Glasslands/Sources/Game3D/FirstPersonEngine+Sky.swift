@@ -119,6 +119,8 @@ extension FirstPersonEngine {
         }
 
         let sunDir = simd_normalize(sunDirWorld)
+        let cloudProfile = ProcessInfo.processInfo.environment["CLOUD_PROFILE"]?.lowercased() ?? "good"
+        let useGoodProfile = cloudProfile != "current"
 
         // Default profile is "good" (717da10 look). Set CLOUD_PROFILE=current to compare.
         let densityMul: Float = useGoodProfile ? 0.94 : 0.98
