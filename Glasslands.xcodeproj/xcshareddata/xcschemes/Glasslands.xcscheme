@@ -69,7 +69,6 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       enableGPUFrameCaptureMode = "1"
-      enableGPUValidationMode = "0"
       allowLocationSimulation = "YES">
       <BuildableProductRunnable
          runnableDebuggingMode = "0">
@@ -81,6 +80,23 @@
             ReferencedContainer = "container:Glasslands.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "CLOUD_PROFILE"
+            value = "good"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "CLOUD_DIAG"
+            value = "1"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "CLOUD_COMPOSITE"
+            value = "blend"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
