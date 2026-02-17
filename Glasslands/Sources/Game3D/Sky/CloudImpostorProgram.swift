@@ -30,7 +30,7 @@ enum CloudImpostorProgram {
     // Historical/compat keys (some call sites still set these)
     static let kThickness = "slab_half"
     static let kPhaseG = "phaseG"
-    // static let kAmbient = "ambient"
+    static let kAmbient = "ambient"
     static let kBaseWhite = "baseWhite"
     static let kSunDir = "sun_dir"
     static let kShadowOnly = "shadow_only"
@@ -44,7 +44,7 @@ enum CloudImpostorProgram {
     static let kHeightFade = "heightFade"
 
     // Behaviour toggles (UserDefaults)
-    // Default is ON because it’s the fastest path on device.
+    // Default is OFF for smooth alpha clouds; can be re-enabled for depth-dither profiling.
     private static let kDefaultsDitherDepthWrite = "clouds.ditherDepthWrite"
 
     // Cached shader source (same for all materials; behaviour toggled via uniforms)
@@ -61,8 +61,11 @@ enum CloudImpostorProgram {
             "float dither_depth;",
             "float densityMul;",
             "float phaseG;",
+            "float ambient;",
             "float baseWhite;",
             "float lightGain;",
+            "float powderK;",
+            "float edgeLight;",
             "float backlight;",
             "float edgeFeather;",
             "",
@@ -114,9 +117,9 @@ enum CloudImpostorProgram {
             "    float3 q = float3(pos.xy * 0.75, pos.z * 0.25) + float3(0.0, 0.0, cloudZ * 0.001);",
             "    float base = fbmFast(q * 0.85);",
             "    float ridged = 1.0 - abs(2.0 * noise3(q * 2.2 + float3(7.3, 1.1, 3.7)) - 1.0);",
-            "    float dens = smoothstep(0.30, 0.84, base) * smoothstep(0.10, 0.96, ridged);",
+            "    float dens = smoothstep(0.30, 0.84, base) * mix(1.0, smoothstep(0.10, 0.96, ridged), 0.12);",
             "    /* Softer contrast to reduce gritty stipple-like interior while keeping shape. */",
-            "    dens = pow(dens, 1.08);",
+            "    dens = pow(dens, 0.82);",
             "    return dens;",
             "}",
             "inline float phaseHG(float g, float mu) {",
@@ -132,24 +135,32 @@ enum CloudImpostorProgram {
             "    float cloudZ,",
             "    float slabHalf,",
             " float2 uvForJitter,",
-            " float densityMulLocal",
+            " float densityMulLocal,",
+            " float phaseGLocal,",
+            " float ambientLocal,",
+            " float baseWhiteLocal,",
+            " float lightGainLocal,",
+            " float powderKLocal,",
+            " float edgeLightLocal,",
+            " float backlightLocal",
             ") {",
             "    float3 acc = float3(0.0);",
             "    float alpha = 0.0;",
             "",
             "    /* Lighting (very cheap; no extra density samples) */",
             "    float mu = clamp(dot(-viewDir, sunDir), -1.0, 1.0);",
-            "    float g = clamp(phaseG, -0.2, 0.85);",
+            "    float g = clamp(phaseGLocal, -0.2, 0.85);",
             "    float phase = phaseHG(g, mu);",
-            "    float gain = max(0.01, lightGain);",
+            "    float gain = max(0.01, lightGainLocal);",
             "    float phaseSat = clamp(phase * gain, 0.0, 1.0);",
-            "    float bw = clamp(baseWhite, 0.0, 2.0);",
-            "    float bright = mix(0.12, 1.0, phaseSat);",
+            "    float bw = clamp(baseWhiteLocal, 0.0, 2.0);",
+            "    float phaseSoft = sqrt(phaseSat);",
+            "    float bright = mix(clamp(ambientLocal, 0.0, 1.0), 1.0, phaseSoft);",
             "    float3 baseCol = float3(bw);",
-            "    float3 warmCol = float3(bw, bw * 0.95, bw * 0.90);",
-            "    float3 col = mix(baseCol, warmCol, phaseSat) * bright;",
+            "    float3 warmCol = float3(bw, bw, bw);",
+            "    float3 col = mix(baseCol, warmCol, phaseSoft) * bright;",
             "    /* Backlight when the sun is behind the view ray. */",
-            "    col *= (1.0 + max(0.0, backlight) * pow(clamp(-mu, 0.0, 1.0), 1.25));",
+            "    col *= (1.0 + max(0.0, backlightLocal) * pow(clamp(-mu, 0.0, 1.0), 1.25));",
             "",
             "    /* Looking upward used to be worst-case; overhead gets fewer steps. */",
             "    float pitch = clamp(abs(viewDir.y), 0.0, 1.0);",
@@ -169,7 +180,9 @@ enum CloudImpostorProgram {
             "            continue;",
             "        }",
             "        /* Beer-Lambert-ish alpha per step */",
-            "        float a = 1.0 - exp(-dens * 1.45);",
+            "        float a = 1.0 - exp(-dens * 0.78);",
+            "        float powder = 0.0;",
+            "        float edge = 0.0;",
             "        a *= (1.0 - alpha);",
             "        acc += col * a;",
             "        alpha += a;",
@@ -196,8 +209,8 @@ enum CloudImpostorProgram {
             "float slabHalf = slab_half;",
             "",
             "/* _surface.position is view-space in SceneKit shader modifiers. */",
-            "/* Convert to world-space position + world-space view ray using scn_node transforms",
-            "   (avoids scn_frame dependency and avoids view/world mixing). */",
+            "/* Convert to world-space position + world-space view ray using scn_node transforms. */",
+            "/* Avoids scn_frame dependency and avoids view/world mixing. */",
             "float3 posView = _surface.position;",
             "float3 localPos = (scn_node.inverseModelViewTransform * float4(posView, 1.0)).xyz;",
             "float3 worldPos = (scn_node.modelTransform * float4(localPos, 1.0)).xyz;",
@@ -210,7 +223,10 @@ enum CloudImpostorProgram {
             "float3 rayEnter = worldPos - viewDir * slabHalf;",
             "float3 rayExit = worldPos + viewDir * slabHalf;",
             "",
-            "float4 res = integrateCloud(rayEnter, rayExit, viewDir, sDir, cloud_z, slabHalf, uv, densityMul);",
+            "float4 res = integrateCloud(",
+            "    rayEnter, rayExit, viewDir, sDir, cloud_z, slabHalf, uv,",
+            "    densityMul, phaseG, ambient, baseWhite, lightGain, powderK, edgeLight, backlight",
+            ");",
             "float3 outCol = res.rgb;",
             "float a = clamp(res.a, 0.0, 1.0);",
             "outCol *= edgeMask;",
@@ -228,7 +244,8 @@ enum CloudImpostorProgram {
             "        }",
             "        _output.color = float4(clamp(outCol, 0.0, 1.0), 1.0);",
             "    } else {",
-            "        _output.color = float4(clamp(outCol, 0.0, 1.0), a);",
+            "        float3 premul = clamp(outCol, 0.0, 1.0) * a;",
+            "        _output.color = float4(premul, a);",
             "    }",
             "}"
         ]
@@ -262,28 +279,32 @@ enum CloudImpostorProgram {
             material.writesToDepthBuffer = true
             material.transparencyMode = .singleLayer
         } else {
-            // Old behaviour: blended alpha, no depth writes.
+            // Smooth alpha path (no dither stipple).
             material.blendMode = .alpha
             material.writesToDepthBuffer = false
             material.transparencyMode = .aOne
         }
 
         material.shaderModifiers = [.fragment: fragmentSource]
+        dumpFragmentSourceIfNeeded(kind: "\(kind)", source: fragmentSource)
 
         // Defaults; engine can override at runtime.
         material.setValue(NSNumber(value: 0.0), forKey: kCloudZ)
         material.setValue(NSNumber(value: slabHalf), forKey: kSlabHalf)
-        material.setValue(NSNumber(value: 1.0), forKey: kDensityMul)
+        material.setValue(NSNumber(value: Float(1.0)), forKey: kDensityMul)
         material.setValue(SCNVector3(0.35, 0.9, 0.2), forKey: kSunDir)
         material.setValue(NSNumber(value: shadowOnlyProxy ? 1.0 : 0.0), forKey: kShadowOnly)
         material.setValue(NSNumber(value: wantsDitherDepth ? 1.0 : 0.0), forKey: kDitherDepth)
 
         // Visual defaults (engine can override via applyCloudSunUniforms()).
-        material.setValue(NSNumber(value: 0.60), forKey: kPhaseG)
-        material.setValue(NSNumber(value: 1.0), forKey: kBaseWhite)
-        material.setValue(NSNumber(value: 3.35), forKey: kLightGain)
-        material.setValue(NSNumber(value: 0.45), forKey: kBacklight)
-        material.setValue(NSNumber(value: 0.26), forKey: kEdgeFeather)
+        material.setValue(NSNumber(value: Float(0.60)), forKey: kPhaseG)
+        material.setValue(NSNumber(value: Float(0.36)), forKey: kAmbient)
+        material.setValue(NSNumber(value: Float(1.0)), forKey: kBaseWhite)
+        material.setValue(NSNumber(value: Float(3.35)), forKey: kLightGain)
+        material.setValue(NSNumber(value: Float(0.85)), forKey: kPowderK)
+        material.setValue(NSNumber(value: Float(3.0)), forKey: kEdgeLight)
+        material.setValue(NSNumber(value: Float(0.45)), forKey: kBacklight)
+        material.setValue(NSNumber(value: Float(0.26)), forKey: kEdgeFeather)
 
         _ = kind
         return material
@@ -307,10 +328,24 @@ enum CloudImpostorProgram {
 
         // Seed a couple of uniforms so first frame isn't all zeros if update code runs later.
         m.setValue(SCNVector3(sunDir.x, sunDir.y, sunDir.z), forKey: kSunDir)
-        m.setValue(NSNumber(value: 1.0), forKey: kDensityMul)
+        m.setValue(NSNumber(value: Float(1.0)), forKey: kDensityMul)
 
         // `quality` is accepted to keep API compatibility.
         _ = quality
         return m
+    }
+
+    private static func dumpFragmentSourceIfNeeded(kind: String, source: String) {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["CLOUD_DIAG"] == "1" else { return }
+        do {
+            let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            let url = dir.appendingPathComponent("cloud_fragment_\(kind).metal")
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            NSLog("[CLOUD_DIAG] dumped fragment source to \(url.path)")
+        } catch {
+            NSLog("[CLOUD_DIAG] failed to dump fragment source: \(String(describing: error))")
+        }
+        #endif
     }
 }
