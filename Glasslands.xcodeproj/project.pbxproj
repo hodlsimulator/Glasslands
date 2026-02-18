@@ -32,6 +32,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E13247862F454BA800520D5C /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		E172D7F32E8A566700B2B817 /* Glasslands.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Glasslands.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E172D8002E8A566A00B2B817 /* GlasslandsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GlasslandsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E172D80A2E8A566A00B2B817 /* GlasslandsUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GlasslandsUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -107,6 +108,7 @@
 		E172D7EA2E8A566700B2B817 = {
 			isa = PBXGroup;
 			children = (
+				E13247862F454BA800520D5C /* README.md */,
 				E1B246F52E8B939A0026C6B6 /* Glasslands.xctestplan */,
 				E172D7F52E8A566700B2B817 /* Glasslands */,
 				E172D8032E8A566A00B2B817 /* GlasslandsTests */,
