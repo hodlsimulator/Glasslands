@@ -96,6 +96,8 @@ nonisolated enum CloudBillboardPlacement {
         let (lo, hi) = bandSpan
         let dist = simd_length(anchorXZ)
         let tR = sat((dist - lo) / max(1e-3, (hi - lo)))
+        let isTransitionFarBand = tR > 0.72
+        let isExtremeFarBand = tR > 0.84
 
         // Mild distance scaling: keep far clouds legible.
         let scale = (1.16 - 0.24 * tR) * scaleMul
@@ -109,7 +111,8 @@ nonisolated enum CloudBillboardPlacement {
 
         // Cluster tint and overall opacity.
         let clusterTint = tint ?? simd_float3(1, 1, 1)
-        let clusterOpacity: Float = (0.92 - 0.18 * tR) * opacityMul
+        // Keep distance fade subtle; aggressive attenuation makes far clouds look grey/washed.
+        let clusterOpacity: Float = (0.98 - 0.08 * tR) * opacityMul
 
         // Small skew so the cluster doesn't look centred / symmetric.
         let skew = simd_float2(
@@ -137,11 +140,14 @@ nonisolated enum CloudBillboardPlacement {
             opacityMulLocal: Float,
             rollJitter: Float
         ) {
-            let y = centre.y + thickness * yFrac + (frand(&seed) - 0.5) * (thickness * 0.06)
+            let yJitterScale: Float = isExtremeFarBand ? 0.025 : (isTransitionFarBand ? 0.040 : 0.060)
+            let y = centre.y + thickness * yFrac + (frand(&seed) - 0.5) * (thickness * yJitterScale)
             let pos = simd_float3(centre.x + offsetXZ.x, y, centre.z + offsetXZ.y)
 
-            let size = base * sizeMul
-            let opacity = clusterOpacity * opacityMulLocal
+            let minSizeMul: Float = isExtremeFarBand ? 0.88 : (isTransitionFarBand ? 0.72 : 0.0)
+            let minOpacityMul: Float = isExtremeFarBand ? 0.90 : (isTransitionFarBand ? 0.76 : 0.0)
+            let size = base * max(sizeMul, minSizeMul)
+            let opacity = clusterOpacity * max(opacityMulLocal, minOpacityMul)
 
             puffs.append(
                 CloudPuffSpec(
@@ -200,26 +206,41 @@ nonisolated enum CloudBillboardPlacement {
         // Cap: 1 top puff.
         do {
             let a = randAngle()
-            let r = (0.06 + 0.12 * frand(&seed)) * base
+            let r: Float = isExtremeFarBand
+                ? (0.03 + 0.08 * frand(&seed)) * base
+                : (0.06 + 0.12 * frand(&seed)) * base
             let off = simd_float2(cos(a) * r, sin(a) * r)
 
             let yFrac = 0.66 + 0.18 * frand(&seed)
-            let sMul = 0.70 + 0.18 * frand(&seed)
-            let oMul = 0.74 + 0.10 * frand(&seed)
+            let sMul: Float = isExtremeFarBand
+                ? 0.88 + 0.16 * frand(&seed)
+                : 0.70 + 0.18 * frand(&seed)
+            let oMul: Float = isExtremeFarBand
+                ? 0.88 + 0.10 * frand(&seed)
+                : 0.74 + 0.10 * frand(&seed)
             let roll = (frand(&seed) - 0.5) * 0.35
 
             addPuff(offsetXZ: off, yFrac: yFrac, sizeMul: sMul, opacityMulLocal: oMul, rollJitter: roll)
         }
 
-        // Wisps: 2 small edge puffs to de-block the silhouette.
-        for _ in 0..<2 {
+        // Far fringe is simplified only at high tR to keep perspective while avoiding isolated grey dots.
+        let wispCount = isExtremeFarBand ? 0 : (isTransitionFarBand ? 1 : 2)
+        for _ in 0..<wispCount {
             let a = randAngle()
-            let r = (0.52 + 0.26 * frand(&seed)) * base
+            let r: Float = isTransitionFarBand
+                ? (0.30 + 0.18 * frand(&seed)) * base
+                : (0.52 + 0.26 * frand(&seed)) * base
             let off = simd_float2(cos(a) * r, sin(a) * r)
 
-            let yFrac = 0.10 + 0.28 * frand(&seed)
-            let sMul = 0.52 + 0.26 * frand(&seed)
-            let oMul = 0.52 + 0.10 * frand(&seed)
+            let yFrac: Float = isTransitionFarBand
+                ? 0.14 + 0.16 * frand(&seed)
+                : 0.10 + 0.28 * frand(&seed)
+            let sMul: Float = isTransitionFarBand
+                ? 0.78 + 0.22 * frand(&seed)
+                : 0.52 + 0.26 * frand(&seed)
+            let oMul: Float = isTransitionFarBand
+                ? 0.84 + 0.12 * frand(&seed)
+                : 0.52 + 0.10 * frand(&seed)
             let roll = (frand(&seed) - 0.5) * 0.55
 
             addPuff(offsetXZ: off, yFrac: yFrac, sizeMul: sMul, opacityMulLocal: oMul, rollJitter: roll)

@@ -42,6 +42,10 @@ enum CloudImpostorProgram {
     static let kBacklight = "backlight"
     static let kEdgeFeather = "edgeFeather"
     static let kHeightFade = "heightFade"
+    static let kDebugSolid = "debugSolid"
+    static let kCheapMode = "cheapMode"
+    static let kDebugOutlierVis = "debugOutlierVis"
+    static let kDebugCullOutlierCandidates = "debugCullOutlierCandidates"
 
     // Behaviour toggles (UserDefaults)
     // Default is OFF for smooth alpha clouds; can be re-enabled for depth-dither profiling.
@@ -68,6 +72,12 @@ enum CloudImpostorProgram {
             "float edgeLight;",
             "float backlight;",
             "float edgeFeather;",
+            "float quality;",
+            "float heightFade;",
+            "float debugSolid;",
+            "float cheapMode;",
+            "float debugOutlierVis;",
+            "float debugCullOutlierCandidates;",
             "",
             "#pragma declaration",
             "/* --- Hash / noise ------------------------------------------------------ */",
@@ -142,7 +152,8 @@ enum CloudImpostorProgram {
             " float lightGainLocal,",
             " float powderKLocal,",
             " float edgeLightLocal,",
-            " float backlightLocal",
+            " float backlightLocal,",
+            " float qualityLocal",
             ") {",
             "    float3 acc = float3(0.0);",
             "    float alpha = 0.0;",
@@ -163,11 +174,13 @@ enum CloudImpostorProgram {
             "    /* Backlight when the sun is behind the view ray. */",
             "    col *= (1.0 + max(0.0, backlightLocal) * pow(clamp(-mu, 0.0, 1.0), 1.25));",
             "",
-            "    /* Looking upward used to be worst-case; overhead gets fewer steps. */",
+            "    /* Quality now directly controls fragment cost (adaptive LOD actually matters). */",
+            "    float q = clamp(qualityLocal, 0.35, 1.00);",
             "    float pitch = clamp(abs(viewDir.y), 0.0, 1.0);",
             "    float overhead = smoothstep(0.55, 0.95, pitch);",
-            "    float stepsF = mix(16.0, 10.0, overhead);",
-            "    const int MAX_STEPS = 16; int stepCount = int(clamp(stepsF + 0.5, 10.0, float(MAX_STEPS)));",
+            "    float stepsBase = mix(6.0, 14.0, q);",
+            "    float stepsF = mix(stepsBase, max(6.0, stepsBase * 0.60), overhead);",
+            "    const int MAX_STEPS = 12; int stepCount = int(clamp(stepsF + 0.5, 5.0, float(MAX_STEPS)));",
             "",
             "    /* Per-fragment jitter to hide banding when stepCount is reduced. */",
             "    float jitter = (hash21(uvForJitter * 2048.0 + float2(cloudZ * 0.01, slabHalf * 19.0)) - 0.5) * 0.12;",
@@ -177,7 +190,8 @@ enum CloudImpostorProgram {
             "        t = clamp(t, 0.0, 1.0);",
             "        float3 p = mix(rayEnter, rayExit, t);",
             "        float dens = densityAt(p, cloudZ) * densityMulLocal;",
-            "        if (dens < 0.002) {",
+            "        float densCutoff = mix(0.006, 0.0015, q);",
+            "        if (dens < densCutoff) {",
             "            continue;",
             "        }",
             "        /* Beer-Lambert-ish alpha per step */",
@@ -187,7 +201,8 @@ enum CloudImpostorProgram {
             "        a *= (1.0 - alpha);",
             "        acc += col * 1.06 * a;",
             "        alpha += a;",
-            "        if (alpha > 0.985) {",
+            "        float alphaStop = mix(0.958, 0.988, q);",
+            "        if (alpha > alphaStop) {",
             "            break;",
             "        }",
             "    }",
@@ -206,9 +221,52 @@ enum CloudImpostorProgram {
             "float r = sqrt(r2);",
             "float ef = clamp(edgeFeather, 0.001, 0.45);",
             "float edgeMask = 1.0 - smoothstep(1.0 - ef, 1.0, r);",
+            "edgeMask = pow(clamp(edgeMask, 0.0, 1.0), 1.08);",
+            "float viewDist = length(_surface.position);",
             "",
             "float slabHalf = slab_half;",
             "",
+            "if (debugSolid > 0.5) {",
+            "    float aDbg = edgeMask * 0.92;",
+            "    if (dither_depth > 0.5) {",
+            "        float2 ipDbg = floor(uv * 512.0);",
+            "        float rndDbg = hash21(ipDbg + float2(cloud_z * 0.01, slab_half * 19.0));",
+            "        if (aDbg < rndDbg) {",
+            "            discard_fragment();",
+            "        }",
+            "        _output.color = float4(1.0, 1.0, 1.0, 1.0);",
+            "    } else {",
+            "        _output.color = float4(1.0, 1.0, 1.0, aDbg);",
+            "    }",
+            "} else if (cheapMode > 0.5) {",
+            "    float sunAmt = clamp(dot(normalize(float3(0.0, 1.0, 0.0)), normalize(sun_dir)) * 0.5 + 0.5, 0.0, 1.0);",
+            "    float shade = mix(clamp(ambient, 0.0, 1.0), 1.0, pow(sunAmt, 0.42));",
+            "    float n0 = hash21(uv * 1536.0 + float2(cloud_z * 0.013, slab_half * 7.1));",
+            "    float n1 = hash21(uv * 4096.0 + float2(cloud_z * 0.021, slab_half * 13.7));",
+            "    float shapeNoise = clamp(n0 * 0.68 + n1 * 0.32, 0.0, 1.0);",
+            "    float radial = 1.0 - r;",
+            "    float core = pow(smoothstep(0.10, 0.98, radial), 0.62);",
+            "    float feather = pow(smoothstep(0.0, 1.0, edgeMask), 0.72);",
+            "    float alphaBase = mix(0.62, 0.90, clamp(densityMul, 0.2, 1.4));",
+            "    float dist01 = smoothstep(1600.0, 8200.0, viewDist);",
+            "    float thicknessBoost = mix(1.0, 1.28, dist01) * mix(0.96, 1.10, clamp(slab_half / 220.0, 0.0, 1.0));",
+            "    float aFast = clamp(core * feather * alphaBase * mix(0.95, 1.20, shapeNoise) * thicknessBoost, 0.0, 1.0);",
+            "    float tint = clamp(baseWhite * shade, 0.0, 1.6);",
+            "    float warm = clamp(dot(normalize(sun_dir), normalize(float3(0.2, 0.95, 0.25))), 0.0, 1.0);",
+            "    float3 sunTint = mix(float3(1.0, 1.0, 1.0), float3(1.03, 1.01, 0.99), warm * 0.55);",
+            "    float3 cFast = float3(tint) * sunTint * mix(0.96, 1.12, shapeNoise) * mix(1.0, 1.05, dist01);",
+            "    if (dither_depth > 0.5) {",
+            "        float2 ipFast = floor(uv * 512.0);",
+            "        float rndFast = hash21(ipFast + float2(cloud_z * 0.01, slab_half * 19.0));",
+            "        if (aFast < rndFast) {",
+            "            discard_fragment();",
+            "        }",
+            "        _output.color = float4(clamp(cFast, 0.0, 1.0), 1.0);",
+            "    } else {",
+            "        float3 premulFast = clamp(cFast, 0.0, 1.0) * aFast;",
+            "        _output.color = float4(premulFast, aFast);",
+            "    }",
+            "} else {",
             "/* _surface.position is view-space in SceneKit shader modifiers. */",
             "/* Convert to world-space position + world-space view ray using scn_node transforms. */",
             "/* Avoids scn_frame dependency and avoids view/world mixing. */",
@@ -226,16 +284,42 @@ enum CloudImpostorProgram {
             "",
             "float4 res = integrateCloud(",
             "    rayEnter, rayExit, viewDir, sDir, cloud_z, slabHalf, uv,",
-            "    densityMul, phaseG, ambient, baseWhite, lightGain, powderK, edgeLight, backlight",
+            "    densityMul, phaseG, ambient, baseWhite, lightGain, powderK, edgeLight, backlight, quality",
             ");",
             "float3 outCol = res.rgb;",
             "float a = clamp(res.a, 0.0, 1.0);",
+            "if ((outCol.x != outCol.x) || (outCol.y != outCol.y) || (outCol.z != outCol.z) || (a != a)) {",
+            "    outCol = float3(0.0);",
+            "    a = 0.0;",
+            "}",
             "outCol *= edgeMask;",
             "a *= edgeMask;",
             "",
             "if (shadow_only > 0.5) {",
             "    _output.color = float4(a, a, a, a);",
             "} else {",
+            "    float farFrag = smoothstep(3200.0, 10500.0, viewDist);",
+            "    float lum = dot(outCol, float3(0.299, 0.587, 0.114));",
+            "    float proj = slab_half / max(1.0, viewDist);",
+            "    float cmax = max(outCol.x, max(outCol.y, outCol.z));",
+            "    float cmin = min(outCol.x, min(outCol.y, outCol.z));",
+            "    float chroma = cmax - cmin;",
+            "    float outlierScore = farFrag",
+            "        * (1.0 - smoothstep(0.012, 0.040, proj))",
+            "        * smoothstep(0.050, 0.190, a)",
+            "        * (1.0 - smoothstep(0.015, 0.040, chroma))",
+            "        * (1.0 - smoothstep(0.20, 0.36, lum));",
+            "    if (debugOutlierVis > 0.5 && outlierScore > 0.60) {",
+            "        _output.color = float4(1.0, 0.15, 0.0, 1.0);",
+            "    } else {",
+            "        float cullThreshold = (debugCullOutlierCandidates > 0.5) ? 0.60 : 0.82;",
+            "        if (outlierScore > cullThreshold) {",
+            "            discard_fragment();",
+            "        }",
+            "    float minAlpha = mix(0.0, 0.085, farFrag);",
+            "    if (a < minAlpha) {",
+                "        discard_fragment();",
+            "    }",
             "    if (dither_depth > 0.5) {",
             "        /* Dither alpha -> binary coverage, so depth write becomes useful and overdraw collapses. */",
             "        float2 ip = floor(uv * 512.0);",
@@ -248,6 +332,8 @@ enum CloudImpostorProgram {
             "        float3 premul = clamp(outCol, 0.0, 1.0);",
             "        _output.color = float4(premul, a);",
             "    }",
+            "    }",
+            "}",
             "}"
         ]
 
@@ -288,6 +374,7 @@ enum CloudImpostorProgram {
 
         material.shaderModifiers = [.fragment: fragmentSource]
         dumpFragmentSourceIfNeeded(kind: "\(kind)", source: fragmentSource)
+        let forceDebugSolid = (ProcessInfo.processInfo.environment["GL_DEBUG_CLOUD_FORCE_SOLID"] == "1")
 
         // Defaults; engine can override at runtime.
         material.setValue(NSNumber(value: 0.0), forKey: kCloudZ)
@@ -296,6 +383,10 @@ enum CloudImpostorProgram {
         material.setValue(SCNVector3(0.35, 0.9, 0.2), forKey: kSunDir)
         material.setValue(NSNumber(value: shadowOnlyProxy ? 1.0 : 0.0), forKey: kShadowOnly)
         material.setValue(NSNumber(value: wantsDitherDepth ? 1.0 : 0.0), forKey: kDitherDepth)
+        material.setValue(NSNumber(value: forceDebugSolid ? 1.0 : 0.0), forKey: kDebugSolid)
+        material.setValue(NSNumber(value: Float(0.0)), forKey: kCheapMode)
+        material.setValue(NSNumber(value: (ProcessInfo.processInfo.environment["GL_DEBUG_CLOUD_OUTLIER_VIS"] == "1") ? Float(1.0) : Float(0.0)), forKey: kDebugOutlierVis)
+        material.setValue(NSNumber(value: (ProcessInfo.processInfo.environment["GL_DEBUG_CLOUD_CULL_OUTLIERS"] == "1") ? Float(1.0) : Float(0.0)), forKey: kDebugCullOutlierCandidates)
 
         // Visual defaults (engine can override via applyCloudSunUniforms()).
         material.setValue(NSNumber(value: Float(0.60)), forKey: kPhaseG)
@@ -306,6 +397,12 @@ enum CloudImpostorProgram {
         material.setValue(NSNumber(value: Float(3.0)), forKey: kEdgeLight)
         material.setValue(NSNumber(value: Float(0.45)), forKey: kBacklight)
         material.setValue(NSNumber(value: Float(0.26)), forKey: kEdgeFeather)
+
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLOUD_DIAG"] == "1", forceDebugSolid {
+            NSLog("[CLOUD_DIAG] GL_DEBUG_CLOUD_FORCE_SOLID=1 active")
+        }
+        #endif
 
         _ = kind
         return material

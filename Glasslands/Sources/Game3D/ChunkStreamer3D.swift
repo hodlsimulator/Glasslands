@@ -27,7 +27,7 @@ final class ChunkStreamer3D {
     private var pending: Set<IVec2> = []
     private var queued: [IVec2] = []
 
-    private let beaconSink: ([SCNNode]) -> Void
+    private let beaconSink: (IVec2, [SCNNode]) -> Void
     private let obstacleSink: (IVec2, [SCNNode]) -> Void
     private let onChunkRemoved: (IVec2) -> Void
 
@@ -39,7 +39,7 @@ final class ChunkStreamer3D {
         recipe: BiomeRecipe,
         root: SCNNode,
         renderer: SCNSceneRenderer,
-        beaconSink: @escaping ([SCNNode]) -> Void,
+        beaconSink: @escaping (IVec2, [SCNNode]) -> Void,
         obstacleSink: @escaping (IVec2, [SCNNode]) -> Void,
         onChunkRemoved: @escaping (IVec2) -> Void
     ) {
@@ -195,7 +195,7 @@ final class ChunkStreamer3D {
                 if i & 0x0F == 0 { await Task.yield() }
             }
 
-            self.beaconSink(beacons)
+            self.beaconSink(key, beacons)
             self.obstacleSink(key, veg + beacons + scenery)
         }
     }
@@ -252,7 +252,7 @@ final class ChunkStreamer3D {
                 veg.forEach     { terrainNode.addChildNode($0) }
                 scenery.forEach { terrainNode.addChildNode($0) }
 
-                beaconSink(beacons)
+                beaconSink(key, beacons)
                 obstacleSink(key, veg + beacons + scenery)
             }
         }

@@ -13,11 +13,42 @@ import CoreGraphics
 import GameplayKit
 
 extension FirstPersonEngine {
+    #if DEBUG
+    @MainActor
+    private func logLightingState(_ tag: String) {
+        let lights = scene.rootNode.childNodes.filter { $0.light != nil }
+        let dirLights = lights.filter { $0.light?.type == .directional }
+        let sun = scene.rootNode.childNode(withName: "GL_SunLight", recursively: true)?.light
+        let sky = scene.rootNode.childNode(withName: "SkyAtmosphere", recursively: true)
+        let cloud = scene.rootNode.childNode(withName: "CumulusBillboardLayer", recursively: true)
+        let bgDesc = scene.background.contents.map { String(describing: type(of: $0)) } ?? "nil"
+        let envDesc = scene.lightingEnvironment.contents.map { String(describing: type(of: $0)) } ?? "nil"
+        let cam = camNode.camera ?? scnView?.pointOfView?.camera
+        print(String(
+            format: "[LIGHT] %@ bg=%@ env=%@ envI=%.2f lights=%d dir=%d sunI=%.1f sky=%@ cloud=%@ hdr=%@ exp=%.2f",
+            tag,
+            bgDesc,
+            envDesc,
+            scene.lightingEnvironment.intensity,
+            lights.count,
+            dirLights.count,
+            sun?.intensity ?? -1,
+            (sky != nil) ? "yes" : "no",
+            (cloud != nil) ? "yes" : "no",
+            (cam?.wantsHDR == true) ? "on" : "off",
+            cam?.exposureOffset ?? 0
+        ))
+    }
+    #endif
 
     // MARK: - Lifecycle / rebuild
 
     @MainActor
     func resetWorld() {
+        resolveCloudFixedProfileOnce()
+        #if DEBUG
+        logLightingState("pre-reset")
+        #endif
         let rng = GKRandomSource.sharedRandom()
         cloudSeed = UInt32(bitPattern: Int32(rng.nextInt()))
         cloudInitialYaw = (rng.nextUniform() * 2.0 - 1.0) * Float.pi
@@ -32,8 +63,9 @@ extension FirstPersonEngine {
         cloudDomainOffset = simd_float2(cosf(ang), sinf(ang)) * rad
 
         scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
-        beacons.removeAll()
+        beaconsByChunk.removeAll()
         obstaclesByChunk.removeAll()
+        waystoneNode = nil
 
         // Ensure no stale sky references keep doing work after a reset (they may no longer be in the scene graph).
         cloudLayerNode = nil
@@ -42,14 +74,28 @@ extension FirstPersonEngine {
         cloudClusterCentroidLocal.removeAll()
         cloudRMin = 1
         cloudRMax = 1
+        cloudUpdateAccumulator = 0
+        cloudAdaptiveTier = fixedCloudTierForCurrentProfile()
+        cloudAppliedVisualTier = -1
+        cloudVisiblePuffsPerCluster = 10
+        cloudCheapShaderEnabled = false
 
         buildLighting()
         buildSky()
 
         yaw = 0
         pitch = -0.08
-        yawNode.position = spawn()
+        let playerSpawn = spawn()
+        yawNode.position = playerSpawn
         updateRig()
+        pickupCheckAccumulator = 0
+        carriedBeacons = 0
+        bankedBeacons = 0
+        banksCompleted = 0
+        score = 0
+        runEnded = false
+        runStartTime = CACurrentMediaTime()
+        lastTime = 0
 
         let camera = SCNCamera()
         camera.zNear = 0.02
@@ -82,21 +128,25 @@ extension FirstPersonEngine {
             recipe: recipe,
             root: scene.rootNode,
             renderer: scnView!,
-            beaconSink: { [weak self] nodes in
+            beaconSink: { [weak self] chunk, nodes in
                 guard let self else { return }
-                nodes.forEach { self.beacons.insert($0) }
+                self.beaconsByChunk[chunk] = nodes
             },
             obstacleSink: { [weak self] chunk, nodes in
                 self?.registerObstacles(for: chunk, from: nodes)
             },
             onChunkRemoved: { [weak self] chunk in
                 self?.obstaclesByChunk.removeValue(forKey: chunk)
+                self?.beaconsByChunk.removeValue(forKey: chunk)
             }
         )
 
         chunker.warmupInitial(at: yawNode.simdPosition, radius: 0)   // was 1
-        score = 0
+        spawnWaystoneNearSpawn(near: yawNode.simdWorldPosition)
         DispatchQueue.main.async { [score, onScore] in onScore(score) }
+        #if DEBUG
+        logLightingState("post-reset")
+        #endif
     }
 
     // MARK: - Lighting
@@ -105,6 +155,22 @@ extension FirstPersonEngine {
         scene.rootNode.childNodes
             .filter { $0.light != nil }
             .forEach { $0.removeFromParentNode() }
+
+        #if DEBUG
+        if debugDisableDynamicLights {
+            let amb = SCNLight()
+            amb.type = .ambient
+            amb.intensity = 900
+            amb.color = UIColor(white: 1.0, alpha: 1.0)
+            let ambNode = SCNNode()
+            ambNode.name = "GL_AmbientOnly"
+            ambNode.light = amb
+            scene.rootNode.addChildNode(ambNode)
+            self.sunLightNode = nil
+            self.vegSunLightNode = nil
+            return
+        }
+        #endif
 
         // iOS 26: get the actual screen from this view’s window
         let screenBounds = scnView?.window?.windowScene?.screen.bounds ?? (scnView?.bounds ?? .zero)
@@ -177,6 +243,17 @@ extension FirstPersonEngine {
             .forEach { $0.removeFromParentNode() }
         scene.rootNode.addChildNode(skyAnchor)
 
+        #if DEBUG
+        if debugDisableSky {
+            scene.background.contents = UIColor(red: 0.60, green: 0.78, blue: 0.95, alpha: 1.0)
+            scene.background.wrapS = .clamp
+            scene.background.wrapT = .clamp
+            scene.lightingEnvironment.contents = nil
+            scene.lightingEnvironment.intensity = 0.0
+            return
+        }
+        #endif
+
         // Atmosphere dome
         let skyR = CGFloat(cfg.skyDistance) * 0.995
         let skySphere = SCNSphere(radius: max(10, skyR))
@@ -208,6 +285,11 @@ extension FirstPersonEngine {
             .filter { $0.name == "CumulusBillboardLayer" }
             .forEach { $0.removeFromParentNode() }
         enableVolumetricCloudImpostors(false)
+        #if DEBUG
+        if debugDisableCloudRender {
+            return
+        }
+        #endif
 
         // HDR sun sprites
         let coreDeg: CGFloat = 6.0, haloScale: CGFloat = 2.6

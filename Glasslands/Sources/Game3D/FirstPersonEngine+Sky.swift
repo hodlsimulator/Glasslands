@@ -28,6 +28,9 @@ private struct CloudUniformState {
     let backlight: Float
     let edgeFeather: Float
     let heightFade: Float
+    let useDitherDepth: Bool
+    let useCheapShader: Bool
+    let puffsPerCluster: Int
 }
 
 private enum CloudUniformCache {
@@ -40,6 +43,31 @@ private enum CloudUniformCache {
 }
 
 extension FirstPersonEngine {
+
+    @MainActor
+    func applyCloudTierVisualPolicyIfNeeded() {
+        guard let layer = cloudLayerNode ?? skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
+            return
+        }
+        cloudLayerNode = layer
+
+        let tier = cloudAdaptiveTier
+        guard tier != cloudAppliedVisualTier else { return }
+        cloudAppliedVisualTier = tier
+
+        let puffsPerCluster = targetCloudPuffsPerCluster(for: tier)
+        cloudVisiblePuffsPerCluster = puffsPerCluster
+        cloudCheapShaderEnabled = (resolvedCloudMode() == "cheap")
+
+        for group in layer.childNodes {
+            let puffs = group.childNodes.filter { ($0.geometry as? SCNPlane) != nil }
+            for (idx, puff) in puffs.enumerated() {
+                puff.isHidden = idx >= puffsPerCluster
+            }
+        }
+
+        applyCloudSunUniforms()
+    }
 
     @inline(__always)
     func sunDirection(azimuthDeg: Float, elevationDeg: Float) -> simd_float3 {
@@ -54,14 +82,17 @@ extension FirstPersonEngine {
     @MainActor
     func applySunDirection(azimuthDeg: Float, elevationDeg: Float) {
         var dir = sunDirection(azimuthDeg: azimuthDeg, elevationDeg: elevationDeg)
-
-        // Keep the sun on the same “hemisphere” as the current POV so it never flips behind the camera.
-        if let pov = (scnView?.pointOfView ?? camNode) as SCNNode? {
-            let look = -pov.presentation.simdWorldFront
-            if simd_dot(dir, look) < 0 { dir = -dir }
-        }
+        // Never let the sun go below the horizon during resets; that can black out terrain shading.
+        dir.y = max(0.20, dir.y)
+        dir = simd_normalize(dir)
 
         sunDirWorld = dir
+
+        #if DEBUG
+        if debugDisableDynamicLights {
+            return
+        }
+        #endif
 
         // Align the scene’s directional lights.
         if let sunLightNode {
@@ -114,32 +145,72 @@ extension FirstPersonEngine {
 
     @MainActor
     func applyCloudSunUniforms() {
+        #if DEBUG
+        if debugDisableCloudRender || debugDisableSky { return }
+        #endif
         guard let layer = skyAnchor.childNode(withName: "CumulusBillboardLayer", recursively: true) else {
             return
         }
+        #if DEBUG
+        if debugDisableCloudBillboardPass {
+            layer.isHidden = true
+            return
+        }
+        #endif
+        layer.isHidden = false
 
         let sunDir = simd_normalize(sunDirWorld)
-        let cloudProfile = ProcessInfo.processInfo.environment["CLOUD_PROFILE"]?.lowercased() ?? "good"
-        let useGoodProfile = cloudProfile != "current"
+        let cloudProfile = cloudFixedProfile.rawValue
+        let densityMul: Float
+        let thickness: Float = 4.5
+        let phaseG: Float
+        let ambient: Float
+        let baseWhite: Float
+        let lightGain: Float
+        let quality: Float = cloudQualityForCurrentTier()
 
-        // Default profile is "good" (717da10 look). Set CLOUD_PROFILE=current to compare.
-        let densityMul: Float = useGoodProfile ? 0.94 : 0.98
-        let thickness: Float = useGoodProfile ? 4.5 : 4.5
-        let phaseG: Float = useGoodProfile ? 0.52 : 0.58
-        let ambient: Float = useGoodProfile ? 0.52 : 0.28
-        let baseWhite: Float = useGoodProfile ? 1.08 : 1.0
-        let lightGain: Float = useGoodProfile ? 2.25 : 3.0
-        let quality: Float = useGoodProfile ? 0.28 : 0.24
-
-        let powderK: Float = useGoodProfile ? 0.60 : 0.70
-        let edgeLight: Float = useGoodProfile ? 1.60 : 2.4
+        let powderK: Float
+        let edgeLight: Float
         let backlight: Float = Float(cloudSunBacklight)
 
-        let edgeFeather: Float = useGoodProfile ? 0.34 : 0.30
-        let heightFade: Float = useGoodProfile ? 0.30 : 0.30
+        let edgeFeather: Float
+        let heightFade: Float = 0.30
+        let useDitherDepth = resolvedCloudDitherEnabled()
+        let useCheapShader = (resolvedCloudMode() == "cheap")
+        let puffsPerCluster = cloudVisiblePuffsPerCluster
+
+        switch cloudFixedProfile {
+        case .quality:
+            densityMul = 0.96
+            phaseG = 0.52
+            ambient = 0.54
+            baseWhite = 1.08
+            lightGain = 2.30
+            powderK = 0.62
+            edgeLight = 1.70
+            edgeFeather = 0.22
+        case .balanced:
+            densityMul = 0.98
+            phaseG = 0.50
+            ambient = 0.56
+            baseWhite = 1.10
+            lightGain = 2.15
+            powderK = 0.58
+            edgeLight = 1.55
+            edgeFeather = 0.20
+        case .performance:
+            densityMul = 1.04
+            phaseG = 0.48
+            ambient = 0.60
+            baseWhite = 1.14
+            lightGain = 2.00
+            powderK = 0.54
+            edgeLight = 1.40
+            edgeFeather = 0.18
+        }
 
         let state = CloudUniformState(
-            profile: useGoodProfile ? "good" : "current",
+            profile: cloudProfile,
             sunDir: sunDir,
             densityMul: densityMul,
             thickness: thickness,
@@ -152,7 +223,10 @@ extension FirstPersonEngine {
             edgeLight: edgeLight,
             backlight: backlight,
             edgeFeather: edgeFeather,
-            heightFade: heightFade
+            heightFade: heightFade,
+            useDitherDepth: useDitherDepth,
+            useCheapShader: useCheapShader,
+            puffsPerCluster: puffsPerCluster
         )
 
         if ProcessInfo.processInfo.environment["CLOUD_DIAG"] == "1", !CloudUniformCache.didLogProfile {
@@ -175,7 +249,10 @@ extension FirstPersonEngine {
            abs(last.edgeLight - state.edgeLight) < 0.0005,
            abs(last.backlight - state.backlight) < 0.0005,
            abs(last.edgeFeather - state.edgeFeather) < 0.0005,
-           abs(last.heightFade - state.heightFade) < 0.0005 {
+           abs(last.heightFade - state.heightFade) < 0.0005,
+           last.useDitherDepth == state.useDitherDepth,
+           last.useCheapShader == state.useCheapShader,
+           last.puffsPerCluster == state.puffsPerCluster {
             return
         }
 
@@ -191,8 +268,19 @@ extension FirstPersonEngine {
             // with depth reads disabled) avoids the tile-resolve stalls that show up as "lag" on iOS GPUs.
             // Terrain (opaque) will overwrite them later in the frame.
             node.renderingOrder = -15_000
-            mat.readsFromDepthBuffer = false
-            mat.writesToDepthBuffer = false
+            if useDitherDepth {
+                mat.readsFromDepthBuffer = true
+                mat.writesToDepthBuffer = true
+                mat.blendMode = .replace
+                mat.transparencyMode = .singleLayer
+                mat.setValue(NSNumber(value: Float(1.0)), forKey: CloudImpostorProgram.kDitherDepth)
+            } else {
+                mat.readsFromDepthBuffer = false
+                mat.writesToDepthBuffer = false
+                mat.blendMode = .alpha
+                mat.transparencyMode = .aOne
+                mat.setValue(NSNumber(value: Float(0.0)), forKey: CloudImpostorProgram.kDitherDepth)
+            }
 
             // Keep blend/dither mode as configured by CloudImpostorProgram.makeMaterial(...).
             // Forcing blended alpha here reintroduces the magenta/pink artefacts.
@@ -212,6 +300,8 @@ extension FirstPersonEngine {
             mat.setValue(NSNumber(value: lightGain), forKey: CloudImpostorProgram.kLightGain)
             uniformWrites += 1
             mat.setValue(NSNumber(value: quality), forKey: CloudImpostorProgram.kQuality)
+            uniformWrites += 1
+            mat.setValue(NSNumber(value: useCheapShader ? Float(1.0) : Float(0.0)), forKey: CloudImpostorProgram.kCheapMode)
             uniformWrites += 1
 
             mat.setValue(NSNumber(value: powderK), forKey: CloudImpostorProgram.kPowderK)

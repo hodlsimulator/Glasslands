@@ -32,6 +32,32 @@ struct ContentView: View {
     @StateObject private var vm = GameViewModel()
     @State private var engine: FirstPersonEngine?
     @State private var lastSnapshot: UIImage?
+    @State private var runHUD = FirstPersonEngine.RunHUDSnapshot(
+        banked: 0,
+        carrying: 0,
+        secondsRemaining: 240,
+        canBankNow: false,
+        runEnded: false,
+        chapterTitle: "Chapter I  First Light",
+        objectiveText: "Collect beacons from nearby ridges.",
+        bankPromptText: "Bank",
+        bankRadiusMeters: 4.0,
+        waystoneDebugText: "Waystone: missing",
+        debugFpsDisplay: 60,
+        debugFpsMin1s: 60,
+        debugLowFpsThreshold: 55,
+        debugLowFpsActive: false,
+        debugActiveToggles: "none",
+        debugCpuFrameMs: 0,
+        debugCpuMoveMs: 0,
+        debugCpuChunkMs: 0,
+        debugCpuCloudMs: 0,
+        debugCpuSkyMs: 0,
+        debugCpuSubmitMs: 0,
+        debugPerfHint: "CPU/GPU stable",
+        debugCloudLodInfo: "Cloud LOD t0 q1.00 hz60 far1.00 dither=off"
+    )
+    private let hudTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
     private func applySeed() {
         engine?.apply(recipe: vm.recipe())
@@ -51,10 +77,39 @@ struct ContentView: View {
             // HUD
             HUDOverlay(
                 seedCharm: $vm.seedCharm,
-                score: vm.score,
+                banked: runHUD.banked,
+                carrying: runHUD.carrying,
+                secondsRemaining: runHUD.secondsRemaining,
+                canBankNow: runHUD.canBankNow,
+                runEnded: runHUD.runEnded,
+                chapterTitle: runHUD.chapterTitle,
+                objectiveText: runHUD.objectiveText,
+                bankPromptText: runHUD.bankPromptText,
+                waystoneDebugText: runHUD.waystoneDebugText,
+                debugFpsDisplay: runHUD.debugFpsDisplay,
+                debugFpsMin1s: runHUD.debugFpsMin1s,
+                debugLowFpsThreshold: runHUD.debugLowFpsThreshold,
+                debugLowFpsActive: runHUD.debugLowFpsActive,
+                debugActiveToggles: runHUD.debugActiveToggles,
+                debugCpuFrameMs: runHUD.debugCpuFrameMs,
+                debugCpuMoveMs: runHUD.debugCpuMoveMs,
+                debugCpuChunkMs: runHUD.debugCpuChunkMs,
+                debugCpuCloudMs: runHUD.debugCpuCloudMs,
+                debugCpuSkyMs: runHUD.debugCpuSkyMs,
+                debugCpuSubmitMs: runHUD.debugCpuSubmitMs,
+                debugPerfHint: runHUD.debugPerfHint,
+                debugCloudLodInfo: runHUD.debugCloudLodInfo,
                 isPaused: $vm.isPaused,
                 onApplySeed: {
                     applySeed()
+                },
+                onBank: {
+                    engine?.bankNow()
+                    if let engine { runHUD = engine.runHUDSnapshot() }
+                },
+                onNewRun: {
+                    engine?.apply(recipe: vm.recipe(), force: true)
+                    if let engine { runHUD = engine.runHUDSnapshot() }
                 },
                 onSavePostcard: {
                     guard let img = engine?.snapshot() else { return }
@@ -104,6 +159,11 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(true)
             }
+        }
+        .onReceive(hudTimer) { _ in
+            guard let engine else { return }
+            runHUD = engine.runHUDSnapshot()
+            vm.score = runHUD.banked
         }
     }
 }

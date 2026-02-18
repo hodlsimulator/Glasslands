@@ -31,17 +31,27 @@ enum TerrainChunkNode {
     private static var cachedMaterial: SCNMaterial?
 
     @MainActor
-    private static var cachedMaterialKey: (tilesX: Int, tilesZ: Int)?
+    private static var cachedMaterialKey: (tilesX: Int, tilesZ: Int, simple: Bool)?
 
     @MainActor
     private static func terrainMaterial(tilesX: Int, tilesZ: Int) -> SCNMaterial {
-        if let m = cachedMaterial, let k = cachedMaterialKey, k.tilesX == tilesX, k.tilesZ == tilesZ {
+        #if DEBUG
+        let simpleShading = ProcessInfo.processInfo.environment["GL_DEBUG_DISABLE_TERRAIN_SHADING"] == "1"
+        #else
+        let simpleShading = false
+        #endif
+        if let m = cachedMaterial, let k = cachedMaterialKey, k.tilesX == tilesX, k.tilesZ == tilesZ, k.simple == simpleShading {
             return m
         }
 
         let mat = SCNMaterial()
-        mat.lightingModel = .lambert
-        mat.isLitPerPixel = true
+        if simpleShading {
+            mat.lightingModel = .constant
+            mat.isLitPerPixel = false
+        } else {
+            mat.lightingModel = .lambert
+            mat.isLitPerPixel = true
+        }
         mat.emission.contents = UIColor.black
         mat.specular.contents = UIColor.black
         mat.shininess = 0.0
@@ -67,10 +77,12 @@ enum TerrainChunkNode {
         let repeatsY = CGFloat(tilesZ) * repeatsPerTile
         mat.diffuse.contentsTransform = SCNMatrix4MakeScale(Float(repeatsX), Float(repeatsY), 1)
 
-        GroundShadowShader.applyIfNeeded(to: mat)
+        if !simpleShading {
+            GroundShadowShader.applyIfNeeded(to: mat)
+        }
 
         cachedMaterial = mat
-        cachedMaterialKey = (tilesX: tilesX, tilesZ: tilesZ)
+        cachedMaterialKey = (tilesX: tilesX, tilesZ: tilesZ, simple: simpleShading)
         return mat
     }
 

@@ -133,15 +133,9 @@ struct CloudBillboardFactory {
 
             sprite.opacity = CGFloat(max(0, min(1, p.opacity)))
 
-            if let m = plane.firstMaterial {
-                let t = p.tint ?? simd_float3(1, 1, 1)
-                m.multiply.contents = UIColor(
-                    red: CGFloat(t.x),
-                    green: CGFloat(t.y),
-                    blue: CGFloat(t.z),
-                    alpha: 1.0
-                )
-            }
+            // Material instances are shared via size-quantized cache. Do not mutate per-puff
+            // color state on the shared material, or one random puff can tint many others.
+            // Keep cloud tint neutral in shader/uniform space to avoid sporadic outliers.
 
             group.addChildNode(sprite)
         }

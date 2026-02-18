@@ -28,6 +28,9 @@ struct Scene3DView: UIViewRepresentable {
         view.isJitteringEnabled = false
         view.isOpaque = true
         view.backgroundColor = .black
+        #if DEBUG
+        view.showsStatistics = true
+        #endif
 
         // Main surface: keep EDR OFF and use 8-bit sRGB (cheaper & stabler for big translucent passes)
         if let metal = view.layer as? CAMetalLayer {

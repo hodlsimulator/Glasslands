@@ -94,11 +94,11 @@ nonisolated struct CloudBillboardLayer {
             minSepNear: 720, minSepFar: 1100, seed: &rng
         )
 
-        // Band tints (subtle atmospheric perspective).
+        // Keep far clouds near-neutral white; large desaturation here reads as "grey blobs".
         let tintNear = simd_float3(1.00, 1.00, 1.00)
-        let tintMid  = simd_float3(0.995, 0.997, 1.00)
-        let tintFar  = simd_float3(0.985, 0.990, 1.00)
-        let tintHzn  = simd_float3(0.970, 0.985, 1.00)
+        let tintMid  = simd_float3(1.00, 1.00, 1.00)
+        let tintFar  = simd_float3(0.998, 0.998, 1.00)
+        let tintHzn  = simd_float3(0.995, 0.996, 1.00)
 
         var specs: [CloudClusterSpec] = []
         specs.reserveCapacity(N)
@@ -126,11 +126,11 @@ nonisolated struct CloudBillboardLayer {
             }
         }
 
-        addBand(points: nearPts, baseY: yNear, scaleMul: 1.06, opacityMul: 0.96, tint: tintNear)
-        addBand(points: brdgPts, baseY: yMid,  scaleMul: 1.02, opacityMul: 0.95, tint: tintMid)
-        addBand(points: midPts,  baseY: yMid,  scaleMul: 1.00, opacityMul: 0.94, tint: tintMid)
-        addBand(points: farPts,  baseY: yFar,  scaleMul: 1.12, opacityMul: 0.92, tint: tintFar)
-        addBand(points: hznPts,  baseY: yHzn,  scaleMul: 1.28, opacityMul: 0.82, tint: tintHzn)
+        addBand(points: nearPts, baseY: yNear, scaleMul: 1.04, opacityMul: 0.98, tint: tintNear)
+        addBand(points: brdgPts, baseY: yMid,  scaleMul: 1.00, opacityMul: 0.97, tint: tintMid)
+        addBand(points: midPts,  baseY: yMid,  scaleMul: 0.98, opacityMul: 0.96, tint: tintMid)
+        addBand(points: farPts,  baseY: yFar,  scaleMul: 1.02, opacityMul: 0.95, tint: tintFar)
+        addBand(points: hznPts,  baseY: yHzn,  scaleMul: 1.08, opacityMul: 0.92, tint: tintHzn)
 
         return specs
     }
